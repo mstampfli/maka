@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lexer",
+    "crates/ast",
+    "crates/parser",
+    "crates/sema",
+    "crates/codegen",
+    "crates/driver",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+maka_lexer = { path = "crates/lexer" }
+maka_ast    = { path = "crates/ast" }
+maka_parser = { path = "crates/parser" }
+maka_sema   = { path = "crates/sema" }
+maka_codegen = { path = "crates/codegen" }
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
