@@ -1,0 +1,9 @@
+[package]
+name = "maka_parser"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+maka_lexer = { workspace = true }
+maka_ast = { workspace = true }
