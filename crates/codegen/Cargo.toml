@@ -1,0 +1,10 @@
+[package]
+name = "maka_codegen"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+maka_ast = { workspace = true }
+maka_sema = { workspace = true }
+maka_lexer = { workspace = true }
