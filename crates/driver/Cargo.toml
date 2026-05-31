@@ -1,0 +1,16 @@
+[package]
+name = "maka_driver"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "makac"
+path = "src/main.rs"
+
+[dependencies]
+maka_lexer = { workspace = true }
+maka_parser = { workspace = true }
+maka_ast = { workspace = true }
+maka_sema = { workspace = true }
+maka_codegen = { workspace = true }
