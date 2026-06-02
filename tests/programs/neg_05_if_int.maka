@@ -1,0 +1,7 @@
+// if condition must be bool
+unit main() {
+    int x = 1;
+    if (x) {
+        log("oops");
+    }
+}

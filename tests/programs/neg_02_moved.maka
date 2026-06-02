@@ -1,0 +1,8 @@
+// Use after move
+data Node { mut int v = 0; }
+
+unit main() {
+    alloc Node a = Node { v = 1 };
+    alloc Node b = a;
+    log(a.v);    // should error: a moved
+}

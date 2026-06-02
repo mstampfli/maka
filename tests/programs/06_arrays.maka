@@ -1,0 +1,12 @@
+// §1.4/1.5 — Static arrays and slices.
+unit main() {
+    mut [3]int arr = [10, 20, 30];
+    log(arr[0]);                       // 10
+    log(arr[2]);                       // 30
+    arr[1] = 99;
+    log(arr[1]);                       // 99
+
+    []int s = arr;                     // immutable slice from array
+    log(s[0]);                         // 10
+    log(s[2]);                         // 30
+}

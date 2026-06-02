@@ -1,0 +1,16 @@
+// §4 — References (non-null, non-reassignable). Field write through &mut struct.
+data Box {
+    mut int v = 0;
+}
+
+unit bump(&mut Box b) {
+    b.v = b.v + 1;
+}
+
+unit main() {
+    mut Box x = Box { v = 5 };
+    &Box r = &x;
+    log(r.v);            // 5
+    bump(&mut x);
+    log(x.v);            // 6
+}

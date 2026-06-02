@@ -1,0 +1,32 @@
+// §7 — Type casts: as, as?
+enum MovementState {
+    Idle,
+    Walking,
+    Running,
+}
+
+unit main() {
+    int i = 42;
+    float fv = i as float;
+    log(fv);                                 // 42
+
+    float pi = 3.75;
+    int n = pi as int;
+    log(n);                                  // 3
+
+    MovementState s = MovementState.Walking;
+    int code = s as int;
+    log(code);                               // 1
+
+    int tag_val = 2;
+    *MovementState parsed = tag_val as? MovementState;
+    if (parsed != null) {
+        log(parsed! as int);                 // 2 (= Running)
+    }
+
+    int bad = 99;
+    *MovementState p2 = bad as? MovementState;
+    if (p2 == null) {
+        log("not a movement state");
+    }
+}

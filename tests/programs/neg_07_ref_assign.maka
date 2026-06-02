@@ -1,0 +1,7 @@
+// references are not reassignable
+unit main() {
+    mut int x = 1;
+    mut int y = 2;
+    &int r = &x;
+    r = &y;
+}

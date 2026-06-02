@@ -1,0 +1,5 @@
+// alloc field forbidden (except alloc [*]T)
+data X { int v = 0; }
+data Container {
+    alloc X slot;
+}

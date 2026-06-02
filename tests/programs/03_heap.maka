@@ -1,0 +1,25 @@
+// §6 — Owning bindings via `own &T` (strict-non-null); move semantics on assign.
+data Node {
+    mut int value = 0;
+}
+
+own &Node make(int v) {
+    own &Node n = Node { value = v };
+    return n;            // ownership transferred to caller
+}
+
+unit consume(own &Node n) {
+    log(n.value);
+}
+
+unit main() {
+    own &Node a = make(42);
+    log(a.value);        // 42
+    a.value = 100;
+    log(a.value);        // 100
+
+    own &Node b = a;     // move
+    log(b.value);        // 100
+
+    consume(b);          // ownership transferred in
+}

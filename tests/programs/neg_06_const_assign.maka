@@ -1,0 +1,5 @@
+// const binding cannot be reassigned
+unit main() {
+    const int x = 1;
+    x = 2;
+}

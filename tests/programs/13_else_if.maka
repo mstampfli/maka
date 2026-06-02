@@ -1,0 +1,18 @@
+unit classify(int n) {
+    if (n < 0) {
+        log("neg");
+    } else if (n == 0) {
+        log("zero");
+    } else if (n < 10) {
+        log("small");
+    } else {
+        log("big");
+    }
+}
+
+unit main() {
+    classify(-5);
+    classify(0);
+    classify(3);
+    classify(99);
+}

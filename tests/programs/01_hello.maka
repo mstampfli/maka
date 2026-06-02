@@ -1,0 +1,4 @@
+// Hello, world. Tests: log, string literal, unit function.
+unit main() {
+    log("hello, maka");
+}

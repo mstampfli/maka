@@ -1,0 +1,6 @@
+// §13 — Heap vector
+unit main() {
+    own &[*]int v = [1, 2, 3, 4, 5];
+    log(v[0]);    // 1
+    log(v[4]);    // 5
+}

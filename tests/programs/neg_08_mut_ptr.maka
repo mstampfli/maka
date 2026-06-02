@@ -1,0 +1,4 @@
+// `mut *T` is invalid syntax
+unit main() {
+    mut *int p = null;
+}

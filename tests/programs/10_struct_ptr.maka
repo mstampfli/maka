@@ -1,0 +1,19 @@
+// §9 — Data structs with default *T = null field; pointer-field access.
+data Slot {
+    int id = 0;
+    *int target;
+}
+
+unit main() {
+    Slot s = { id = 1 };           // target defaults to null
+    if (s.target == null) {
+        log("none");
+    }
+
+    mut int t = 77;
+    Slot s2 = { id = 2, target = &mut t };
+    // Loading a `*T` field yields an unproven pointer; force a check before deref.
+    *int p = s2.target;
+    if (p == null) { return; }
+    log(p!);                       // 77
+}

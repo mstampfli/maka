@@ -1,0 +1,20 @@
+// §3 — Pointers: nullable, rebindable, unwrap, narrowing.
+
+unit main() {
+    mut int x = 42;
+    *int p = &mut x;
+    log(p!);            // 42
+    p! = 99;
+    log(x);             // 99
+
+    p = null;
+    if (p == null) {
+        log("p is null");
+    }
+
+    mut int y = 7;
+    p = &mut y;
+    if (p != null) {
+        log(p!);        // 7 — narrowed, no runtime null check
+    }
+}

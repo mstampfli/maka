@@ -1,0 +1,5 @@
+// bool as int forbidden
+unit main() {
+    bool b = true;
+    int x = b as int;
+}

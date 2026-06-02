@@ -1,0 +1,12 @@
+// §3.7 / §11.6 — Pointer null-collapse when pointee dies (runtime).
+unit main() {
+    *int outer = null;
+    {
+        mut int x = 42;
+        outer = &mut x;
+        log(outer!);          // 42
+    }
+    if (outer == null) {
+        log("collapsed to null");
+    }
+}

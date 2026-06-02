@@ -1,0 +1,6 @@
+// Non-unit return must be discarded explicitly.
+int compute() { return 42; }
+
+unit main() {
+    compute();
+}

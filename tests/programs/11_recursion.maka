@@ -1,0 +1,13 @@
+int fib(int n) {
+    if (n < 2) {
+        return n;
+    } else {
+        return fib(n - 1) + fib(n - 2);
+    }
+}
+
+unit main() {
+    log(fib(10));        // 55
+    log(fib(0));         // 0
+    log(fib(1));         // 1
+}
