@@ -1,0 +1,15 @@
+// §11.9 — conservative return union: function returns &int derived from one of its inputs.
+&int max(&int a, &int b) {
+    if (a > b) {
+        return a;
+    } else {
+        return b;
+    }
+}
+
+unit main() {
+    int p = 10;
+    int q = 25;
+    &int m = max(&p, &q);
+    log(m);    // 25
+}

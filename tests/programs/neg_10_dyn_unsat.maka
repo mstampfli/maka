@@ -1,0 +1,12 @@
+// dyn Trait must be backed by a type that satisfies it.
+data Cat { mut int meow = 1; }
+data Player { mut int hp = 0; }
+
+logic Movement {
+    unit move(&mut Player p) {}
+}
+
+unit main() {
+    mut Cat c = { meow = 1 };
+    &mut dyn Movement m = &mut c as dyn Movement;   // Cat doesn't satisfy Movement
+}

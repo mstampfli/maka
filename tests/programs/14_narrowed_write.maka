@@ -1,0 +1,9 @@
+// Pointer narrowing + writes through narrowed pointer.
+unit main() {
+    mut int a = 100;
+    *int p = &mut a;
+    if (p != null) {
+        p! = p! + 5;
+    }
+    log(a);          // 105
+}

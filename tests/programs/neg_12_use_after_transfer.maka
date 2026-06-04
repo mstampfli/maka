@@ -1,0 +1,7 @@
+// transfer invalidates the source binding (move-like).
+unit consume(int x) { log(x); }
+unit main() {
+    int b = 99;
+    consume(transfer b);
+    log(b);   // ❌ compile error: use of moved value `b`
+}

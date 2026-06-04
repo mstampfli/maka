@@ -1,0 +1,7 @@
+// Multiple log calls including different literal types.
+unit main() {
+    log("alpha");
+    log(true);
+    log(false);
+    log(3.5);
+}

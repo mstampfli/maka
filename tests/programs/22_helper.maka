@@ -1,0 +1,3 @@
+int double_it(int n) {
+    return n + n;
+}

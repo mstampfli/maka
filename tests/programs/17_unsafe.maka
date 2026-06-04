@@ -1,0 +1,8 @@
+// unsafe block — currently just permits the block syntax.
+unit main() {
+    mut int x = 7;
+    unsafe {
+        x = x + 1;
+    }
+    log(x);  // 8
+}

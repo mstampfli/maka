@@ -1,0 +1,18 @@
+data Vec2 {
+    mut int x = 0;
+    mut int y = 0;
+}
+
+data Player {
+    mut Vec2 pos = { x = 0, y = 0 };
+    mut int hp = 100;
+}
+
+unit main() {
+    mut Player p = { pos = { x = 5, y = 10 }, hp = 80 };
+    log(p.pos.x);    // 5
+    log(p.pos.y);    // 10
+    log(p.hp);       // 80
+    p.pos.x = p.pos.x + 1;
+    log(p.pos.x);    // 6
+}

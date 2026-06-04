@@ -1,0 +1,8 @@
+// *const T — nullable read-only pointer
+unit main() {
+    int x = 42;
+    *const int p = &x;
+    if (p != null) {
+        log(p!);     // 42
+    }
+}

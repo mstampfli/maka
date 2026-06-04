@@ -1,0 +1,10 @@
+// heap [*]T as struct field (allowed exception per §6.9 / §9.2)
+data Bag {
+    own &[*]int items;
+}
+
+unit main() {
+    Bag b = { items = [11, 22, 33] };
+    log(b.items[0]);    // 11
+    log(b.items[2]);    // 33
+}

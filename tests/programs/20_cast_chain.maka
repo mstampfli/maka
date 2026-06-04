@@ -1,0 +1,10 @@
+// §7.6 — cast chains
+unit main() {
+    int n = 65;
+    char c = n as char;
+    int back = c as int;
+    log(back);                    // 65
+    // chain
+    float f = (n as float) as float;
+    log(f);                       // 65
+}

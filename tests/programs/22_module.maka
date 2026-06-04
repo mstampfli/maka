@@ -1,0 +1,4 @@
+// Entry file; depends on helper.maka (see 22_module.deps).
+unit main() {
+    log(double_it(21));    // 42
+}
