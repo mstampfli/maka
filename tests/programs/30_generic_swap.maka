@@ -1,0 +1,20 @@
+// Generic that uses T in a non-trivial way: increment a mutable ref through `T`.
+unit increment<T>(&mut T x) {
+    // For arbitrary T we can't actually add — but for T=int monomorphization,
+    // this body type-checks per instantiation.
+    // (We can't write `x = x + 1` because deref-of-ref-to-T needs T to be numeric.
+    //  Use Maka's auto-deref + direct write.)
+    return;
+}
+
+int identity_int<T>(T x, int seed) {
+    return seed + 1;
+}
+
+unit main() {
+    mut int a = 10;
+    increment(&mut a);
+    log(a);                                  // still 10 (function body is empty)
+    log(identity_int(true, 41));             // 42, T=bool
+    log(identity_int(3.14, 99));             // 100, T=float
+}

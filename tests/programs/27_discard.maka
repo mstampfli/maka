@@ -1,0 +1,7 @@
+// §4.3 — explicit discard with `_`
+int compute() { return 42; }
+
+unit main() {
+    _ = compute();   // explicit discard OK
+    log(7);
+}

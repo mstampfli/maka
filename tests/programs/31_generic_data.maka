@@ -1,0 +1,15 @@
+// §9.5 — Generic data structs.
+data Pair<A, B> {
+    A first;
+    B second;
+}
+
+unit main() {
+    Pair<int, int> p = { first = 1, second = 2 };
+    log(p.first);     // 1
+    log(p.second);    // 2
+
+    Pair<int, bool> q = { first = 7, second = true };
+    log(q.first);     // 7
+    log(q.second);    // true
+}

@@ -1,0 +1,20 @@
+// §15.2 — Tree construction; whole tree auto-frees recursively when root drops.
+data Tree {
+    mut int value = 0;
+    mut own *Tree left = null;
+    mut own *Tree right = null;
+}
+
+int sum_tree(*Tree t) {
+    if (t == null) { return 0; }
+    return t!.value + sum_tree(t!.left) + sum_tree(t!.right);
+}
+
+unit main() {
+    own *Tree t = alloc Tree{
+        value = 1,
+        left  = alloc Tree{ value = 2, left = null, right = null },
+        right = alloc Tree{ value = 3, left = null, right = null },
+    };
+    log(sum_tree(t));    // 6
+}

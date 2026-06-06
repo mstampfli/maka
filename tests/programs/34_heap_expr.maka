@@ -1,0 +1,16 @@
+// `alloc value` produces an owning pointer; auto-freed at scope exit.
+data Node { mut int value = 0; }
+
+unit main() {
+    own *int p = alloc 5;
+    if (p == null) { return; }
+    log(p!);                         // 5
+    p! = 99;
+    log(p!);                         // 99
+
+    own *Node n = alloc Node{ value = 42 };
+    if (n == null) { return; }
+    log(n!.value);                   // 42
+    n!.value = 100;
+    log(n!.value);                   // 100
+}

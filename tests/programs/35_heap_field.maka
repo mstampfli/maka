@@ -1,0 +1,17 @@
+// own *T fields auto-free when their containing struct drops.
+data Container {
+    own *int x;
+    own *int y;
+}
+
+unit main() {
+    Container c = { x = alloc 42, y = alloc 100 };
+    // Loads of fields can't be deref'd without binding + guarding.
+    own *int px = c.x;  if (px == null) { return; }
+    own *int py = c.y;  if (py == null) { return; }
+    log(px!);          // 42
+    log(py!);          // 100
+    px! = 999;
+    log(px!);          // 999
+    // No manual free needed — auto-freed at scope/drop.
+}

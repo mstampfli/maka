@@ -1,0 +1,21 @@
+// §20 — Struct embedding with field promotion.
+data Entity {
+    mut int hp = 100;
+    mut int armor = 0;
+}
+
+data Enemy {
+    embed Entity e;
+    mut int aggro = 0;
+}
+
+unit main() {
+    mut Enemy m = { e = { hp = 50, armor = 3 }, aggro = 1 };
+    log(m.hp);         // 50 (promoted from m.e.hp)
+    log(m.armor);      // 3  (promoted)
+    log(m.aggro);      // 1  (direct)
+
+    m.hp = m.hp - 10;
+    log(m.hp);         // 40
+    log(m.e.hp);       // 40 (same storage)
+}

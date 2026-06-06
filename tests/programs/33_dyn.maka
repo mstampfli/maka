@@ -1,0 +1,25 @@
+// §11 — dyn Trait fat pointers.
+data Player { mut int hp = 100; }
+data Zombie { mut int decay = 1; }
+
+logic Movement {
+    unit move(&mut Player p) {
+        log("player");
+        p.hp = p.hp - 1;
+    }
+    unit move(&mut Zombie z) {
+        log("zombie");
+        z.decay = z.decay + 1;
+    }
+}
+
+unit main() {
+    mut Player p = { hp = 10 };
+    mut Zombie z = { decay = 0 };
+
+    &mut dyn Movement m = &mut p as dyn Movement;
+    Movement.move(&mut m);          // "player"
+
+    &mut dyn Movement m2 = &mut z as dyn Movement;
+    Movement.move(&mut m2);         // "zombie"
+}

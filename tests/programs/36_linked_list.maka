@@ -1,0 +1,22 @@
+// §15.1 — Linked list with owning next pointers; whole list auto-frees recursively.
+data Node {
+    mut int value = 0;
+    mut own *Node next = null;
+}
+
+unit main() {
+    own *Node third = alloc Node{ value = 3, next = null };
+    own *Node second = alloc Node{ value = 2, next = null };
+    if (second == null || third == null) { return; }
+    second!.next = third;
+    own *Node head = alloc Node{ value = 1, next = null };
+    if (head == null) { return; }
+    head!.next = second;
+
+    // Traverse via a non-owning view; the owner stays `head`.
+    *Node current = head;
+    while (current != null) {
+        log(current!.value);
+        current = current!.next;
+    }
+}

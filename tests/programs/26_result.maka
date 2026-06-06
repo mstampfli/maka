@@ -1,0 +1,28 @@
+// §13 — Errors via enum tag + data struct (the v1.2 idiom; no `?T`).
+enum FileError { Ok, NotFound, Denied }
+
+data FileResult {
+    FileError err;
+    int value;
+}
+
+FileResult read_file(int id) {
+    if (id == 1) {
+        return { err = FileError.Ok, value = 42 };
+    } else if (id == 2) {
+        return { err = FileError.NotFound, value = 0 };
+    } else {
+        return { err = FileError.Denied, value = 0 };
+    }
+}
+
+unit main() {
+    FileResult r1 = read_file(1);
+    if (r1.err as int == FileError.Ok as int) {
+        log(r1.value);          // 42
+    }
+    FileResult r2 = read_file(2);
+    log(r2.err as int);         // 1 (NotFound)
+    FileResult r3 = read_file(9);
+    log(r3.err as int);         // 2 (Denied)
+}

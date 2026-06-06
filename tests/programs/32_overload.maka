@@ -1,0 +1,28 @@
+// §10.3 — Overloading inside a logic; concrete beats generic.
+data Player {
+    mut int hp = 100;
+}
+data Enemy {
+    mut int aggro = 0;
+}
+
+logic Movement {
+    unit move<T>(&mut T x) {
+        log("generic move");
+    }
+    unit move(&mut Player p) {
+        log("player move");
+        p.hp = p.hp - 1;
+    }
+    unit move(&mut Enemy e) {
+        log("enemy move");
+    }
+}
+
+unit main() {
+    mut Player p = { hp = 5 };
+    mut Enemy e = { aggro = 7 };
+    Movement.move(&mut p);
+    log(p.hp);             // 4
+    Movement.move(&mut e); // enemy move
+}
