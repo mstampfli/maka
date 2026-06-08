@@ -1,0 +1,16 @@
+// D1 — Tagged enums: construction succeeds, layout chosen by compiler.
+enum Shape {
+    Circle { float radius },
+    Rect { float w, float h },
+    Empty,
+}
+
+unit main() {
+    Shape c = Shape.Circle{ radius = 5.0 };
+    Shape r = Shape.Rect{ w = 3.0, h = 4.0 };
+    Shape e = Shape.Empty;
+    _ = c;
+    _ = r;
+    _ = e;
+    log("constructed");
+}

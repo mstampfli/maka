@@ -1,0 +1,10 @@
+// D10 — postfix call syntax: x.foo(args) → foo(x, args). No auto-borrow.
+int double_it(int n) { return n + n; }
+int add(int a, int b) { return a + b; }
+
+unit main() {
+    int x = 5;
+    log(x.double_it());     // → double_it(x) = 10
+    log(x.add(3));          // → add(x, 3) = 8
+    log(x.add(3).double_it()); // → double_it(add(x, 3)) = 16
+}

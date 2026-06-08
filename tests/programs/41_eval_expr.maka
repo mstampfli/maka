@@ -1,0 +1,26 @@
+// §12.6 — Recursive enum traversal via match.  Owning children auto-free.
+enum Expr {
+    IntLit { int value },
+    Add { own *Expr left, own *Expr right },
+    Mul { own *Expr left, own *Expr right },
+}
+
+int eval(*Expr e) {
+    if (e == null) { return 0; }
+    return match (e!) {
+        IntLit{value} value,
+        Add{left, right} eval(left) + eval(right),
+        Mul{left, right} eval(left) * eval(right),
+    };
+}
+
+unit main() {
+    own *Expr e = alloc Expr.Mul{
+        left = alloc Expr.Add{
+            left = alloc Expr.IntLit{ value = 1 },
+            right = alloc Expr.IntLit{ value = 2 },
+        },
+        right = alloc Expr.IntLit{ value = 3 },
+    };
+    log(eval(e));   // 9
+}

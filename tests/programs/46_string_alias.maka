@@ -1,0 +1,5 @@
+// D5 — `string` is a type alias.
+unit main() {
+    string s = "hello\x21";    // ! is 0x21
+    log(s);                     // hello!
+}

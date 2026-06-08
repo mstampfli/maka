@@ -1,0 +1,16 @@
+// D2 — match on a C-style enum, used as a return value via explicit return.
+enum Color { Red, Green, Blue }
+
+int code(Color c) {
+    return match (c) {
+        Red 100,
+        Green 200,
+        Blue 300,
+    };
+}
+
+unit main() {
+    log(code(Color.Red));     // 100
+    log(code(Color.Green));   // 200
+    log(code(Color.Blue));    // 300
+}

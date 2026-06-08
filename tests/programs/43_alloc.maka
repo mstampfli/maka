@@ -1,0 +1,6 @@
+// `alloc value` produces an owning pointer; auto-freed at scope exit.
+unit main() {
+    own *int p = alloc 7;
+    if (p == null) { return; }
+    log(p!);   // 7
+}

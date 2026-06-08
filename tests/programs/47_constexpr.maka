@@ -1,0 +1,7 @@
+// constexpr — compile-time constant, used as const inside a function.
+unit main() {
+    constexpr int BUFFER_SIZE = 1024;
+    constexpr int CACHE_LINE = 64;
+    log(BUFFER_SIZE);     // 1024
+    log(CACHE_LINE);      // 64
+}

@@ -1,0 +1,20 @@
+// D2 — Pattern matching on tagged enums with payloads.
+enum Shape {
+    Circle { float radius },
+    Rect { float w, float h },
+    Empty,
+}
+
+float area(Shape s) {
+    return match (s) {
+        Circle{radius} radius * radius * 3.14,
+        Rect{w, h} w * h,
+        Empty 0.0,
+    };
+}
+
+unit main() {
+    log(area(Shape.Circle{ radius = 2.0 }));    // 12.56
+    log(area(Shape.Rect{ w = 3.0, h = 4.0 }));  // 12
+    log(area(Shape.Empty));                      // 0
+}

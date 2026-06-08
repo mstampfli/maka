@@ -1,0 +1,15 @@
+// D8 — function pointers.
+int add(int a, int b) { return a + b; }
+int sub(int a, int b) { return a - b; }
+
+int apply(int(int, int) op, int x, int y) {
+    return op(x, y);
+}
+
+unit main() {
+    int(int, int) f = add;
+    log(f(3, 4));               // 7
+
+    log(apply(add, 10, 5));     // 15
+    log(apply(sub, 10, 5));     // 5
+}

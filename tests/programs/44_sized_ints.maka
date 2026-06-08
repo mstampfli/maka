@@ -1,0 +1,13 @@
+// D7 — sized numeric types (currently aliases to int/float in codegen).
+unit main() {
+    i32 a = 42i32;
+    u8 b = 65u8;            // 'A'
+    i64 c = 1_000_000;
+    f32 f = 1.5f32;
+    f64 g = 3.14;
+    log(a);   // 42
+    log(b);   // A — u8 is the byte type (same as char)
+    log(c);   // 1000000
+    log(f);   // 1.5
+    log(g);   // 3.14
+}

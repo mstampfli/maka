@@ -1,0 +1,9 @@
+// D6 — inline functions + propagate (syntactic surface).
+// Note: full caller-frame inlining is not yet implemented; this test only verifies parse + codegen.
+inline int doubled(int n) {
+    return n + n;
+}
+
+unit main() {
+    log(doubled(21));     // 42
+}

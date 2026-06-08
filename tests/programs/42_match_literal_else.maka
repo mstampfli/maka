@@ -1,0 +1,16 @@
+// D2 — Literal patterns + else + guards.
+int classify(int n) {
+    return match (n) {
+        0 1000,
+        1 1001,
+        x if x < 0 999,
+        else 9999,
+    };
+}
+
+unit main() {
+    log(classify(0));    // 1000
+    log(classify(1));    // 1001
+    log(classify(-3));   // 999
+    log(classify(42));   // 9999
+}

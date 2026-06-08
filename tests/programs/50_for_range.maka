@@ -1,0 +1,23 @@
+// D4 — for-in over int ranges.
+unit main() {
+    mut int sum = 0;
+    for (int i in 1..5) {
+        sum = sum + i;
+    }
+    log(sum);    // 1+2+3+4 = 10
+
+    mut int total = 0;
+    for (int i in 1..=5) {
+        total = total + i;
+    }
+    log(total);  // 1+2+3+4+5 = 15
+
+    // break / continue
+    mut int n = 0;
+    for (int i in 0..10) {
+        if (i == 3) { continue; }
+        if (i == 7) { break; }
+        n = n + 1;
+    }
+    log(n);      // skips i==3, breaks at i==7 → counts 0,1,2,4,5,6 = 6
+}
