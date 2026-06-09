@@ -1,0 +1,17 @@
+// §10 — Logic blocks as namespaces.
+logic Math {
+    int square(int x) { return x * x; }
+    int cube(int x) { return x * x * x; }
+}
+
+logic Greet {
+    unit hello() { log("hi from greet"); }
+}
+
+unit main() {
+    int s = Math.square(5);
+    log(s);                  // 25
+    int c = Math.cube(3);
+    log(c);                  // 27
+    Greet.hello();           // hi from greet
+}
