@@ -1,0 +1,38 @@
+// Operator overloading via logic dispatch.
+data Vec2 {
+    int x;
+    int y;
+}
+
+logic Add {
+    Vec2 add(Vec2 a, Vec2 b) {
+        return Vec2 { x = a.x + b.x, y = a.y + b.y };
+    }
+}
+
+logic Mul {
+    Vec2 mul(Vec2 a, int k) {
+        return Vec2 { x = a.x * k, y = a.y * k };
+    }
+}
+
+logic Eq {
+    bool eq(Vec2 a, Vec2 b) {
+        return (a.x == b.x) && (a.y == b.y);
+    }
+}
+
+unit main() {
+    Vec2 a = Vec2 { x = 1, y = 2 };
+    Vec2 b = Vec2 { x = 10, y = 20 };
+    Vec2 c = a + b;            // operator → Add.add(a, b)
+    log(c.x);                  // 11
+    log(c.y);                  // 22
+
+    Vec2 d = a * 3;            // operator → Mul.mul(a, 3)
+    log(d.x);                  // 3
+    log(d.y);                  // 6
+
+    if (a == Vec2 { x = 1, y = 2 }) { log("equal"); }   // → Eq.eq
+    if (a == b) { log("nope"); } else { log("differs"); }
+}

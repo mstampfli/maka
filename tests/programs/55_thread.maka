@@ -1,0 +1,14 @@
+// D11 — multi-threaded counter via pthread + atomic.
+extern int maka_atomic_fetch_add_i64(&mut int p, int delta);
+extern int maka_atomic_load_i64(&int p);
+extern *int maka_thread_spawn_counter(&mut int counter, int iters);
+extern unit maka_thread_join(*int handle);
+
+unit main() {
+    mut int counter = 0;
+    *int t1 = maka_thread_spawn_counter(&mut counter, 1000);
+    *int t2 = maka_thread_spawn_counter(&mut counter, 1000);
+    maka_thread_join(t1);
+    maka_thread_join(t2);
+    log(maka_atomic_load_i64(&counter));   // 2000
+}

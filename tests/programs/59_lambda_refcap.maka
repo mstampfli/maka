@@ -1,0 +1,11 @@
+// By-reference lambda captures (`[&mut name]`): mutations propagate to the original.
+unit main() {
+    mut int counter = 0;
+    int(int) bump = int(int by) [&mut counter] {
+        counter = counter + by;
+        return counter;
+    };
+    log(bump(5));   // 5
+    log(bump(3));   // 8
+    log(counter);   // 8 — original mutated through the mut-ref capture
+}

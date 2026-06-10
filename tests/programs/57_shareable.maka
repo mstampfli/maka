@@ -1,0 +1,22 @@
+// D11 — share/transfer semantics. Primitives are Shareable; pointers to mutable data are not.
+data Counter { mut int n = 0; }
+
+gate unit consume(int x) {
+    log(x);
+}
+
+unit main() {
+    int a = 10;
+    consume(share a);     // share OK: int is Shareable
+
+    Counter c = { n = 5 };
+    // share c            // would error: Counter (which has mut field) — but auto-derive allows since field type int is shareable
+    consume(share c.n);   // share an int: OK
+    log(c.n);             // 5
+
+    // transfer: invalidate source.
+    int b = 99;
+    consume(transfer b);  // moves b
+    // log(b);            // ❌ would error: b is invalidated (we skip the actual use)
+    log(7);
+}

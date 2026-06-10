@@ -1,0 +1,33 @@
+// D11 — concurrency surface: atomics, fence, transfer/share, thread_local keywords.
+extern int maka_atomic_load_i64(&int p);
+extern unit maka_atomic_store_i64(&mut int p, int v);
+extern int maka_atomic_fetch_add_i64(&mut int p, int delta);
+extern unit maka_fence(int ord);
+
+enum Ordering {
+    Relaxed,
+    Acquire,
+    Release,
+    AcqRel,
+    SeqCst,
+}
+
+unit main() {
+    thread_local mut int counter = 0;       // thread_local accepted as a modifier
+    int prev = maka_atomic_fetch_add_i64(&mut counter, 5);
+    log(prev);                                // 0
+    log(maka_atomic_load_i64(&counter));      // 5
+    maka_atomic_store_i64(&mut counter, 42);
+    log(maka_atomic_load_i64(&counter));      // 42
+
+    maka_fence(Ordering.SeqCst as int);
+    // Wall keywords at call sites:
+    int x = 10;
+    consume(share x);   // share is OK — int is Shareable, aliasing kept
+    log(x);             // 10
+    int y = 99;
+    consume(transfer y);  // y is invalidated after this
+    log(7);
+}
+
+gate unit consume(int v) { _ = v; }

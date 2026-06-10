@@ -1,0 +1,13 @@
+// D5: char is u8 (a byte).
+unit main() {
+    char a = 'A';
+    char b = 'B';
+    u8  c = 0x43u8 as u8;        // same as 'C'
+    log(a);                       // A
+    log(b);                       // B
+    log(c);                       // C
+
+    // u8 and char are the same type now.
+    char d = c;
+    log(d);                       // C
+}

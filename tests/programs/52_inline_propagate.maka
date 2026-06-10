@@ -1,0 +1,17 @@
+// D6 — true inline expansion with `propagate` exiting the caller's frame.
+inline int try_compute(int x) {
+    if (x < 0) {
+        propagate -1;        // makes the OUTER function return -1
+    }
+    return x + 100;          // normal return: yields the call-site value
+}
+
+int outer(int x) {
+    int v = try_compute(x);
+    return v + 1000;
+}
+
+unit main() {
+    log(outer(5));    // 1105: x=5 → return 105 → outer returns 1105
+    log(outer(-1));   // -1: propagate fires inside try_compute, outer returns -1
+}

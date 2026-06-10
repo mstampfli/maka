@@ -1,0 +1,17 @@
+// Lambdas with captures — closures.
+int apply(int(int) f, int x) {
+    return f(x);
+}
+
+unit main() {
+    int base = 100;
+    int(int) adder = int(int n) [base] n + base;
+    log(adder(5));                   // 105
+
+    int factor = 3;
+    int(int) mul = int(int n) [factor] n * factor;
+    log(mul(7));                     // 21
+
+    // Use a capturing lambda where a function pointer is expected.
+    log(apply(int(int n) [base] n + base, 42));   // 142
+}

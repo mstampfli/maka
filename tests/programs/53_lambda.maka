@@ -1,0 +1,14 @@
+// D3 — lambdas (no captures): lower to function pointers.
+int apply(int(int) f, int x) {
+    return f(x);
+}
+
+unit main() {
+    int(int) doubler = int(int n) n + n;
+    log(doubler(7));                   // 14
+
+    int(int) sq = int(int n) { return n * n; };
+    log(sq(5));                        // 25
+
+    log(apply(int(int n) n + 1, 9));   // 10
+}
