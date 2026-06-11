@@ -1,0 +1,17 @@
+// `where Trait<T>` is now enforced — `T` must have an impl in `logic Trait { ... }`.
+data Color { int rgb; }
+
+logic Drawable {
+    unit draw(&Color self) { log(self.rgb); }
+}
+
+// Generic function constrained to Drawable types.
+unit render<T>(&T x) where Drawable<T> {
+    // body intentionally empty; the bound check happens at instantiation.
+}
+
+unit main() {
+    Color c = { rgb = 255 };
+    render(&c);    // Color implements Drawable — OK
+    log(0);
+}
