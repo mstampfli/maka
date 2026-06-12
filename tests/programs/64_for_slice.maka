@@ -1,0 +1,26 @@
+// D4 — for-in over slices and arrays.
+unit main() {
+    mut [4]int arr = [10, 20, 30, 40];
+    []int s = arr;
+
+    mut int sum = 0;
+    for (int x in s) {
+        sum = sum + x;
+    }
+    log(sum);    // 100
+
+    mut int prod = 1;
+    for (int x in arr) {
+        prod = prod * x;
+    }
+    log(prod);   // 10*20*30*40 = 240000
+
+    // break/continue inside for-each
+    mut int hit = 0;
+    for (int x in s) {
+        if (x == 20) { continue; }
+        if (x == 40) { break; }
+        hit = hit + x;
+    }
+    log(hit);    // 10 + 30 = 40
+}

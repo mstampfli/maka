@@ -1,0 +1,14 @@
+// D11 — Mutex via pthread, exposed through extern decls.
+extern *unit maka_mutex_new();
+extern unit maka_mutex_lock(*unit m);
+extern unit maka_mutex_unlock(*unit m);
+extern unit maka_mutex_destroy(*unit m);
+
+unit main() {
+    *unit mu = maka_mutex_new();
+    maka_mutex_lock(mu);
+    log("locked");
+    maka_mutex_unlock(mu);
+    log("unlocked");
+    maka_mutex_destroy(mu);
+}

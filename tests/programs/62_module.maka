@@ -1,0 +1,10 @@
+module demo.main;
+
+import std.io;
+import std.prelude.{ log, panic };
+
+pub int double_it(int n) { return n + n; }
+
+pub unit main() {
+    log(double_it(21));    // 42
+}

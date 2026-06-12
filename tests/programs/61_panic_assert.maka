@@ -1,0 +1,16 @@
+// D6 — panic + assert.
+inline unit assert(bool cond, string msg) {
+    if (!cond) {
+        panic(msg);
+    }
+}
+
+int safe_div(int a, int b) {
+    assert(b != 0, "division by zero");
+    return a / b;
+}
+
+unit main() {
+    log(safe_div(10, 2));   // 5
+    log(safe_div(20, 4));   // 5
+}

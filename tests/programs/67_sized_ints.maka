@@ -1,0 +1,22 @@
+// D7 — sized integer types are distinct; explicit `as` to mix with `int`.
+unit main() {
+    i32 a = 10;
+    i64 c = 1_000_000;
+    u32 u = 7;
+
+    // Same-type arithmetic stays in the same type.
+    i32 a2 = a + 5;
+    log(a2 as int);          // 15
+
+    // Mixing sized types with int requires an explicit cast.
+    int sum = (a as int) + (c as int);
+    log(sum);                // 1000010
+
+    // Cast between two sized types.
+    i64 widened = a as i64;
+    log(widened as int);     // 10
+
+    // Unsigned arithmetic works in u32.
+    u32 u2 = u * 3;
+    log(u2 as int);          // 21
+}

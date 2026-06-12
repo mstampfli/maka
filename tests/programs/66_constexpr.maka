@@ -1,0 +1,15 @@
+// Module-scope constexpr names usable in array sizes.
+constexpr int N = 4;
+constexpr int M = N * 2;
+constexpr int P = M + 1;
+
+unit main() {
+    [N]int xs = [10, 20, 30, 40];
+    [M]int ys = [1, 2, 3, 4, 5, 6, 7, 8];
+    mut int sum = 0;
+    for (int i in 0..N) { sum = sum + xs[i]; }
+    log(sum);              // 100
+    log(ys[7]);            // 8
+    [P]int zs = [1,1,1,1,1,1,1,1,1];
+    log(zs[8]);            // 1 — size is M+1 = 9
+}
