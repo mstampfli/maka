@@ -1,0 +1,6 @@
+// Helper module — provides `twice` (pub) and `secret` (private).
+module helper;
+
+pub int twice(int n) { return n + n; }
+
+int secret(int n) { return n * 7; }

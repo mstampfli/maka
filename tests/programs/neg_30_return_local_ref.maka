@@ -1,0 +1,6 @@
+// Returning a reference to a function-local would dangle in the caller.
+&mut int leak() {
+    mut int local = 42;
+    return &mut local;   // ❌ local dies when this function returns
+}
+unit main() { _ = leak(); }

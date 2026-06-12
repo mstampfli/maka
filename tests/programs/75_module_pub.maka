@@ -1,0 +1,9 @@
+// Multi-file module test: this is the main module, depending on a helper module
+// that exposes a `pub` function.  The non-pub helper is intentionally NOT used.
+module main;
+
+import helper.twice;
+
+pub unit main() {
+    log(twice(21));   // imported from `helper`
+}
