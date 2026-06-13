@@ -1,0 +1,5 @@
+// `alloc value` must land in an owning slot — assigning to a plain `*T` is rejected.
+unit main() {
+    *int p = alloc 42;   // ❌ alloc into non-owning *T
+    log(p!);
+}
