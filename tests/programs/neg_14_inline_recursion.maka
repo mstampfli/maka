@@ -1,0 +1,6 @@
+// inline functions cannot recurse.
+inline int rec(int n) {
+    if (n <= 0) { return 0; }
+    return rec(n - 1) + 1;    // ❌ recursive inline call
+}
+unit main() { _ = rec(3); }

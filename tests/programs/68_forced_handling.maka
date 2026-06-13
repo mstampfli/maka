@@ -1,0 +1,26 @@
+// Forced-handling rule (D8 amendment): *T deref requires lifetime proof of non-null.
+// This test exercises every accepted narrowing path.
+unit main() {
+    // 1. alloc T(...) result is statically non-null — no guard needed.
+    own *int a = alloc 5;
+    if (a == null) { return; }
+    log(a!);                        // 5
+
+    // 2. if (p != null) { ... } narrows inside the body.
+    *int b = a;
+    if (b != null) {
+        log(b!);                    // 5
+    }
+
+    // 3. if (p == null) { return; } narrows the rest of the block.
+    *int c = a;
+    if (c == null) { return; }
+    log(c!);                        // 5
+
+    // 4. while (p != null) { ... } narrows inside the body.
+    *int d = a;
+    while (d != null) {
+        log(d!);                    // 5
+        d = null;                   // exits the loop
+    }
+}

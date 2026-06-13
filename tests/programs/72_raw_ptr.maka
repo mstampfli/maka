@@ -1,0 +1,38 @@
+// `raw *T` — pointer of unknown provenance.  Storage is safe; observation
+// (deref / field / index / null-narrowing) requires `unsafe { }`.
+
+data WindowCfg {
+    raw *char title;
+    i32 width;
+    i32 height;
+}
+
+// The cblock comes *after* the data decl so it sees Maka's emitted typedef.
+cblock "
+static WindowCfg get_config(void) {
+    WindowCfg c = { (char*)\"hello\", 640, 480 };
+    return c;
+}
+";
+
+extern WindowCfg get_config();
+
+unit main() {
+    WindowCfg cfg = get_config();
+    log(cfg.width as int);        // 640  — value field, no unsafe needed
+    log(cfg.height as int);       // 480
+
+    // Storing the raw pointer in another raw *T local is safe.
+    raw *char t = cfg.title;
+
+    // Comparing / branching: still requires unsafe.  The user is reading
+    // a value whose runtime contents Maka cannot vouch for.
+    unsafe {
+        if (t != null) {
+            // Read the first character through the raw pointer.  Deref is
+            // gated by `unsafe`; the user vouches the address is valid.
+            char first = t!;
+            log(first);            // h
+        }
+    }
+}

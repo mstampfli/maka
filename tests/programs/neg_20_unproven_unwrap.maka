@@ -1,0 +1,5 @@
+// Unproven `!` is rejected — the user must guard the null case explicitly.
+unit main() {
+    *int p = null;
+    log(p!);    // ❌ no proof p is non-null
+}

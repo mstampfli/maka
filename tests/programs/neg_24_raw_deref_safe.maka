@@ -1,0 +1,9 @@
+// Dereferencing a `raw *T` outside `unsafe { }` is a compile error.
+data Cfg { raw *char title; }
+
+unit main() {
+    Cfg c = { title = null };
+    raw *char t = c.title;
+    char first = t!;        // ❌ deref of raw *T requires unsafe
+    log(first);
+}

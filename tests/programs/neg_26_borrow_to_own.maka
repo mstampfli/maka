@@ -1,0 +1,9 @@
+// Borrowed `*T` cannot be assigned to an owning slot.
+data Box { int n; }
+unit main() {
+    mut int x = 5;
+    *int p = &mut x;
+    own *int a = p;     // ❌ — `*T` doesn't carry ownership
+    if (a == null) { return; }
+    log(a!);
+}

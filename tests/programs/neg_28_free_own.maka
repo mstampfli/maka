@@ -1,0 +1,6 @@
+// free() on owning types would double-free with auto-free at scope exit.
+unit main() {
+    own *int p = alloc 42;
+    if (p == null) { return; }
+    free(p);    // ❌ double-free vs auto-free
+}

@@ -1,0 +1,6 @@
+// Loading a *T struct field gives a fresh unproven pointer — must guard.
+data Slot { *int target; }
+unit main() {
+    Slot s = { target = alloc 1 };
+    log(s.target!);  // ❌ field load is not narrowed; bind a local and guard first
+}

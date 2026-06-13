@@ -1,0 +1,5 @@
+// transfer/share are only legal as direct call arguments.
+unit main() {
+    int x = 1;
+    _ = share x;   // ❌ not a call argument position
+}

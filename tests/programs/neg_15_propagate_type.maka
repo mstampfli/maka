@@ -1,0 +1,11 @@
+// propagate value type must match the caller's return type.
+inline int try_get(int x) {
+    if (x < 0) {
+        propagate "oops";   // ❌ "oops" is []u8, caller returns int
+    }
+    return x;
+}
+int caller() {
+    return try_get(-1);
+}
+unit main() { _ = caller(); }

@@ -1,0 +1,7 @@
+// Synthesizing a pointer from an integer is rejected in safe code.
+unit main() {
+    usize addr = 4096;
+    *int p = addr as *int;     // ❌ unsafe-only
+    if (p == null) { return; }
+    log(p!);
+}

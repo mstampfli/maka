@@ -1,0 +1,7 @@
+// A *T parameter is not narrowed on entry — the function body must guard.
+int read(*int p) {
+    return p!;  // ❌ no proof; needs `if (p == null) { return 0; }` first
+}
+unit main() {
+    log(read(alloc 7));
+}

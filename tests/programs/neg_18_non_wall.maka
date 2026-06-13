@@ -1,0 +1,6 @@
+// `transfer`/`share` need the callee to be `gate`-marked.
+unit consume(int v) { _ = v; }
+unit main() {
+    int x = 1;
+    consume(share x);   // ❌ consume is not a gate
+}

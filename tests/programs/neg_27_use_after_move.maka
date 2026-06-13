@@ -1,0 +1,7 @@
+// Move semantics: own *T transferred to another binding invalidates the source.
+data Box { int n; }
+unit main() {
+    own *Box a = alloc Box { n = 1 };
+    own *Box b = a;
+    log(a!.n);          // ❌ — use of moved value
+}

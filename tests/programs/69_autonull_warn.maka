@@ -1,0 +1,79 @@
+// Flow-sensitive auto-null warning: triggers when an auto-nulled `*T` is read
+// without being re-assigned to a known-non-null value on every code path.
+// Scenarios A and C should each produce a warning on stderr; B, D, E silent.
+gate unit sink(*int p) { _ = p; }
+
+unit main() {
+    mut int alt1 = 99;
+    mut int alt2 = 11;
+
+    // === Scenario A — warn expected ===
+    *int a = null;
+    {
+        mut int xa = 5;
+        a = &mut xa;
+    }                     // a auto-nulled
+    sink(a);              // <-- warn
+
+    // === Scenario B — no warn (deterministic re-set) ===
+    *int b = null;
+    {
+        mut int xb = 5;
+        b = &mut xb;
+    }                     // b auto-nulled
+    b = &mut alt1;         // re-set on the only path
+    sink(b);              // no warn
+
+    // === Scenario C — warn (only one branch re-sets) ===
+    *int c = null;
+    {
+        mut int xc = 5;
+        c = &mut xc;
+    }                     // c auto-nulled
+    int picker = 1;
+    if (picker == 1) {
+        c = &mut alt1;     // re-set on this path only
+    }                     // join: auto_nulled stays true
+    sink(c);              // <-- warn
+
+    // === Scenario D — no warn (both branches re-set) ===
+    *int d = null;
+    {
+        mut int xd = 5;
+        d = &mut xd;
+    }                     // d auto-nulled
+    if (picker == 1) {
+        d = &mut alt1;
+    } else {
+        d = &mut alt2;
+    }                     // join: both re-set → auto_nulled false
+    sink(d);              // no warn
+
+    // === Scenario E — null-check itself does NOT warn ===
+    *int e = null;
+    {
+        mut int xe = 5;
+        e = &mut xe;
+    }                     // e auto-nulled
+    if (e == null) { log("e was nulled"); }   // comparison: suppressed
+
+    // === Scenario F — warn fires INSIDE a guard if not re-assigned ===
+    *int f = null;
+    {
+        mut int xf = 7;
+        f = &mut xf;
+    }                     // f auto-nulled
+    if (f != null) {      // narrowing OK, but auto_nulled still set...
+        sink(f);          // <-- warn (gated use of an auto-nulled value)
+    }
+
+    // === Scenario G — explicit user re-assign silences even non-proving ones ===
+    *int g = null;
+    {
+        mut int xg = 9;
+        g = &mut xg;
+    }                     // g auto-nulled
+    g = null;             // user touched it explicitly — auto_nulled cleared
+    if (g != null) { sink(g); }   // no warn (user re-assigned, even to null)
+    log(0);
+}

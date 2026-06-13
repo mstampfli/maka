@@ -1,0 +1,5 @@
+// Returning a capturing lambda by value would dangle — require `alloc`.
+int(int) make_adder(int n) {
+    return int(int x) [n] { return x + n; };
+}
+unit main() { _ = make_adder(3); }

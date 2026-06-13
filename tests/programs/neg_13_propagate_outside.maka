@@ -1,0 +1,6 @@
+// propagate outside an inline function is illegal.
+int foo() {
+    propagate 42;     // ❌ not inside inline
+    return 0;
+}
+unit main() { _ = foo(); }

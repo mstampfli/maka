@@ -1,0 +1,10 @@
+// Field access on a `raw *T` (without `!`) is also rejected; the diagnostic
+// directs the user to `unsafe { ... }` first.
+data Inner { int n; }
+data Outer { raw *Inner ptr; }
+
+unit main() {
+    Outer o = { ptr = null };
+    int n = o.ptr.n;        // ❌ field access through raw *T needs unsafe + `!`
+    log(n);
+}

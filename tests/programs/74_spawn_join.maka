@@ -1,0 +1,11 @@
+// Built-in `spawn(closure)` and `join(*Thread)`.
+// Closures with no captures need no `alloc`; capturing ones do.
+// We join each thread before spawning the next so the output is deterministic.
+unit main() {
+    log(0);
+    *Thread t1 = spawn(unit() { log(100); });
+    join(t1);
+    *Thread t2 = spawn(unit() { log(200); });
+    join(t2);
+    log(300);
+}

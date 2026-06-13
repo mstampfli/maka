@@ -1,0 +1,19 @@
+// C interop: cinclude pulls system headers, cblock pastes verbatim C,
+// variadic extern hooks printf, -lm links libm at compile-time.
+
+cinclude "math.h";
+cinclude "stdio.h";
+
+cblock "static double sq(double x) { return x * x; }";
+
+extern float sqrt(float x);
+extern float sq(float x);
+extern i32 printf(string fmt, ...);
+
+unit main() {
+    float r = sqrt(2.0);
+    _ = printf("sqrt(2)=%.4f\n", r);
+    _ = printf("sq(7)=%.1f\n", sq(7.0));
+    // Maka's default `int` is i64 → %ld matches; %d would warn under -Wformat.
+    _ = printf("hello %s, the answer is %ld\n", "world", 42);
+}

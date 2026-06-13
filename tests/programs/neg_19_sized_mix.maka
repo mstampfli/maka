@@ -1,0 +1,6 @@
+// i32 and int are distinct types; implicit conversion is rejected.
+unit main() {
+    int a = 5;
+    i32 b = a;          // ❌ no implicit int → i32
+    _ = b;
+}

@@ -1,0 +1,43 @@
+// Reinterpret cast — three flavors:
+//   *T → usize : safe (reading an address is harmless).
+//   *T → *U    : safe (still aliases the same memory; lifetime tracking flows).
+//   usize → *T : UNSAFE — synthesizes a pointer the compiler can't track.
+
+data Vec3 { float x; float y; float z; }
+
+unit main() {
+    // 1. *T → usize → *T round-trip preserves the address.
+    mut int n = 42;
+    *int p = &mut n;
+    usize bits = p as usize;       // safe direction
+    *int q = null;
+    unsafe {
+        q = bits as *int;          // unsafe: synthesizing from an integer
+    }
+    if (q == null) { return; }
+    log(q!);                       // 42
+
+    // 2. Pointer arithmetic via usize: walk to the next int in an array.
+    mut [3]int arr = [10, 20, 30];
+    *int base = &mut arr[0];
+    usize addr = base as usize;
+    *int next = null;
+    unsafe {
+        next = (addr + 8) as *int; // unsafe: address synthesized from arithmetic
+    }
+    if (next == null) { return; }
+    log(next!);                    // 20
+
+    // 3. Type pun: read a float through an int pointer (the bit pattern).
+    // *T → *U is allowed in safe code: both sides alias the same memory.
+    mut float f = 1.5;
+    *float fp = &mut f;
+    *int ip = fp as *int;
+    if (ip == null) { return; }
+    // 1.5 as IEEE-754 double has bit pattern 0x3FF8000000000000.
+    if (ip! == 4609434218613702656) {
+        log(1);
+    } else {
+        log(0);
+    }
+}

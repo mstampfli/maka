@@ -1,0 +1,44 @@
+// `own *T` — nullable owning pointer.  Auto-frees at scope exit and on reassign.
+data Box { mut int n; }
+
+own *Box make(int v) {
+    return alloc Box { n = v };       // ownership transferred to caller
+}
+
+unit main() {
+    own *Box a = null;                 // empty slot
+    if (a != null) { log(999); }       // skipped
+
+    a = alloc Box { n = 1 };
+    if (a == null) { return; }
+    log(a!.n);                         // 1
+
+    a!.n = 42;
+    log(a!.n);                         // 42
+
+    // Move between own *T slots invalidates the source.
+    own *Box b = a;
+    if (b == null) { return; }
+    log(b!.n);                         // 42
+
+    // Function returning own *T transfers ownership.
+    own *Box c = make(7);
+    if (c == null) { return; }
+    log(c!.n);                         // 7
+
+    // null literal coerces to own *T.
+    own *Box d = null;
+    if (d == null) { log(0); }         // 0
+
+    // Address as integer.
+    if (b != null) {
+        usize addr_b = b as usize;
+        if (addr_b != 0) { log(1); }   // 1
+    }
+
+    // &T as integer.
+    int local = 5;
+    &int r = &local;
+    usize addr_r = r as usize;
+    if (addr_r != 0) { log(1); }       // 1
+}
