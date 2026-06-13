@@ -1,0 +1,24 @@
+// `_` placeholder + default body: `attr` provides a default `unit show(_ self)`,
+// `Point has Show { }` inherits it without writing anything.  A second type
+// overrides with its own body.
+data Point { int x; }
+data Tag { int t; }
+
+attr Show {
+    unit show(&_ self) { log(999); }
+}
+
+Point has Show {}                                    // inherits default → prints 999
+
+Tag has Show {
+    unit show(&Tag self) { log(self.t); }            // overrides
+}
+
+unit go<T: Show>(&T x) { x.show(); }
+
+unit main() {
+    Point p = { x = 1 };
+    Tag t = { t = 7 };
+    go(&p);    // 999 (default body)
+    go(&t);    // 7   (override)
+}

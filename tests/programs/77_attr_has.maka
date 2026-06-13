@@ -1,0 +1,26 @@
+// `attr` declares the contract, `has` provides the implementation.
+// Both bound shorthands `<T: Drawable>` and long-form `where T has Drawable`
+// must satisfy at instantiation: passing a non-implementing type is rejected.
+data Color { int rgb; }
+data Sound { int hz; }
+
+attr Drawable {
+    unit draw(&Color self) { log(self.rgb); }
+}
+
+Color has Drawable {
+    unit draw(&Color self) { log(self.rgb); }
+}
+
+// Shorthand: `<T: Drawable>` desugars to `where T has Drawable`.
+unit render<T: Drawable>(&T x) {}
+
+// Long form: still accepted, equivalent meaning.
+unit render_long<T>(&T x) where T has Drawable {}
+
+unit main() {
+    Color c = { rgb = 255 };
+    render(&c);          // OK — Color has Drawable
+    render_long(&c);     // OK — same bound, long form
+    log(0);
+}

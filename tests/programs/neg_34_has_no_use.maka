@@ -1,0 +1,11 @@
+module app;
+
+import shapes.Point;
+// Note: no `use shapes.Point.Show;` and no local `app has Show` either.
+
+unit needs_show<T>(&T x) where T has Show {}
+
+unit main() {
+    Point p = { x = 42 };
+    needs_show(&p);            // ❌ bound unsatisfied without `use`
+}

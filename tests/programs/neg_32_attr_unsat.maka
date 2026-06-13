@@ -1,0 +1,16 @@
+// Calling a `<T: Attr>`-bounded generic with a type that has no matching
+// `has` impl must be rejected at instantiation.
+data Color { int rgb; }
+data Sound { int hz; }
+
+attr Drawable {}
+
+Color has Drawable {}
+
+// Bound shorthand.
+unit render<T: Drawable>(&T x) {}
+
+unit main() {
+    Sound s = { hz = 440 };
+    render(&s);   // ❌ Sound has no `has Drawable` impl
+}

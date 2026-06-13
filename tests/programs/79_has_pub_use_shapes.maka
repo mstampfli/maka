@@ -1,0 +1,11 @@
+module shapes;
+
+pub data Point { int x; }
+
+pub attr Show {
+    unit show(&_ self);
+}
+
+pub Point has Show {
+    unit show(&Point self) { log(self.x); }
+}

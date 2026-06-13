@@ -1,0 +1,10 @@
+// `has` block must implement every attr method that has no default body.
+data Point { int x; }
+
+attr Show {
+    string show(&_ self);          // no default body → has block must provide
+}
+
+Point has Show {}                  // ❌ missing impl of `show`
+
+unit main() { log(0); }

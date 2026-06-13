@@ -1,0 +1,11 @@
+module app;
+
+import shapes.Point;
+use shapes.Point.Show;        // explicit propagation of pub has impl
+
+unit go<T: Show>(&T x) { x.show(); }
+
+unit main() {
+    Point p = { x = 42 };
+    go(&p);                    // 42 — visible because of `use`
+}
