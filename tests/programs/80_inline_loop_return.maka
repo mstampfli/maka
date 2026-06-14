@@ -1,0 +1,16 @@
+// `return` inside a user-written loop in an inline body must exit the inline
+// expansion — NOT the user's surrounding while loop.  This regressed previously
+// because Return was lowered to `break;` which fell through to the trailing
+// `return -1;`.
+inline int find_first(int target) {
+    mut int i = 0;
+    while (i < 100) {
+        if (i == target) { return i + 999; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+unit main() {
+    log(find_first(3));   // 1002
+}

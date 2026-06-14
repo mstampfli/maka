@@ -1,0 +1,10 @@
+// Multiple embeds reaching the same field name = ambiguity error, not silent
+// first-wins.
+data A { int v = 1; int common = 100; }
+data B { int w = 2; int common = 200; }
+data Both { embed A a; embed B b; }
+
+unit main() {
+    Both t = { a = { v = 1, common = 100 }, b = { w = 2, common = 200 } };
+    log(t.common);   // ❌ ambiguous via `a` and `b`
+}

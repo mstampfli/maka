@@ -1,0 +1,17 @@
+// `propagate;` (no value) is legal when the surrounding non-inline caller
+// returns unit.  Verifies both shapes: with a value and without.
+inline unit chatter(int x) {
+    if (x < 0) { propagate; }    // exits run() early
+    log(x);
+}
+
+unit run(int n) {
+    chatter(n);
+    log(100);
+}
+
+unit main() {
+    run(5);     // 5, 100
+    run(-1);    // (propagate fires, no output)
+    log(999);
+}

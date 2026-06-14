@@ -1,0 +1,13 @@
+// Returning a struct that contains `&local` escapes the borrow — the local dies
+// on return, so the caller observes a dangling reference.  Previously this was
+// silently accepted; now caught by the recursive escape check.
+data Container { &int p; }
+
+Container make(int x) {
+    return Container { p = &x };    // ❌ &x escapes via the returned struct
+}
+
+unit main() {
+    Container c = make(5);
+    log(c.p);
+}

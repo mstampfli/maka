@@ -1,0 +1,13 @@
+// `propagate` inside a transitively-inlined function is still type-checked
+// against the OUTERMOST non-inline caller's return type.  Previously this was
+// silently accepted.
+inline int b_propagates() {
+    propagate "BUG: caller returns int but we propagate string";   // ❌
+}
+inline int a_calls_b() {
+    return b_propagates() + 1;
+}
+int caller() {
+    return a_calls_b();
+}
+unit main() { _ = caller(); }

@@ -1,0 +1,8 @@
+// `propagate;` (no value) requires the caller to return unit — rejecting it
+// when the caller returns int.
+inline int with_bad_propagate(int x) {
+    if (x < 0) { propagate; }   // ❌ caller returns int, not unit
+    return x;
+}
+int outer() { return with_bad_propagate(-1); }
+unit main() { _ = outer(); }

@@ -1,0 +1,18 @@
+// A regular (non-inline) function that takes an `own *T` parameter now
+// auto-frees it at function-scope exit unless it's moved out — closing the
+// pre-existing param-leak hole.
+data Box { int v; }
+
+unit sink(own *Box b) {
+    if (b == null) { return; }
+    log(b!.v);
+    // No explicit free — auto-free fires here.
+}
+
+unit main() {
+    own *Box a = alloc Box { v = 1 };
+    sink(a);    // 1; ownership moves in, auto-freed inside sink
+
+    own *Box b = alloc Box { v = 2 };
+    sink(b);    // 2; same
+}

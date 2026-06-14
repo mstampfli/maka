@@ -1,0 +1,20 @@
+// `own *T` passed to an `inline` callee must transfer ownership end-to-end:
+// the caller's binding is invalidated (no double-free at outer scope-exit)
+// AND the inline expansion emits the auto-free (no leak).  This was previously
+// a double-free / leak depending on whether sema marked the move or codegen
+// emitted the drop.
+data Box { int v; }
+
+inline int take(own *Box b) {
+    if (b == null) { return -1; }
+    return b!.v;
+}
+
+unit main() {
+    own *Box a = alloc Box { v = 7 };
+    log(take(a));    // 7
+
+    own *Box b = alloc Box { v = 99 };
+    log(take(b));    // 99
+    // a and b have both been moved into `take` — main exits with no drops.
+}
