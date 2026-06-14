@@ -1,0 +1,9 @@
+// `pub logic` exports the trait registration AND the methods inside,
+// so cross-module bound-checks and method calls both work.
+module shapes;
+
+pub data Color { int rgb; }
+
+pub logic Drawable {
+    unit draw(&Color self) { log(self.rgb); }
+}

@@ -1,0 +1,12 @@
+// `.len` on slices, fixed arrays, and vectors returns the element count.
+unit main() {
+    [4]int arr = [10, 20, 30, 40];
+    log(arr.len);              // 4 (fixed array)
+
+    []int s = arr;
+    log(s.len);                // 4 (slice over the array)
+
+    [3]int short = [1, 2, 3];
+    []int s2 = short;
+    log(s2.len);               // 3
+}

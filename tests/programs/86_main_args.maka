@@ -1,0 +1,5 @@
+// `main([]string args)` receives the OS-level argv as a slice of strings.
+// args[0] is the program name; the rest are the user's CLI arguments.
+unit main([]string args) {
+    log(args.len);     // count
+}

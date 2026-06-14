@@ -1,0 +1,15 @@
+// `data Name<T> where T has Attr { ... }` bounds are enforced at concrete
+// instantiation — passing a type with no matching `has` impl is rejected.
+attr Show { unit show(&_ self) { log(0); } }
+
+data Point { int x; }
+Point has Show {}
+
+data Sound { int hz; }
+
+data Container<T> where T has Show { T value; }
+
+unit main() {
+    Container<Sound> s = { value = { hz = 440 } };  // ❌ Sound has no Show
+    _ = s;
+}

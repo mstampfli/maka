@@ -1,0 +1,11 @@
+module app;
+
+import shapes.Color;
+use shapes.Color.Drawable;
+
+unit render<T: Drawable>(&T x) { x.draw(); }
+
+unit main() {
+    Color c = { rgb = 255 };
+    render(&c);     // 255
+}
