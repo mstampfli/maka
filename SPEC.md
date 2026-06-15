@@ -771,16 +771,29 @@ pthread wrappers.
   function arguments.  Hardcoded type name in the compiler.
 
 Everything else stdlib lives in `stdlib/std.maka` (real Maka source,
-embedded into the compiler via `include_str!` at build time):
+embedded into the compiler via `include_str!` at build time) and every
+item there - types, enums, functions - is `pub` in `module std;` and
+**requires an explicit `import std.Name;`** to use.  Same rule that
+governs any cross-module reference: `pub` makes an item importable, not
+automatically visible.
 
-- **Generic types**: `Option<T>`, `Result<T, E>` - accessible cross-module
-  without import (`pub` data and enum types follow that rule).
-- **Stdlib functions**: `str_len(string) -> usize`, `str_eq(string, string) -> bool` -
-  require `import std.{str_len, str_eq};` like any other cross-module function.
+Currently provided by `stdlib/std.maka`:
+
+- `Option<T>` - generic tagged option.
+- `Result<T, E>` - generic tagged result.
+- `str_len(string) -> usize` - byte length of a borrowed string.
+- `str_eq(string, string) -> bool` - byte-equal comparison.
 
 Genuine compiler builtins (always in scope, never declared in Maka source):
 `log`, `panic`, `free`, `spawn`, `join`, `read_line`, `read_int`, `+` on
 strings, and `.len` on slices / arrays / vectors.
+
+One ergonomic exception: the `for x in user_iterator` desugaring references
+`Option<T>`, so the compiler injects a synthetic `import std.Option;` for
+the duration of the lowered body.  Files that iterate user types via
+`for ... in ...` do not need to write the import themselves - same model as
+`for x in slice` (which doesn't ask the user to import any compiler-
+internal helper).
 
 ### 14.1 The `main` function
 

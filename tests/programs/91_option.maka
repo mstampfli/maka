@@ -1,6 +1,8 @@
-// `Option<T>` is a prelude-provided generic enum.  Two variants: `Some{value}`
-// carrying a `T`, and `None`.  Generic enums monomorphize like generic structs:
-// `Option<int>`, `Option<string>` each get a distinct concrete enum.
+// `Option<T>` lives in `stdlib/std.maka` and requires an explicit import
+// just like any cross-module type.  Generic enums monomorphize the same as
+// generic structs: `Option<int>`, `Option<string>` each get distinct enums.
+import std.Option;
+
 unit main() {
     Option<int> a = Option.Some{ value = 42 };
     Option<int> b = Option.None;

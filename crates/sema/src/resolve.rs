@@ -25,61 +25,107 @@ pub fn underlying_struct_key(sym: &SymTab, ty: &HType) -> Option<String> {
     }
 }
 
-/// Walk a resolved type, reporting an error for every Struct or Enum reference whose
-/// declaring module differs from `from_module` and which is not marked `pub`.
+/// Walk a resolved type, reporting an error for every Struct or Enum reference
+/// whose declaring module differs from `from_module` and which is either not
+/// `pub` or not imported by the current file.  Same rule that already applies
+/// to cross-module function calls.
+///
+/// `from_imports` is the current file's `(module_path, name)` import list.
+/// For an imported name to satisfy a type reference, both the path and the
+/// name (the type's name) must match.  The instantiation-mangled name of a
+/// generic enum (e.g. `Option__int`) is unwrapped to its template name
+/// (`Option`) for the import check.
 pub fn check_type_visibility(
     sym: &SymTab,
     ty: &HType,
     from_module: &[String],
+    from_imports: &[(Vec<String>, String)],
     span: maka_lexer::Span,
     errors: &mut Vec<SemaError>,
 ) {
-    fn walk(sym: &SymTab, ty: &HType, from: &[String], sp: maka_lexer::Span, errs: &mut Vec<SemaError>) {
+    fn template_name(full: &str) -> &str {
+        full.split("__").next().unwrap_or(full)
+    }
+    fn is_imported(imports: &[(Vec<String>, String)], path: &[String], name: &str) -> bool {
+        let tmpl = template_name(name);
+        imports.iter().any(|(p, n)| p.as_slice() == path && (n == name || n == tmpl))
+    }
+    fn walk(sym: &SymTab, ty: &HType, from: &[String], from_imports: &[(Vec<String>, String)], sp: maka_lexer::Span, errs: &mut Vec<SemaError>) {
         match ty {
             HType::Struct(id) => {
                 let info = sym.struct_info(*id);
-                if info.module_path.as_slice() != from && !info.is_pub {
-                    errs.push(SemaError {
-                        msg: format!(
-                            "data type `{}` is private to module `{}`; mark it `pub` to use from `{}`",
-                            info.name,
-                            if info.module_path.is_empty() { "<root>".to_string() } else { info.module_path.join(".") },
-                            if from.is_empty() { "<root>".to_string() } else { from.join(".") },
-                        ),
-                        span: sp,
-                    });
+                if info.module_path.as_slice() != from {
+                    if !info.is_pub {
+                        errs.push(SemaError {
+                            msg: format!(
+                                "data type `{}` is private to module `{}`; mark it `pub` to use from `{}`",
+                                info.name,
+                                if info.module_path.is_empty() { "<root>".to_string() } else { info.module_path.join(".") },
+                                if from.is_empty() { "<root>".to_string() } else { from.join(".") },
+                            ),
+                            span: sp,
+                        });
+                    } else if !is_imported(from_imports, &info.module_path, &info.name) {
+                        let tmpl = template_name(&info.name).to_string();
+                        errs.push(SemaError {
+                            msg: format!(
+                                "data type `{}` is in module `{}` and must be imported (`import {}.{};`) to use from `{}`",
+                                tmpl,
+                                if info.module_path.is_empty() { "<root>".to_string() } else { info.module_path.join(".") },
+                                if info.module_path.is_empty() { "<root>".to_string() } else { info.module_path.join(".") },
+                                tmpl,
+                                if from.is_empty() { "<root>".to_string() } else { from.join(".") },
+                            ),
+                            span: sp,
+                        });
+                    }
                 }
             }
             HType::Enum(id) => {
                 let info = sym.enum_info(*id);
-                if info.module_path.as_slice() != from && !info.is_pub {
-                    errs.push(SemaError {
-                        msg: format!(
-                            "enum `{}` is private to module `{}`; mark it `pub` to use from `{}`",
-                            info.name,
-                            if info.module_path.is_empty() { "<root>".to_string() } else { info.module_path.join(".") },
-                            if from.is_empty() { "<root>".to_string() } else { from.join(".") },
-                        ),
-                        span: sp,
-                    });
+                if info.module_path.as_slice() != from {
+                    if !info.is_pub {
+                        errs.push(SemaError {
+                            msg: format!(
+                                "enum `{}` is private to module `{}`; mark it `pub` to use from `{}`",
+                                info.name,
+                                if info.module_path.is_empty() { "<root>".to_string() } else { info.module_path.join(".") },
+                                if from.is_empty() { "<root>".to_string() } else { from.join(".") },
+                            ),
+                            span: sp,
+                        });
+                    } else if !is_imported(from_imports, &info.module_path, &info.name) {
+                        let tmpl = template_name(&info.name).to_string();
+                        errs.push(SemaError {
+                            msg: format!(
+                                "enum `{}` is in module `{}` and must be imported (`import {}.{};`) to use from `{}`",
+                                tmpl,
+                                if info.module_path.is_empty() { "<root>".to_string() } else { info.module_path.join(".") },
+                                if info.module_path.is_empty() { "<root>".to_string() } else { info.module_path.join(".") },
+                                tmpl,
+                                if from.is_empty() { "<root>".to_string() } else { from.join(".") },
+                            ),
+                            span: sp,
+                        });
+                    }
                 }
             }
             HType::Ref { inner, .. }
             | HType::Ptr { inner, .. }
             | HType::RawPtr { inner, .. }
             | HType::OwnPtr { inner, .. }
-            | HType::Heap { inner } => walk(sym, inner, from, sp, errs),
+            | HType::Heap { inner } => walk(sym, inner, from, from_imports, sp, errs),
             HType::Array { elem, .. }
             | HType::Slice { elem, .. }
-            | HType::Vec { elem } => walk(sym, elem, from, sp, errs),
+            | HType::Vec { elem } => walk(sym, elem, from, from_imports, sp, errs),
             HType::FnPtr { ret, params } => {
-                walk(sym, ret, from, sp, errs);
-                for p in params { walk(sym, p, from, sp, errs); }
+                walk(sym, ret, from, from_imports, sp, errs);
+                for p in params { walk(sym, p, from, from_imports, sp, errs); }
             }
             _ => {}
         }
     }
-    walk(sym, ty, from_module, span, errors);
+    walk(sym, ty, from_module, from_imports, span, errors);
 }
 
 pub fn resolve_signature(
@@ -476,12 +522,12 @@ impl SymTab {
                         continue;
                     }
                     let (param_tys, ret) = resolve_signature(&sym, &f.params, &f.ret, &f.type_params, &mut errors);
-                    // Enforce `pub` on any data/enum the signature references.
+                    // Enforce `pub` AND import on any data/enum the signature references.
                     for (i, pty) in param_tys.iter().enumerate() {
                         let psp = f.params.get(i).map(|p| p.span).unwrap_or(f.span);
-                        check_type_visibility(&sym, pty, &item_module, psp, &mut errors);
+                        check_type_visibility(&sym, pty, &item_module, &item_imports, psp, &mut errors);
                     }
-                    check_type_visibility(&sym, &ret, &item_module, f.span, &mut errors);
+                    check_type_visibility(&sym, &ret, &item_module, &item_imports, f.span, &mut errors);
                     // Resolve where-clause bounds into `(trait_name, type_args)`.
                     let where_bounds: Vec<(String, Vec<HType>)> = f.where_clauses.iter().map(|w| {
                         let args: Vec<HType> = w.args.iter()

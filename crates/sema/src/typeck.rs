@@ -292,7 +292,8 @@ impl<'a> TypeChecker<'a> {
         }
         let mut declared = resolve_type(self.sym, ty, &mut self.errors);
         let cur_module = self.cur_module.clone();
-        check_type_visibility(self.sym, &declared, &cur_module, span, &mut self.errors);
+        let cur_imports = self.cur_imports.clone();
+        check_type_visibility(self.sym, &declared, &cur_module, &cur_imports, span, &mut self.errors);
         // If the user declared `string` but the initializer produces an owning
         // value (e.g. `string + string` → `own *char`, `read_line()` → `own *char`),
         // bind the slot AS the owning type so the lifetime pass auto-frees it.
@@ -2191,7 +2192,15 @@ impl<'a> TypeChecker<'a> {
                 let struct_name = self.sym.struct_info(sid).name.clone();
                 let elem_ty_ast = var_ty.clone();
                 let desugared = build_iter_desugaring(&struct_name, &elem_ty_ast, var_name, src, body, sp);
-                return self.check_block_stmt(desugared);
+                // The desugaring references `Option<T>` from `std`.  Inject a
+                // synthetic `import std.Option;` for the duration of this body
+                // so user code isn't forced to write the import just because
+                // they iterate a custom type.  Same model `for x in slice`
+                // uses (no `import std.SliceLen;` required).
+                self.cur_imports.push((vec!["std".to_string()], "Option".to_string()));
+                let result = self.check_block_stmt(desugared);
+                self.cur_imports.pop();
+                return result;
             }
         }
 

@@ -111,10 +111,11 @@ tests/
   run_neg.sh    negative suite (every neg_*.maka must fail to compile)
 ```
 
-The stdlib lives in `module std;`. Types like `Option<T>` and `Result<T, E>`
-are accessible cross-module without import (same rule as any `pub data`);
-functions like `str_len` and `str_eq` need an explicit
-`import std.{str_len, str_eq};`.
+The stdlib lives in `module std;`. Every cross-module item - types, enums,
+functions, attrs - requires an explicit `import`.  Programs that touch
+stdlib write `import std.Option;`, `import std.Result;`,
+`import std.{str_len, str_eq};` etc.  The error message at every unimported
+cross-module reference names the exact import line to add.
 
 ## Building
 

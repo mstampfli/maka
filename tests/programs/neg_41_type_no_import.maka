@@ -1,0 +1,8 @@
+// Cross-module type references require an explicit `import`, same rule that
+// applies to cross-module function calls.  Referencing `Option<int>` (in
+// `module std;`) from a file with no import is rejected with a hint naming
+// the exact import to add.
+unit main() {
+    Option<int> a = Option.Some{ value = 5 };
+    log(0);
+}
