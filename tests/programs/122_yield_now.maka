@@ -1,0 +1,19 @@
+// `yield_now()` cooperatively yields the current fiber back to the
+// scheduler.  Two spawned fibers each log, yield, then log again.
+// Output is interleaved: 1, 2 (first round), 3, 4 (after yields).
+
+unit main() {
+    *Thread a = spawn(unit() {
+        log(1);
+        yield_now();
+        log(3);
+    });
+    *Thread b = spawn(unit() {
+        log(2);
+        yield_now();
+        log(4);
+    });
+    join(a);
+    join(b);
+    log(0);
+}

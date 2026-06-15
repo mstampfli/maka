@@ -555,15 +555,20 @@ unit frame() {
 | `join(&[]*Thread)` — homogeneous wait-all over a slice | **Implemented** |
 | `select(&[]*Thread)` — homogeneous race; losers cancelled | **Implemented** |
 | `par_for_range(start, end, body)` — chunk integer range across job pool | **Implemented** |
+| `par_reduce_int(start, end, init, combine)` — parallel fold | **Implemented** |
 | `sleep_ms` / `sleep_us` runtime calls | **Implemented** |
-| `thread()` — pthread, default ~8 MB stack | **Implemented** |
-| `spawn()` — pthread with smaller ~64 KB stack | **Implemented** (cooperative-fiber backing comes later; surface stays) |
+| `yield_now()` — cooperative yield from a fiber | **Implemented** |
+| `thread()` — pthread with default ~8 MB stack | **Implemented** |
+| `spawn()` — real cooperative fiber (ucontext + scheduler) | **Implemented** |
 | `job()` — N-worker pthread pool with shared MPMC queue | **Implemented** |
-| `par_reduce` / `par_map` over typed slices | Pending — needs slice-with-return-value codegen |
-| Fiber context-switch assembly (ucontext / inline asm) | Pending — `spawn` uses pthread today |
-| Epoll/kqueue/IOCP reactor with transparent-yield IO | Pending — IO calls block the kernel thread today |
-| Work-stealing per-worker deques for the job pool | Pending — current pool is a single shared MPMC queue |
-| Slab pool with VM-reserve + page-on-touch | Pending |
+| Cooperative scheduler with ready queue + sleep wheel | **Implemented** |
+| Fiber-aware `sleep_ms`: yields instead of blocking when in a fiber | **Implemented** |
+| Fiber-aware `join`: drives scheduler so other fibers progress | **Implemented** |
+| Fiber-aware `select`: cancels losers by walking ready/sleep queues | **Implemented** |
+| Epoll/kqueue/IOCP reactor with transparent-yield IO | Pending — needed for sub-ms IO concurrency |
+| Work-stealing per-worker deques for the job pool | Pending — current pool is one shared MPMC queue |
+| Slab pool with VM-reserve + page-on-touch for fibers | Pending — current fibers malloc a 64 KB stack each |
+| `par_map_int` and reductions over typed slices | Pending — par_reduce_int covers fold; par_map_int next |
 
 The **surface is final** and user code written against it today will
 continue to work as the runtime improves.  Performance will improve

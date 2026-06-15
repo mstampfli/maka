@@ -51,7 +51,15 @@ pub unit sleep_us(int us) {
     __sleep_ns(us * 1000);
 }
 
-// par_for_range and friends — `par_for_range(start, end, body)` is a
-// compiler builtin (like `spawn`) that runs `body(i)` for every i in
-// [start, end), chunked across the job pool.  Body is a `unit(int)`
-// closure; the closure's body is what each chunk-job runs.
+// par_for_range and par_reduce_int are compiler builtins (like `spawn`):
+//   par_for_range(start, end, body)
+//     runs `body(i)` for every i in [start, end), chunked across the job
+//     pool.  Body is a `unit(int)` closure.
+//   par_reduce_int(start, end, init, combine)
+//     folds [start, end) into an `int` accumulator using a `(int, int) -> int`
+//     combine function.  Returns the final accumulator.
+//   yield_now() — cooperatively yields the current fiber to the scheduler
+//     (no-op outside a fiber context).
+//
+// These are wired in sema/typeck.rs as name-recognized builtins; the
+// runtime entries live in the codegen prologue.

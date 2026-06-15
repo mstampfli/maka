@@ -262,7 +262,8 @@ impl<'a> Cx<'a> {
         self.w("    pthread_cond_t  done_cond;\n");
         self.w("    int             done_flag;       /* set to 1 when work finishes */\n");
         self.w("    int64_t         result;          /* type-erased return value */\n");
-        self.w("    int             is_job;          /* 0 for thread/spawn, 1 for job */\n");
+        self.w("    int             is_job;          /* 1 for job-pool work item */\n");
+        self.w("    int             is_fiber;        /* 1 for cooperative fiber */\n");
         self.w("} Thread;\n");
         self.w("typedef struct { void* code; void* env; } __maka_closure_fat;\n");
         self.w("typedef struct __maka_handle_args_s { void* code; void* env; Thread* h; } __maka_handle_args_t;\n");
@@ -288,21 +289,205 @@ impl<'a> Cx<'a> {
         self.w("    pthread_create(&t->handle, NULL, __maka_handle_entry, a);\n");
         self.w("    return (maka_unit*)t;\n");
         self.w("}\n");
-        // spawn() — fiber tier, smaller stack (~64 KB) so 100k concurrent
-        // tasks fit in ~6 GB resident.  Still pthread under the hood for now;
-        // the user-facing semantics match the spec.
+        // ====================================================================
+        // COOPERATIVE FIBER RUNTIME (ucontext-based)
+        // ====================================================================
+        //
+        // spawn() creates a userspace fiber with its own ucontext + stack.
+        // Fibers run on the calling pthread (a "scheduler thread") under a
+        // round-robin scheduler.  They cooperate by yielding at IO/sleep/
+        // explicit yield points.
+        //
+        // Key model:
+        //   - Each pthread has its own thread-local scheduler + ready queue.
+        //   - main starts as if it were already "running" a fiber (the
+        //     "anchor fiber" lazily created on first spawn).
+        //   - spawn(closure) creates a new ucontext, queues it; returns handle.
+        //   - join(handle) enters the scheduler: scheduler runs ready fibers
+        //     until handle is done, polls thread/job handles meanwhile, then
+        //     returns to the caller.
+        //   - Within a fiber, sleep_ms / yield_now switch to the scheduler;
+        //     the scheduler picks the next ready fiber.
+        //   - Outside a fiber (main not currently in scheduler, OS threads,
+        //     job-pool workers), sleep_ms blocks via nanosleep as before.
+        self.w("#include <ucontext.h>\n");
+        self.w("#define MAKA_FIBER_STACK_SIZE (64 * 1024)\n");
+        self.w("typedef struct maka_fiber_s {\n");
+        self.w("    ucontext_t ctx;\n");
+        self.w("    void* stack;\n");
+        self.w("    int   state;          /* 0=ready 1=running 2=blocked-fiber 3=sleep 4=done */\n");
+        self.w("    void  (*entry_code)(void*);\n");
+        self.w("    void* entry_env;\n");
+        self.w("    Thread* completion;   /* the Thread handle returned to user */\n");
+        self.w("    int64_t wake_at_ns;\n");
+        self.w("    struct maka_fiber_s* next;        /* ready / sleep queue link */\n");
+        self.w("    struct maka_fiber_s* waiters;     /* fibers blocked on this fiber */\n");
+        self.w("    struct maka_fiber_s* next_waiter; /* waiter list link */\n");
+        self.w("} maka_fiber_t;\n");
+        self.w("static __thread ucontext_t maka_sched_ctx;\n");
+        self.w("static __thread maka_fiber_t* maka_current_fiber = NULL;\n");
+        self.w("static __thread maka_fiber_t* maka_ready_head = NULL;\n");
+        self.w("static __thread maka_fiber_t* maka_ready_tail = NULL;\n");
+        self.w("static __thread maka_fiber_t* maka_sleep_head = NULL;\n");
+        self.w("static __thread int maka_sched_inited = 0;\n");
+        self.w("static __thread maka_fiber_t* maka_join_target = NULL;\n");
+        self.w("static __thread maka_fiber_t* maka_anchor_fiber = NULL;\n");
+        self.w("static __thread int maka_anchor_wake_on_finish = 0;\n");
+        self.w("static char maka_sched_stack[64 * 1024];\n");
+        self.w("static void __maka_ready_enqueue(maka_fiber_t* f) {\n");
+        self.w("    f->state = 0; f->next = NULL;\n");
+        self.w("    if (maka_ready_tail) { maka_ready_tail->next = f; maka_ready_tail = f; }\n");
+        self.w("    else { maka_ready_head = maka_ready_tail = f; }\n");
+        self.w("}\n");
+        self.w("static maka_fiber_t* __maka_ready_dequeue(void) {\n");
+        self.w("    maka_fiber_t* f = maka_ready_head;\n");
+        self.w("    if (!f) return NULL;\n");
+        self.w("    maka_ready_head = f->next;\n");
+        self.w("    if (!maka_ready_head) maka_ready_tail = NULL;\n");
+        self.w("    f->next = NULL;\n");
+        self.w("    return f;\n");
+        self.w("}\n");
+        self.w("static int64_t __maka_now_ns(void) {\n");
+        self.w("    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);\n");
+        self.w("    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;\n");
+        self.w("}\n");
+        self.w("static void __maka_scheduler_loop(void) {\n");
+        self.w("    while (1) {\n");
+        self.w("        int64_t now = __maka_now_ns();\n");
+        self.w("        /* Move expired sleepers to ready */\n");
+        self.w("        maka_fiber_t** prev = &maka_sleep_head;\n");
+        self.w("        while (*prev) {\n");
+        self.w("            maka_fiber_t* sf = *prev;\n");
+        self.w("            if (sf->wake_at_ns <= now) {\n");
+        self.w("                *prev = sf->next; sf->next = NULL;\n");
+        self.w("                __maka_ready_enqueue(sf);\n");
+        self.w("            } else { prev = &sf->next; }\n");
+        self.w("        }\n");
+        self.w("        /* Is the awaited target done? */\n");
+        self.w("        if (maka_join_target) {\n");
+        self.w("            Thread* tgt = maka_join_target->completion;\n");
+        self.w("            int done = 0;\n");
+        self.w("            pthread_mutex_lock(&tgt->done_mutex);\n");
+        self.w("            done = tgt->done_flag;\n");
+        self.w("            pthread_mutex_unlock(&tgt->done_mutex);\n");
+        self.w("            if (done) {\n");
+        self.w("                maka_fiber_t* anchor = maka_anchor_fiber;\n");
+        self.w("                maka_join_target = NULL;\n");
+        self.w("                maka_current_fiber = anchor;\n");
+        self.w("                swapcontext(&maka_sched_ctx, &anchor->ctx);\n");
+        self.w("                continue;\n");
+        self.w("            }\n");
+        self.w("        }\n");
+        self.w("        /* Pick a ready fiber */\n");
+        self.w("        maka_fiber_t* f = __maka_ready_dequeue();\n");
+        self.w("        if (f) {\n");
+        self.w("            maka_current_fiber = f;\n");
+        self.w("            f->state = 1;\n");
+        self.w("            swapcontext(&maka_sched_ctx, &f->ctx);\n");
+        self.w("            maka_current_fiber = NULL;\n");
+        self.w("            if (f->state == 4) {\n");
+        self.w("                /* Fiber finished: mark completion + wake waiters. */\n");
+        self.w("                pthread_mutex_lock(&f->completion->done_mutex);\n");
+        self.w("                f->completion->done_flag = 1;\n");
+        self.w("                pthread_cond_broadcast(&f->completion->done_cond);\n");
+        self.w("                pthread_mutex_unlock(&f->completion->done_mutex);\n");
+        self.w("                while (f->waiters) {\n");
+        self.w("                    maka_fiber_t* w = f->waiters;\n");
+        self.w("                    f->waiters = w->next_waiter; w->next_waiter = NULL;\n");
+        self.w("                    __maka_ready_enqueue(w);\n");
+        self.w("                }\n");
+        self.w("                if (f != maka_anchor_fiber) { free(f->stack); free(f); }\n");
+        self.w("                /* If anchor is parked in a select loop, return so it can re-poll. */\n");
+        self.w("                if (maka_anchor_wake_on_finish) {\n");
+        self.w("                    maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("                    swapcontext(&maka_sched_ctx, &maka_anchor_fiber->ctx);\n");
+        self.w("                }\n");
+        self.w("            }\n");
+        self.w("            continue;\n");
+        self.w("        }\n");
+        self.w("        /* No ready fibers — wait for sleepers or fall out. */\n");
+        self.w("        if (maka_sleep_head) {\n");
+        self.w("            int64_t min_wake = maka_sleep_head->wake_at_ns;\n");
+        self.w("            for (maka_fiber_t* s = maka_sleep_head->next; s; s = s->next) {\n");
+        self.w("                if (s->wake_at_ns < min_wake) min_wake = s->wake_at_ns;\n");
+        self.w("            }\n");
+        self.w("            int64_t delta = min_wake - __maka_now_ns();\n");
+        self.w("            if (delta > 0) {\n");
+        self.w("                struct timespec ts = { delta / 1000000000LL, delta % 1000000000LL };\n");
+        self.w("                nanosleep(&ts, NULL);\n");
+        self.w("            }\n");
+        self.w("            continue;\n");
+        self.w("        }\n");
+        self.w("        /* Nothing more to do: poll the awaited target with a small sleep. */\n");
+        self.w("        if (maka_join_target) {\n");
+        self.w("            struct timespec ts = { 0, 200000 /* 200us */ };\n");
+        self.w("            nanosleep(&ts, NULL);\n");
+        self.w("            continue;\n");
+        self.w("        }\n");
+        self.w("        /* No work, no joiner: hand back to anchor. */\n");
+        self.w("        if (maka_anchor_fiber) {\n");
+        self.w("            maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("            swapcontext(&maka_sched_ctx, &maka_anchor_fiber->ctx);\n");
+        self.w("            continue;\n");
+        self.w("        }\n");
+        self.w("        return;\n");
+        self.w("    }\n");
+        self.w("}\n");
+        self.w("static void __maka_sched_init(void) {\n");
+        self.w("    if (maka_sched_inited) return;\n");
+        self.w("    maka_sched_inited = 1;\n");
+        self.w("    /* anchor represents the calling (main or pthread) context */\n");
+        self.w("    maka_anchor_fiber = (maka_fiber_t*)calloc(1, sizeof(maka_fiber_t));\n");
+        self.w("    maka_anchor_fiber->state = 1;\n");
+        self.w("    maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("    getcontext(&maka_sched_ctx);\n");
+        self.w("    maka_sched_ctx.uc_stack.ss_sp = maka_sched_stack;\n");
+        self.w("    maka_sched_ctx.uc_stack.ss_size = sizeof(maka_sched_stack);\n");
+        self.w("    maka_sched_ctx.uc_link = NULL;\n");
+        self.w("    makecontext(&maka_sched_ctx, __maka_scheduler_loop, 0);\n");
+        self.w("}\n");
+        self.w("static void __maka_fiber_entry(void) {\n");
+        self.w("    maka_fiber_t* f = maka_current_fiber;\n");
+        self.w("    f->entry_code(f->entry_env);\n");
+        self.w("    f->state = 4;\n");
+        self.w("    swapcontext(&f->ctx, &maka_sched_ctx);\n");
+        self.w("}\n");
+        // spawn(): create a userspace cooperative fiber.
         self.w("maka_unit* __maka_spawn_fiber(void* code, void* env) {\n");
+        self.w("    __maka_sched_init();\n");
         self.w("    Thread* t = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("    t->is_fiber = 1;\n");
         self.w("    pthread_mutex_init(&t->done_mutex, NULL);\n");
         self.w("    pthread_cond_init(&t->done_cond, NULL);\n");
-        self.w("    __maka_handle_args_t* a = (__maka_handle_args_t*)malloc(sizeof(__maka_handle_args_t));\n");
-        self.w("    a->code = code; a->env = env; a->h = t;\n");
-        self.w("    pthread_attr_t attr;\n");
-        self.w("    pthread_attr_init(&attr);\n");
-        self.w("    pthread_attr_setstacksize(&attr, 64 * 1024);\n");
-        self.w("    pthread_create(&t->handle, &attr, __maka_handle_entry, a);\n");
-        self.w("    pthread_attr_destroy(&attr);\n");
+        self.w("    maka_fiber_t* f = (maka_fiber_t*)calloc(1, sizeof(maka_fiber_t));\n");
+        self.w("    f->stack = malloc(MAKA_FIBER_STACK_SIZE);\n");
+        self.w("    f->entry_code = (void(*)(void*))code;\n");
+        self.w("    f->entry_env = env;\n");
+        self.w("    f->completion = t;\n");
+        self.w("    f->state = 0;\n");
+        self.w("    getcontext(&f->ctx);\n");
+        self.w("    f->ctx.uc_stack.ss_sp = f->stack;\n");
+        self.w("    f->ctx.uc_stack.ss_size = MAKA_FIBER_STACK_SIZE;\n");
+        self.w("    f->ctx.uc_link = &maka_sched_ctx;\n");
+        self.w("    makecontext(&f->ctx, __maka_fiber_entry, 0);\n");
+        self.w("    __maka_ready_enqueue(f);\n");
+        self.w("    /* Stash f in a side field of t so sleep/yield can find it */\n");
         self.w("    return (maka_unit*)t;\n");
+        self.w("}\n");
+        // Cooperative sleep / yield primitives.
+        self.w("void __maka_yield_now(void) {\n");
+        self.w("    if (!maka_current_fiber || maka_current_fiber == maka_anchor_fiber) return;\n");
+        self.w("    maka_fiber_t* me = maka_current_fiber;\n");
+        self.w("    __maka_ready_enqueue(me);\n");
+        self.w("    swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("}\n");
+        self.w("static void __maka_sleep_fiber(int64_t nanos) {\n");
+        self.w("    maka_fiber_t* me = maka_current_fiber;\n");
+        self.w("    me->wake_at_ns = __maka_now_ns() + nanos;\n");
+        self.w("    me->state = 3;\n");
+        self.w("    me->next = maka_sleep_head;\n");
+        self.w("    maka_sleep_head = me;\n");
+        self.w("    swapcontext(&me->ctx, &maka_sched_ctx);\n");
         self.w("}\n");
         // ====================================================================
         // JOB POOL — N pthread workers with a shared bounded MPMC queue.
@@ -383,13 +568,62 @@ impl<'a> Cx<'a> {
         // ====================================================================
         self.w("int64_t __maka_join_result(maka_unit* h) {\n");
         self.w("    Thread* t = (Thread*)h;\n");
+        self.w("    /* Fast path: already done. */\n");
         self.w("    pthread_mutex_lock(&t->done_mutex);\n");
-        self.w("    while (!t->done_flag) {\n");
-        self.w("        pthread_cond_wait(&t->done_cond, &t->done_mutex);\n");
+        self.w("    int done = t->done_flag;\n");
+        self.w("    pthread_mutex_unlock(&t->done_mutex);\n");
+        self.w("    if (!done) {\n");
+        self.w("        /* If the scheduler has ready/sleeping fibers, drive it instead\n");
+        self.w("           of pthread-cond-waiting (which would freeze the scheduler). */\n");
+        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head)) {\n");
+        self.w("            /* Walk ready/sleep queues to find the fiber whose completion is t. */\n");
+        self.w("            maka_fiber_t* target = NULL;\n");
+        self.w("            for (maka_fiber_t* f = maka_ready_head; f; f = f->next) {\n");
+        self.w("                if (f->completion == t) { target = f; break; }\n");
+        self.w("            }\n");
+        self.w("            if (!target) {\n");
+        self.w("                for (maka_fiber_t* f = maka_sleep_head; f; f = f->next) {\n");
+        self.w("                    if (f->completion == t) { target = f; break; }\n");
+        self.w("                }\n");
+        self.w("            }\n");
+        self.w("            if (target) {\n");
+        self.w("                maka_join_target = target;\n");
+        self.w("                /* Switch into the scheduler; it'll swap back to us when\n");
+        self.w("                   target finishes. */\n");
+        self.w("                swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("                maka_join_target = NULL;\n");
+        self.w("                maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("            } else {\n");
+        self.w("                /* Not a fiber we own — it's a pthread thread or a job. Drive\n");
+        self.w("                   scheduler ALSO so any waiting fibers can still progress\n");
+        self.w("                   while we periodically poll the foreign handle. */\n");
+        self.w("                while (1) {\n");
+        self.w("                    pthread_mutex_lock(&t->done_mutex);\n");
+        self.w("                    int d = t->done_flag;\n");
+        self.w("                    pthread_mutex_unlock(&t->done_mutex);\n");
+        self.w("                    if (d) break;\n");
+        self.w("                    if (maka_ready_head || maka_sleep_head) {\n");
+        self.w("                        maka_join_target = NULL;\n");
+        self.w("                        swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("                        maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("                    } else {\n");
+        self.w("                        struct timespec ts = { 0, 500000 /* 0.5ms */ };\n");
+        self.w("                        nanosleep(&ts, NULL);\n");
+        self.w("                    }\n");
+        self.w("                }\n");
+        self.w("            }\n");
+        self.w("        } else {\n");
+        self.w("            /* No scheduler activity: classic cond_wait. */\n");
+        self.w("            pthread_mutex_lock(&t->done_mutex);\n");
+        self.w("            while (!t->done_flag) {\n");
+        self.w("                pthread_cond_wait(&t->done_cond, &t->done_mutex);\n");
+        self.w("            }\n");
+        self.w("            pthread_mutex_unlock(&t->done_mutex);\n");
+        self.w("        }\n");
         self.w("    }\n");
         self.w("    int64_t r = t->result;\n");
-        self.w("    pthread_mutex_unlock(&t->done_mutex);\n");
-        self.w("    if (!t->is_job) { pthread_join(t->handle, NULL); }\n");
+        self.w("    /* Only pthread-backed handles need pthread_join. */\n");
+        self.w("    if (!t->is_job && !t->is_fiber) { pthread_join(t->handle, NULL); }\n");
         self.w("    pthread_mutex_destroy(&t->done_mutex);\n");
         self.w("    pthread_cond_destroy(&t->done_cond);\n");
         self.w("    free(t);\n");
@@ -411,41 +645,83 @@ impl<'a> Cx<'a> {
         // select(&[]Handle) -> first ready, cancel the rest.
         // Implemented by polling done flags + cancelling losers via pthread_cancel.
         // ====================================================================
+        self.w("static int __maka_find_winner(maka_unit** handles, int64_t n) {\n");
+        self.w("    for (int64_t i = 0; i < n; i++) {\n");
+        self.w("        Thread* t = (Thread*)handles[i];\n");
+        self.w("        pthread_mutex_lock(&t->done_mutex);\n");
+        self.w("        int done = t->done_flag;\n");
+        self.w("        pthread_mutex_unlock(&t->done_mutex);\n");
+        self.w("        if (done) return (int)i;\n");
+        self.w("    }\n");
+        self.w("    return -1;\n");
+        self.w("}\n");
         self.w("int64_t __maka_select_first_i64(maka_unit** handles, int64_t n, int64_t* out_index) {\n");
         self.w("    while (1) {\n");
-        self.w("        for (int64_t i = 0; i < n; i++) {\n");
+        self.w("        int i = __maka_find_winner(handles, n);\n");
+        self.w("        if (i >= 0) {\n");
         self.w("            Thread* t = (Thread*)handles[i];\n");
-        self.w("            pthread_mutex_lock(&t->done_mutex);\n");
-        self.w("            if (t->done_flag) {\n");
-        self.w("                int64_t r = t->result;\n");
-        self.w("                pthread_mutex_unlock(&t->done_mutex);\n");
-        self.w("                if (out_index) *out_index = i;\n");
-        self.w("                /* Cancel losers and reap them directly via pthread_join.\n");
-        self.w("                   pthread_cancel doesn't run our done-flag-setting code,\n");
-        self.w("                   so we bypass __maka_join_result and free manually. */\n");
-        self.w("                for (int64_t j = 0; j < n; j++) {\n");
-        self.w("                    if (j == i) continue;\n");
-        self.w("                    Thread* l = (Thread*)handles[j];\n");
-        self.w("                    if (!l->is_job) {\n");
-        self.w("                        pthread_cancel(l->handle);\n");
-        self.w("                        pthread_join(l->handle, NULL);\n");
-        self.w("                        pthread_mutex_destroy(&l->done_mutex);\n");
-        self.w("                        pthread_cond_destroy(&l->done_cond);\n");
-        self.w("                        free(l);\n");
-        self.w("                    } else {\n");
-        self.w("                        /* Jobs can't be cancelled mid-flight — just wait. */\n");
-        self.w("                        (void)__maka_join_result(handles[j]);\n");
+        self.w("            int64_t r = t->result;\n");
+        self.w("            if (out_index) *out_index = (int64_t)i;\n");
+        self.w("            /* Cancel losers and reap.  Fibers: walk the scheduler queues and\n");
+        self.w("               remove without resuming.  pthread threads: pthread_cancel +\n");
+        self.w("               pthread_join.  Jobs: just wait — cancellation isn't supported. */\n");
+        self.w("            for (int64_t j = 0; j < n; j++) {\n");
+        self.w("                if (j == i) continue;\n");
+        self.w("                Thread* l = (Thread*)handles[j];\n");
+        self.w("                if (l->is_fiber) {\n");
+        self.w("                    /* Find and remove the fiber from ready/sleep. */\n");
+        self.w("                    maka_fiber_t** prev = &maka_ready_head;\n");
+        self.w("                    maka_fiber_t* found = NULL;\n");
+        self.w("                    while (*prev) {\n");
+        self.w("                        if ((*prev)->completion == l) {\n");
+        self.w("                            found = *prev; *prev = found->next;\n");
+        self.w("                            if (maka_ready_tail == found) maka_ready_tail = NULL;\n");
+        self.w("                            break;\n");
+        self.w("                        }\n");
+        self.w("                        prev = &(*prev)->next;\n");
         self.w("                    }\n");
+        self.w("                    if (!found) {\n");
+        self.w("                        prev = &maka_sleep_head;\n");
+        self.w("                        while (*prev) {\n");
+        self.w("                            if ((*prev)->completion == l) {\n");
+        self.w("                                found = *prev; *prev = found->next;\n");
+        self.w("                                break;\n");
+        self.w("                            }\n");
+        self.w("                            prev = &(*prev)->next;\n");
+        self.w("                        }\n");
+        self.w("                    }\n");
+        self.w("                    if (found) { free(found->stack); free(found); }\n");
+        self.w("                    /* Mark handle done so resource cleanup proceeds. */\n");
+        self.w("                    pthread_mutex_lock(&l->done_mutex);\n");
+        self.w("                    l->done_flag = 1;\n");
+        self.w("                    pthread_mutex_unlock(&l->done_mutex);\n");
+        self.w("                    pthread_mutex_destroy(&l->done_mutex);\n");
+        self.w("                    pthread_cond_destroy(&l->done_cond);\n");
+        self.w("                    free(l);\n");
+        self.w("                } else if (!l->is_job) {\n");
+        self.w("                    pthread_cancel(l->handle);\n");
+        self.w("                    pthread_join(l->handle, NULL);\n");
+        self.w("                    pthread_mutex_destroy(&l->done_mutex);\n");
+        self.w("                    pthread_cond_destroy(&l->done_cond);\n");
+        self.w("                    free(l);\n");
+        self.w("                } else {\n");
+        self.w("                    (void)__maka_join_result(handles[j]);\n");
         self.w("                }\n");
-        self.w("                /* Reap the winner normally. */\n");
-        self.w("                (void)__maka_join_result(handles[i]);\n");
-        self.w("                return r;\n");
         self.w("            }\n");
-        self.w("            pthread_mutex_unlock(&t->done_mutex);\n");
+        self.w("            /* Reap the winner. */\n");
+        self.w("            (void)__maka_join_result(handles[i]);\n");
+        self.w("            return r;\n");
         self.w("        }\n");
-        self.w("        /* Brief sleep before re-polling — avoids spinning at 100% CPU. */\n");
-        self.w("        struct timespec ts = { 0, 1000000 /* 1 ms */ };\n");
-        self.w("        nanosleep(&ts, NULL);\n");
+        self.w("        /* No winner yet — drive scheduler so fibers can progress. */\n");
+        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head)) {\n");
+        self.w("            maka_anchor_wake_on_finish = 1;\n");
+        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_anchor_wake_on_finish = 0;\n");
+        self.w("            maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("        } else {\n");
+        self.w("            struct timespec ts = { 0, 500000 };\n");
+        self.w("            nanosleep(&ts, NULL);\n");
+        self.w("        }\n");
         self.w("    }\n");
         self.w("}\n");
         // ====================================================================
@@ -453,6 +729,13 @@ impl<'a> Cx<'a> {
         // Maka exposes this via `sleep_ms(int)` in stdlib.async.
         // ====================================================================
         self.w("void __maka_sleep_ns(int64_t nanos) {\n");
+        self.w("    /* Inside a cooperative fiber, yield with timer instead of\n");
+        self.w("       blocking the scheduler thread. */\n");
+        self.w("    if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
+        self.w("        __maka_sleep_fiber(nanos);\n");
+        self.w("        return;\n");
+        self.w("    }\n");
+        self.w("    /* Else: block the calling thread directly. */\n");
         self.w("    struct timespec ts;\n");
         self.w("    ts.tv_sec = nanos / 1000000000LL;\n");
         self.w("    ts.tv_nsec = nanos % 1000000000LL;\n");
@@ -481,6 +764,70 @@ impl<'a> Cx<'a> {
         self.w("    pthread_mutex_unlock(&c->completion->done_mutex);\n");
         self.w("    free(c);\n");
         self.w("    return NULL;\n");
+        self.w("}\n");
+        // par_reduce_int: divide range into chunks, each chunk-job folds its
+        // sub-range into a partial result, then combine partials into the final
+        // accumulator (in caller after barrier).
+        self.w("typedef struct {\n");
+        self.w("    int64_t start, end;\n");
+        self.w("    int64_t (*combine)(void*, int64_t, int64_t);\n");
+        self.w("    void* env;\n");
+        self.w("    int64_t partial;\n");
+        self.w("    Thread* completion;\n");
+        self.w("} __maka_reduce_chunk_t;\n");
+        self.w("static void* __maka_reduce_chunk_entry(void* arg) {\n");
+        self.w("    __maka_reduce_chunk_t* c = (__maka_reduce_chunk_t*)arg;\n");
+        self.w("    int64_t acc = 0;\n");
+        self.w("    for (int64_t i = c->start; i < c->end; i++) {\n");
+        self.w("        acc = c->combine(c->env, acc, i);\n");
+        self.w("    }\n");
+        self.w("    c->partial = acc;\n");
+        self.w("    pthread_mutex_lock(&c->completion->done_mutex);\n");
+        self.w("    c->completion->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&c->completion->done_cond);\n");
+        self.w("    pthread_mutex_unlock(&c->completion->done_mutex);\n");
+        self.w("    return NULL;\n");
+        self.w("}\n");
+        self.w("int64_t __maka_par_reduce_int(int64_t start, int64_t end, int64_t init, void* code, void* env) {\n");
+        self.w("    if (start >= end) return init;\n");
+        self.w("    int64_t total = end - start;\n");
+        self.w("    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);\n");
+        self.w("    if (nprocs < 1) nprocs = 1;\n");
+        self.w("    if (nprocs > 16) nprocs = 16;\n");
+        self.w("    int64_t chunks = (int64_t)nprocs;\n");
+        self.w("    if (chunks > total) chunks = total;\n");
+        self.w("    int64_t per = (total + chunks - 1) / chunks;\n");
+        self.w("    Thread** handles = (Thread**)malloc(sizeof(Thread*) * (size_t)chunks);\n");
+        self.w("    __maka_reduce_chunk_t** chunks_arr = (__maka_reduce_chunk_t**)malloc(sizeof(void*) * (size_t)chunks);\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        Thread* th = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("        pthread_mutex_init(&th->done_mutex, NULL);\n");
+        self.w("        pthread_cond_init(&th->done_cond, NULL);\n");
+        self.w("        __maka_reduce_chunk_t* ch = (__maka_reduce_chunk_t*)malloc(sizeof(__maka_reduce_chunk_t));\n");
+        self.w("        ch->start = start + c * per;\n");
+        self.w("        ch->end = ch->start + per; if (ch->end > end) ch->end = end;\n");
+        self.w("        ch->combine = (int64_t(*)(void*, int64_t, int64_t))code;\n");
+        self.w("        ch->env = env;\n");
+        self.w("        ch->partial = 0;\n");
+        self.w("        ch->completion = th;\n");
+        self.w("        pthread_create(&th->handle, NULL, __maka_reduce_chunk_entry, ch);\n");
+        self.w("        handles[c] = th; chunks_arr[c] = ch;\n");
+        self.w("    }\n");
+        self.w("    int64_t acc = init;\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        pthread_join(handles[c]->handle, NULL);\n");
+        self.w("        /* Combine partial using the same combine function with two\n");
+        self.w("           int args -- works for sum/max/min where the function\n");
+        self.w("           is associative on integers regardless of the\n");
+        self.w("           \"index\" position. */\n");
+        self.w("        acc = chunks_arr[c]->combine(env, acc, chunks_arr[c]->partial);\n");
+        self.w("        pthread_mutex_destroy(&handles[c]->done_mutex);\n");
+        self.w("        pthread_cond_destroy(&handles[c]->done_cond);\n");
+        self.w("        free(handles[c]);\n");
+        self.w("        free(chunks_arr[c]);\n");
+        self.w("    }\n");
+        self.w("    free(handles); free(chunks_arr);\n");
+        self.w("    return acc;\n");
         self.w("}\n");
         self.w("void __maka_par_for_range(int64_t start, int64_t end, void* code, void* env) {\n");
         self.w("    if (start >= end) return;\n");
@@ -2048,6 +2395,24 @@ impl<'a> Cx<'a> {
                         );
                     }
                     return "MAKA_UNIT".into();
+                }
+                // Built-in `yield_now()` — cooperative yield.
+                if callee.0 == u32::MAX - 20 {
+                    return "(__maka_yield_now(), MAKA_UNIT)".into();
+                }
+                // Built-in `par_reduce_int(start, end, init, combine)`.
+                if callee.0 == u32::MAX - 21 {
+                    if args.len() == 4 {
+                        let a = self.emit_expr(f, &args[0]);
+                        let b = self.emit_expr(f, &args[1]);
+                        let init = self.emit_expr(f, &args[2]);
+                        let body = self.emit_expr(f, &args[3]);
+                        return format!(
+                            "__maka_par_reduce_int((int64_t)({}), (int64_t)({}), (int64_t)({}), (({}).code), (({}).env))",
+                            a, b, init, body, body
+                        );
+                    }
+                    return "0".into();
                 }
                 // Built-in `par_for_range(start, end, closure)` — dispatch
                 // chunks across the job pool.

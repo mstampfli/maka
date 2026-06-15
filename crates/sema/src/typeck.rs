@@ -1894,6 +1894,54 @@ impl<'a> TypeChecker<'a> {
             );
             return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
         }
+        // Built-in `yield_now()` — cooperative yield from a fiber back to
+        // the scheduler.  No-op outside a fiber context.
+        if name == "yield_now" && qualifier.is_none() {
+            if !args.is_empty() {
+                self.err("yield_now takes no arguments", sp);
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 20), args: Vec::new() },
+                ty: HType::Unit,
+                span: sp,
+            };
+        }
+        // Built-in `par_reduce_int(start, end, init, combiner)` — fold an
+        // integer range using a `int(int, int)` closure that combines an
+        // accumulator with one element.  Returns the final accumulator.
+        if name == "par_reduce_int" && qualifier.is_none() {
+            let mut hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 4 {
+                self.err("par_reduce_int expects (int start, int end, int init, int(int, int) combine)", sp);
+            } else {
+                let ok_int = matches!(&hargs[0].ty, HType::Int)
+                    && matches!(&hargs[1].ty, HType::Int)
+                    && matches!(&hargs[2].ty, HType::Int);
+                let body = &hargs[3];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(
+                    body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Int)
+                            && params.len() == 2
+                            && matches!(params[0], HType::Int)
+                            && matches!(params[1], HType::Int)
+                );
+                if !ok_int { self.err("par_reduce_int: start/end/init must be `int`", sp); }
+                if !ok_body { self.err(format!("par_reduce_int body must be `int(int, int)`, got `{}`", type_str(&body.ty)), sp); }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 21), args: hargs },
+                ty: HType::Int,
+                span: sp,
+            };
+        }
         // Built-in `par_for_range(start, end, closure)` — runs `closure(i)`
         // for every i in [start, end), chunked across the job-pool's
         // workers.  Body must be a `unit(int)` closure.

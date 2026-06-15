@@ -1,0 +1,8 @@
+// par_reduce_int folds an integer range using a `(int, int) -> int`
+// combiner across the job-pool's worker threads.  Sum 0+1+...+999 = 499500.
+unit main() {
+    int sum = par_reduce_int(0, 1000, 0, int(int acc, int i) {
+        return acc + i;
+    });
+    log(sum);
+}
