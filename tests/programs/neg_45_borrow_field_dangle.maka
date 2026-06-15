@@ -1,0 +1,16 @@
+// Reading a struct's borrow-bearing field after the source dies must error.
+// The lifetime checker propagates the source local through the struct's deps;
+// when the source goes out of scope (or is overwritten in an inner block),
+// the containing struct is poisoned.
+data Holder { &int x; }
+
+unit main() {
+    mut int target = 0;
+    mut Holder h = { x = &target };
+    {
+        int inner = 99;
+        h = { x = &inner };
+    }
+    // inner died — h.x's source is gone; h is poisoned; reads error.
+    log(h.x);
+}

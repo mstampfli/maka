@@ -1,0 +1,16 @@
+// Borrows can live inside struct fields.  The lifetime checker propagates
+// the borrow's source-local through the struct's deps, so when the source
+// dies the struct local is poisoned and any subsequent read errors.
+data Holder { &int x; int tag; }
+
+int read_thru(&Holder h) {
+    return h.x;
+}
+
+unit main() {
+    int target = 42;
+    Holder h = { x = &target, tag = 7 };
+    log(h.tag);              // 7
+    log(read_thru(&h));      // 42
+    log(h.x);                // 42 — direct field read of the borrow
+}

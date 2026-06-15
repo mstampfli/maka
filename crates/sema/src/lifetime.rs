@@ -206,21 +206,27 @@ impl<'a> Analyzer<'a> {
                     self.walk_expr(place);
                 }
                 self.walk_expr(value);
-                // Reassigning a pointer overwrites its deps (§3.8).
+                // Reassigning a pointer-like or borrow-bearing local overwrites
+                // its deps (§3.8).  Pointers (`HType::Ptr`) participate in the
+                // null-collapse path; anything else (refs, structs that contain
+                // refs, etc.) just refreshes deps and clears poison.
                 if let HExprKind::Local(id) = place.kind {
-                    if matches!(self.f().locals[id.0 as usize].ty, HType::Ptr { .. }) {
+                    let ty = self.f().locals[id.0 as usize].ty.clone();
+                    let is_ptr = matches!(ty, HType::Ptr { .. });
+                    if is_ptr {
                         let d = self.expr_deps(value);
                         let nn = self.expr_nonnull(value);
                         self.state[id.0 as usize].deps = d;
                         self.state[id.0 as usize].known_nonnull = nn;
-                        // Reassignment also clears any active narrowing window — the
-                        // previously-checked value is no longer there.
                         self.state[id.0 as usize].narrowed_until = None;
-                        // ANY explicit re-assignment by the user clears auto_nulled —
-                        // the silent compiler overwrite has been replaced by an intentional
-                        // act.  The new value may itself be NULL or unproven; that's caught
-                        // separately by the forced-handling deref rule.
                         self.state[id.0 as usize].auto_nulled = false;
+                    } else {
+                        // For ref-shaped or borrow-bearing struct locals, refresh
+                        // the deps so subsequent kill_lid cycles target the right
+                        // source set.  Clear poison so the new value is usable.
+                        let d = self.expr_deps(value);
+                        self.state[id.0 as usize].deps = d;
+                        self.state[id.0 as usize].poisoned = false;
                     }
                 }
                 let _ = span;
@@ -587,6 +593,19 @@ impl<'a> Analyzer<'a> {
                 // Fresh heap LID; no deps from source. We model it as `{}`.
             }
             HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => self.collect_deps(base, out),
+            // Struct/variant literals and array literals propagate their fields'
+            // borrow deps up to the containing value.  Without this, building a
+            // `Holder { x = &y }` produces a Holder whose deps are empty, and
+            // when `y` dies the holder stays unpoisoned — leaving a dangling
+            // read undetected.  With this, the holder's deps include y; when y
+            // dies `kill_lid` poisons the holder; reads through `holder.x`
+            // recurse to the (poisoned) base local and error.
+            HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => {
+                for (_, fe) in fields { self.collect_deps(fe, out); }
+            }
+            HExprKind::ArrayLit(elems) => {
+                for el in elems { self.collect_deps(el, out); }
+            }
             HExprKind::LitNull => {} // empty
             _ => {}
         }
