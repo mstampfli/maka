@@ -231,6 +231,17 @@ Standard infix and unary operators with conventional precedence. Maka-specific:
 - Direct `==` / `!=` on enum values of the same enum type.  Simple
   (payload-less) enums compare as plain ints; tagged enums compare via
   the discriminant tag.
+- `e.tag` - read the discriminant of an enum value as an `int`.  For simple
+  enums this is just the underlying integer; for tagged enums it is the
+  variant index.  Useful for switching on a variant without writing a full
+  `match` arm and for `format`-style display.
+- `format(fmt, ...)` - typed string interpolation builtin.  `fmt` must be a
+  string literal containing `{}` placeholders; each `{}` consumes one trailing
+  argument.  Result is `own *char` (`String`) and is auto-freed at scope exit.
+  Per-argument types are routed through generated to-string helpers:
+  `int`/`usize` → `__maka_int_to_str`, `bool` → `__maka_bool_to_str`,
+  `float` → `__maka_float_to_str`, `char` → `__maka_char_to_str`, `string` /
+  `own *char` pass through unchanged.
 - `RetType(params) [captures] { body }` - lambda. Captures named with mode
   `[name]` (by value), `[&name]` (by const ref), `[&mut name]` (by mut ref).
 - `EnumName.Variant { field = expr, ... }` - tagged enum constructor.
@@ -291,7 +302,19 @@ use_decl     := use ModPath . Type . Attr ;
 cinclude     := cinclude "header.h";
 cblock       := cblock "raw C source";
 constexpr    := [pub]? constexpr Type NAME = constant_int_expr;
+global       := [pub]? [mut]? Type NAME = expr;
 ```
+
+A module-scope `Type NAME = expr;` declares a global.  Without `mut` the
+global is read-only; with `mut` it is writable from any function in the
+module.  Globals are emitted as `static <ctype> __maka_global__NAME = init;`
+at file scope in the generated C, so the initializer must fold to a C
+constant expression - integer / boolean / character / float literals and
+their arithmetic and bitwise combinations are supported; calls and
+allocations are not.  Visibility follows the same rules as functions
+(`pub` makes the global importable from other modules; immutable globals
+read like a name; mutable globals can be read and written through the same
+binding).
 
 `pub constexpr` is exportable: another module brings the name in with
 `import path.NAME;`, and references in expression position substitute the
@@ -701,7 +724,14 @@ import a.b.c;             // bring single name `c` (declared in module a.b)
 import a.b.c as alias;    // same, bind under `alias`
 import a.b.{x, y, z};     // selective list
 import a;                 // bring `a` from the root module
+import a.b.*;             // wildcard - bring every `pub` name from `a.b`
 ```
+
+The wildcard form (`import a.b.*;`) authorises any `pub` item in `a.b`.
+Resolution still respects the same `pub` rule per item; the `*` only
+means "I commit to importing whatever this module exports" without
+listing each name.  Use it sparingly when a module is a curated
+re-export hub.
 
 Imports are **enforced**: a cross-module call/type reference must have a
 matching import in the caller's file or be in the same module. Without
@@ -779,6 +809,10 @@ pthread wrappers.
 | `+` (concat) | `u32::MAX - 5` (and `_freel/_freer/_freeb`) | `own *char (string, string)` | binop on two `string`s - result is heap-allocated, auto-freed; chained concats use freeing variants so intermediates don't leak |
 | `read_line` | `u32::MAX - 6` | `own *char read_line()` | reads one line from stdin (NUL-terminated, no trailing `\n`); returns `null` on EOF |
 | `read_int` | `u32::MAX - 7` | `int read_int()` | reads one base-10 integer from stdin; panics on malformed input |
+| `__maka_int_to_str` | `u32::MAX - 11` | `own *char (int)` | format-arg converter; never written by user code |
+| `__maka_bool_to_str` | `u32::MAX - 12` | `own *char (bool)` | format-arg converter |
+| `__maka_float_to_str` | `u32::MAX - 13` | `own *char (float)` | format-arg converter |
+| `__maka_char_to_str` | `u32::MAX - 14` | `own *char (char)` | format-arg converter |
 
 ---
 

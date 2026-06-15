@@ -465,6 +465,20 @@ pub enum Item {
     /// also registered as a symbol so it can be imported and used by name in
     /// expression position from other modules.
     Constexpr(ConstexprDecl),
+    /// `pub? mut Type NAME = expr;` — a module-scope mutable global.  Useful for
+    /// process-wide state (frame counters, debug flags, RNG seeds, etc.) that
+    /// would otherwise be threaded through every function signature.
+    Global(GlobalDecl),
+}
+
+#[derive(Debug, Clone)]
+pub struct GlobalDecl {
+    pub name: String,
+    pub ty: Type,
+    pub init: Expr,
+    pub is_mut: bool,
+    pub is_pub: bool,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]

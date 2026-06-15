@@ -1,0 +1,5 @@
+// Writing to a module-scope global declared without `mut` must be rejected.
+int LIMIT = 42;
+unit main() {
+    LIMIT = 100;
+}

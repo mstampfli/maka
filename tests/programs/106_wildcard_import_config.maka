@@ -1,0 +1,4 @@
+module config;
+pub constexpr int SPEED = 60;
+pub constexpr int GRAVITY = 10;
+pub int square(int n) { return n * n; }

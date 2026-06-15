@@ -117,6 +117,17 @@ impl<'a> Cx<'a> {
         // Closure trampolines for capturing lambdas.
         self.emit_closure_trampolines();
 
+        // Module-scope globals.  Emit each as a C static so the symbol is
+        // file-local (matches Maka's "private unless pub" rule at the link
+        // layer too).  Init expressions are emitted verbatim; the C compiler
+        // enforces "must be a constant expression."
+        for g in &self.sym.globals.clone() {
+            let cty = self.c_type(&g.ty);
+            // Use a dummy HFunc for emit_expr since globals have no locals.
+            let init_str = self.emit_global_init(&g.init);
+            self.wl(&format!("static {} {} = {};", cty, g.c_name, init_str));
+        }
+
         // Function bodies
         for f in &funcs {
             self.emit_func(f);
@@ -183,6 +194,15 @@ impl<'a> Cx<'a> {
         self.w("static char* __maka_str_concat_freel(char* a, const char* b) { char* r = __maka_str_concat(a, b); free(a); return r; }\n");
         self.w("static char* __maka_str_concat_freer(const char* a, char* b) { char* r = __maka_str_concat(a, b); free(b); return r; }\n");
         self.w("static char* __maka_str_concat_freeb(char* a, char* b) { char* r = __maka_str_concat(a, b); free(a); free(b); return r; }\n");
+        // `format(fmt, ...)` placeholder converters.  Each returns a malloc'd
+        // string (caller owns) except `bool_to_str` which returns a static
+        // literal pointer (no free needed).  The concat helpers above handle
+        // the cleanup of the intermediate `_to_str` results when the result
+        // is chained through `+`.
+        self.w("static char* __maka_int_to_str(maka_int n)   { char buf[32]; snprintf(buf, sizeof(buf), \"%lld\", (long long)n); size_t L=strlen(buf); char* r=(char*)malloc(L+1); memcpy(r,buf,L+1); return r; }\n");
+        self.w("static const char* __maka_bool_to_str(bool b) { return b ? \"true\" : \"false\"; }\n");
+        self.w("static char* __maka_float_to_str(maka_float v){ char buf[40]; snprintf(buf, sizeof(buf), \"%g\", v);             size_t L=strlen(buf); char* r=(char*)malloc(L+1); memcpy(r,buf,L+1); return r; }\n");
+        self.w("static char* __maka_char_to_str(maka_char c)  { char* r=(char*)malloc(2); r[0]=(char)c; r[1]=0; return r; }\n");
         // stdin readers: `read_line()` returns one heap line without the trailing
         // newline (NULL on EOF); `read_int()` reads a base-10 integer (panics on
         // malformed input).
@@ -382,7 +402,7 @@ impl<'a> Cx<'a> {
                 for v in env_values { self.scan_expr(v); }
             }
             HExprKind::Transfer(inner) => self.scan_expr(inner),
-            HExprKind::SliceLen(inner) => self.scan_expr(inner),
+            HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => self.scan_expr(inner),
             HExprKind::FnRef(fid) => { self.fn_trampolines.insert(fid.0); }
             HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields { self.scan_expr(fe); },
             HExprKind::Match { scrutinee, arms, .. } => {
@@ -1256,6 +1276,19 @@ impl<'a> Cx<'a> {
                     }
                     return "((char*)0)".into();
                 }
+                if let Some(fname) = match callee.0 {
+                    v if v == u32::MAX - 11 => Some("__maka_int_to_str"),
+                    v if v == u32::MAX - 12 => Some("__maka_bool_to_str"),
+                    v if v == u32::MAX - 13 => Some("__maka_float_to_str"),
+                    v if v == u32::MAX - 14 => Some("__maka_char_to_str"),
+                    _ => None,
+                } {
+                    if args.len() == 1 {
+                        let a = self.emit_inline_expr(inline_f, &args[0], tag);
+                        return format!("{}({})", fname, a);
+                    }
+                    return "((char*)0)".into();
+                }
                 if callee.0 == u32::MAX - 6 {
                     return "__maka_read_line()".into();
                 }
@@ -1426,6 +1459,7 @@ impl<'a> Cx<'a> {
     fn emit_place(&mut self, f: &HFunc, e: &HExpr) -> String {
         match &e.kind {
             HExprKind::Local(id) => local_name(*id, &f.locals[id.0 as usize].name),
+            HExprKind::GlobalRef(gid) => self.sym.globals[gid.0 as usize].c_name.clone(),
             HExprKind::Field { base, field } => {
                 let base_s = self.emit_expr(f, base);
                 let (arrow, fname) = self.field_access(f, base, *field);
@@ -1494,6 +1528,7 @@ impl<'a> Cx<'a> {
             HExprKind::LitNull => "NULL".into(),
             HExprKind::LitUnit => "MAKA_UNIT".into(),
             HExprKind::Local(id) => local_name(*id, &f.locals[id.0 as usize].name),
+            HExprKind::GlobalRef(gid) => self.sym.globals[gid.0 as usize].c_name.clone(),
             HExprKind::CallIndirect { callee, args } => {
                 let c = self.emit_expr(f, callee);
                 let mut arg_strs: Vec<String> = Vec::new();
@@ -1525,6 +1560,16 @@ impl<'a> Cx<'a> {
                 self.emit_inline_expansion(f, *callee, args, &e.ty)
             }
             HExprKind::Transfer(inner) => self.emit_expr(f, inner),
+            HExprKind::EnumTag(inner) => {
+                let s = self.emit_expr(f, inner);
+                if let HType::Enum(eid) = &inner.ty {
+                    if self.sym.enum_info(*eid).is_simple() {
+                        // Simple enum: the C value IS the tag.
+                        return format!("(maka_int)({})", s);
+                    }
+                }
+                format!("(maka_int)(({}).tag)", s)
+            }
             HExprKind::SliceLen(inner) => {
                 let s = self.emit_expr(f, inner);
                 match &inner.ty {
@@ -1684,6 +1729,20 @@ impl<'a> Cx<'a> {
                         let a = self.emit_expr(f, &args[0]);
                         let b = self.emit_expr(f, &args[1]);
                         return format!("{}({}, {})", fname, a, b);
+                    }
+                    return "((char*)0)".into();
+                }
+                // Built-in `format(...)` placeholder converters.
+                if let Some(fname) = match callee.0 {
+                    v if v == u32::MAX - 11 => Some("__maka_int_to_str"),
+                    v if v == u32::MAX - 12 => Some("__maka_bool_to_str"),
+                    v if v == u32::MAX - 13 => Some("__maka_float_to_str"),
+                    v if v == u32::MAX - 14 => Some("__maka_char_to_str"),
+                    _ => None,
+                } {
+                    if args.len() == 1 {
+                        let a = self.emit_expr(f, &args[0]);
+                        return format!("{}({})", fname, a);
                     }
                     return "((char*)0)".into();
                 }
@@ -1970,6 +2029,29 @@ impl<'a> Cx<'a> {
             HExprKind::LitChar(c) => format!("(maka_char){}u", *c as u32),
             HExprKind::LitFloat(v) => format!("(maka_float){}", v),
             HExprKind::LitNull => "NULL".into(),
+            _ => "0".into(),
+        }
+    }
+
+    /// Emit a global's initializer as a C constant expression.  Walks the same
+    /// shapes a static initializer accepts: literals, unary minus on literals,
+    /// and arithmetic over the same.  For anything more, the C compiler will
+    /// produce a "not a constant expression" error - which is the right move.
+    fn emit_global_init(&self, e: &HExpr) -> String {
+        match &e.kind {
+            HExprKind::LitInt(n) => format!("(maka_int){}LL", n),
+            HExprKind::LitBool(b) => if *b { "true".into() } else { "false".into() },
+            HExprKind::LitChar(c) => format!("(maka_char){}u", *c as u32),
+            HExprKind::LitFloat(v) => format!("(maka_float){}", v),
+            HExprKind::LitStr(s) => format!("{:?}", s),
+            HExprKind::LitNull => "NULL".into(),
+            HExprKind::LitUnit => "MAKA_UNIT".into(),
+            HExprKind::Un { op: HUnOp::Neg, expr } => format!("(-({}))", self.emit_global_init(expr)),
+            HExprKind::Bin { op, lhs, rhs } => {
+                let l = self.emit_global_init(lhs);
+                let r = self.emit_global_init(rhs);
+                format!("(({}) {} ({}))", l, binop_c(*op), r)
+            }
             _ => "0".into(),
         }
     }

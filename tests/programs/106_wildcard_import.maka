@@ -1,0 +1,9 @@
+// `import path.*;` brings every `pub` name from a module into scope without
+// an exhaustive list.  The resolver expands `*` against the visibility rules.
+import config.*;
+
+unit main() {
+    log(SPEED);             // 60
+    log(square(7));         // 49
+    log(GRAVITY);           // 10
+}

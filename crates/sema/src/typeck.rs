@@ -394,8 +394,10 @@ impl<'a> TypeChecker<'a> {
         } else {
             place_h.ty.clone()
         };
-        if !writes_via_ref && !self.is_place_mutable(&place_h) {
-            self.err("cannot assign to an immutable place", span);
+        if !writes_via_ref {
+            if let Err(reason) = self.diagnose_place_mutability(&place_h) {
+                self.err(reason, span);
+            }
         }
         let value_h = self.check_expr_coerce(value, &pty);
 
@@ -411,8 +413,117 @@ impl<'a> TypeChecker<'a> {
         HStmt::Assign { op: hop, place: place_h, value: value_h, span }
     }
 
+    /// Same shape as `is_place_mutable` but on failure returns a specific
+    /// reason naming the offending binding or field, so the user sees
+    /// "binding `dead` is not declared `mut`" instead of the generic
+    /// "cannot assign to an immutable place".
+    fn diagnose_place_mutability(&self, e: &HExpr) -> Result<(), String> {
+        match &e.kind {
+            HExprKind::GlobalRef(gid) => {
+                let g = &self.sym.globals[gid.0 as usize];
+                if g.is_mut { Ok(()) } else {
+                    Err(format!("cannot assign to global `{}` - it was declared without `mut`", g.name))
+                }
+            }
+            HExprKind::Local(id) => {
+                let li = self.local(*id);
+                let ok = match &li.ty {
+                    HType::Ptr { .. } | HType::RawPtr { .. } | HType::OwnPtr { .. } => true,
+                    HType::Ref { .. } => false,
+                    HType::Heap { .. } => true,
+                    _ => li.mut_payload && li.reassignable,
+                };
+                if ok { Ok(()) } else {
+                    if matches!(li.ty, HType::Ref { .. }) {
+                        Err(format!("cannot assign through `{}` - it is an immutable reference (`&T`); use `&mut T` to write through it", li.name))
+                    } else {
+                        Err(format!("cannot assign to local `{}` - it was declared without `mut`", li.name))
+                    }
+                }
+            }
+            HExprKind::Field { base, field } => {
+                // Walk the base first - if the base itself is non-writable,
+                // surface that reason verbatim.
+                self.diagnose_place_target(base)?;
+                let sid = match struct_id_of(&base.ty) {
+                    Some(id) => id,
+                    None => return Err("field access on non-struct value".to_string()),
+                };
+                let f = &self.sym.struct_info(sid).fields[*field];
+                if let HType::Ptr { .. } = &f.ty { return Ok(()); }
+                if f.mut_payload { Ok(()) } else {
+                    Err(format!(
+                        "cannot assign to field `{}` of `{}` - the field is not declared `mut` in `data {}`",
+                        f.name,
+                        self.sym.struct_info(sid).name,
+                        self.sym.struct_info(sid).name,
+                    ))
+                }
+            }
+            HExprKind::Index { base, .. } => self.diagnose_place_target(base),
+            HExprKind::Unwrap { expr, .. } => match &expr.ty {
+                HType::Ptr { mutable: true, .. }
+                | HType::RawPtr { mutable: true, .. }
+                | HType::OwnPtr { mutable: true, .. } => Ok(()),
+                _ => Err("cannot assign through `*const T` - the pointee is immutable".to_string()),
+            },
+            _ => Err("cannot assign to this expression - it is not a writable place".to_string()),
+        }
+    }
+
+    /// Lower-level: is the storage reachable through `e` mutable?  Used by
+    /// `diagnose_place_mutability` for Field/Index bases.
+    fn diagnose_place_target(&self, e: &HExpr) -> Result<(), String> {
+        match &e.kind {
+            HExprKind::Local(id) => {
+                let li = self.local(*id);
+                let ok = match &li.ty {
+                    HType::Ref { mutable, .. } => *mutable,
+                    HType::Ptr { mutable, .. } => *mutable,
+                    HType::RawPtr { mutable, .. } => *mutable,
+                    HType::OwnPtr { mutable, .. } => *mutable,
+                    HType::Slice { mutable, .. } => *mutable,
+                    HType::Array { .. } => li.mut_payload,
+                    HType::Heap { .. } => li.mut_payload,
+                    _ => li.mut_payload,
+                };
+                if ok { Ok(()) } else {
+                    if matches!(li.ty, HType::Ref { mutable: false, .. }) {
+                        Err(format!("cannot write through `{}` - it is `&T` (immutable borrow); use `&mut T`", li.name))
+                    } else {
+                        Err(format!("cannot write through `{}` - it was declared without `mut`", li.name))
+                    }
+                }
+            }
+            HExprKind::Unwrap { expr, .. } => match &expr.ty {
+                HType::Ptr { mutable: true, .. }
+                | HType::RawPtr { mutable: true, .. }
+                | HType::OwnPtr { mutable: true, .. } => Ok(()),
+                _ => Err("cannot write through a `*const T`".to_string()),
+            },
+            HExprKind::Field { base, field } => {
+                self.diagnose_place_target(base)?;
+                let sid = match struct_id_of(&base.ty) {
+                    Some(id) => id,
+                    None => return Err("field access on non-struct value".to_string()),
+                };
+                let f = &self.sym.struct_info(sid).fields[*field];
+                if f.mut_payload { Ok(()) } else {
+                    Err(format!(
+                        "field `{}` of `{}` is not declared `mut`",
+                        f.name,
+                        self.sym.struct_info(sid).name,
+                    ))
+                }
+            }
+            HExprKind::Index { base, .. } => self.diagnose_place_target(base),
+            _ => Err("storage is not writable from this expression".to_string()),
+        }
+    }
+
     fn is_place_mutable(&self, e: &HExpr) -> bool {
         match &e.kind {
+            HExprKind::GlobalRef(gid) => self.sym.globals[gid.0 as usize].is_mut,
             HExprKind::Local(id) => {
                 let li = self.local(*id);
                 // For pointer bindings: handle is always reassignable.
@@ -627,8 +738,128 @@ impl<'a> TypeChecker<'a> {
         if let Some(ce) = self.find_constexpr(n) {
             return HExpr { kind: HExprKind::LitInt(ce.value), ty: HType::Int, span: sp };
         }
+        // Module-scope `mut` / immutable globals: same lookup rules as constexprs
+        // (same-module always visible; cross-module needs pub + import).
+        if let Some((gid, info)) = self.find_global(n) {
+            return HExpr { kind: HExprKind::GlobalRef(gid), ty: info.ty.clone(), span: sp };
+        }
         self.err(format!("unknown identifier `{}`", n), sp);
         HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp }
+    }
+
+    /// Type-check a `format(fmt_lit, args...)` call.  Parses the format string
+    /// at compile time, splits on `{}` placeholders, validates arg count, and
+    /// lowers each placeholder to a per-type "value to string" converter -
+    /// then the whole thing chains through string concat so the result is an
+    /// `own *char` auto-freed at scope exit.
+    fn check_format(&mut self, args: &[ast::Expr], sp: Span) -> HExpr {
+        if args.is_empty() {
+            self.err("format requires at least a format-string argument", sp);
+            return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
+        }
+        let fmt_str = match &args[0] {
+            ast::Expr::Lit(ast::Lit::Str(s), _) => s.clone(),
+            _ => {
+                self.err("format's first argument must be a string literal", sp);
+                return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
+            }
+        };
+        let parts: Vec<&str> = fmt_str.split("{}").collect();
+        let expected = parts.len().saturating_sub(1);
+        let provided = args.len() - 1;
+        if provided != expected {
+            self.err(format!(
+                "format expected {} placeholder argument(s), got {}",
+                expected, provided,
+            ), sp);
+            return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
+        }
+        // Build concat tree.  Start with the first literal segment.
+        let mut acc = HExpr { kind: HExprKind::LitStr(parts[0].to_string()), ty: HType::Str, span: sp };
+        for (i, arg) in args[1..].iter().enumerate() {
+            let arg_h = self.check_expr(arg, None);
+            let converted = self.format_arg_to_string(arg_h, sp);
+            acc = self.format_concat(acc, converted, sp);
+            let next_lit = HExpr { kind: HExprKind::LitStr(parts[i + 1].to_string()), ty: HType::Str, span: sp };
+            acc = self.format_concat(acc, next_lit, sp);
+        }
+        acc
+    }
+
+    /// Convert one HExpr arg to a stringy HExpr suitable for `format_concat`.
+    /// Each primitive type maps to a reserved builtin FuncId; strings pass
+    /// through unchanged.
+    fn format_arg_to_string(&mut self, h: HExpr, sp: Span) -> HExpr {
+        let result_ty = HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) };
+        match &h.ty {
+            HType::Int | HType::SizedInt { .. } => HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 11), args: vec![h] },
+                ty: result_ty, span: sp,
+            },
+            HType::Bool => HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 12), args: vec![h] },
+                ty: HType::Str, span: sp,
+            },
+            HType::Float => HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 13), args: vec![h] },
+                ty: result_ty, span: sp,
+            },
+            HType::Char => HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 14), args: vec![h] },
+                ty: result_ty, span: sp,
+            },
+            HType::Str | HType::OwnPtr { .. } => h,
+            _ => {
+                self.err(format!(
+                    "format placeholder for type `{}` is not supported (int/float/bool/char/string only)",
+                    type_str(&h.ty),
+                ), sp);
+                HExpr { kind: HExprKind::LitStr("".to_string()), ty: HType::Str, span: sp }
+            }
+        }
+    }
+
+    /// Concatenate two stringy HExprs using the same `__maka_str_concat`
+    /// family used by `a + b`.  Picks the right freeing variant based on
+    /// which side owns its buffer.
+    fn format_concat(&self, l: HExpr, r: HExpr, sp: Span) -> HExpr {
+        let is_owning_char = |t: &HType| matches!(t, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char));
+        let l_owns = is_owning_char(&l.ty);
+        let r_owns = is_owning_char(&r.ty);
+        let helper_id = match (l_owns, r_owns) {
+            (false, false) => u32::MAX - 5,
+            (true,  false) => u32::MAX - 8,
+            (false, true ) => u32::MAX - 9,
+            (true,  true ) => u32::MAX - 10,
+        };
+        HExpr {
+            kind: HExprKind::Call { callee: FuncId(helper_id), args: vec![l, r] },
+            ty: HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) },
+            span: sp,
+        }
+    }
+
+    /// Type-check a module-scope global's initializer expression and coerce it
+    /// to the declared type.  Used by `analyze()` before any function bodies
+    /// are processed, so globals are visible from every function.
+    pub fn check_global_init(mut self, init: &ast::Expr, ty: &HType) -> Result<HExpr, Vec<SemaError>> {
+        let h = self.check_expr_coerce(init, ty);
+        if self.errors.is_empty() { Ok(h) } else { Err(std::mem::take(&mut self.errors)) }
+    }
+
+    /// Find a module-scope global visible from the current file, returning
+    /// its id alongside the info.  Same visibility rules as constexprs.
+    fn find_global(&self, n: &str) -> Option<(GlobalId, &GlobalInfo)> {
+        for (i, g) in self.sym.globals.iter().enumerate() {
+            if g.name != n { continue; }
+            if g.module_path == self.cur_module {
+                return Some((GlobalId(i as u32), g));
+            }
+            if g.is_pub && self.cur_imports.iter().any(|(p, name)| p == &g.module_path && (name == n || name == "*")) {
+                return Some((GlobalId(i as u32), g));
+            }
+        }
+        None
     }
 
     /// Find a `pub constexpr` named `n` visible from the current module: either
@@ -642,7 +873,7 @@ impl<'a> TypeChecker<'a> {
         // Cross-module: must be pub AND imported.
         self.sym.constexprs.iter().find(|c| {
             c.name == n && c.is_pub
-                && self.cur_imports.iter().any(|(p, name)| p == &c.module_path && name == n)
+                && self.cur_imports.iter().any(|(p, name)| p == &c.module_path && (name == n || name == "*"))
         })
     }
 
@@ -1062,6 +1293,19 @@ impl<'a> TypeChecker<'a> {
             }
         }
         let bh = self.check_expr(base, None);
+
+        // Built-in `.tag` on an enum value - returns the discriminant as `int`.
+        // Works on both simple and tagged enums; simple ones lower to identity,
+        // tagged ones to a `.tag` field read.
+        if name == "tag" {
+            if matches!(&bh.ty, HType::Enum(_)) {
+                return HExpr {
+                    kind: HExprKind::EnumTag(Box::new(bh)),
+                    ty: HType::Int,
+                    span: sp,
+                };
+            }
+        }
 
         // Built-in `.len` on slice / fixed-array / vector — lowers to the HIR's
         // SliceLen node so codegen emits the appropriate length expression.
@@ -1504,6 +1748,14 @@ impl<'a> TypeChecker<'a> {
                 span: sp,
             };
         }
+        // Built-in `format(fmt, ...) -> String`.  fmt is a string literal with
+        // `{}` placeholders; each `{}` consumes one trailing arg.  Returns an
+        // `own *char` so the lifetime pass auto-frees the result at scope exit.
+        // Implemented via a snprintf-into-malloc helper - see the prelude for
+        // the helper's C body (registered as `__maka_format` extern below).
+        if name == "format" && qualifier.is_none() {
+            return self.check_format(args, sp);
+        }
         // Built-in `log` accepts any single arg and returns unit.
         if name == "log" {
             let mut hargs = Vec::new();
@@ -1838,7 +2090,7 @@ impl<'a> TypeChecker<'a> {
                     );
                 } else if !callee_sig.is_extern {
                     let imported = self.cur_imports.iter().any(|(m, n)| {
-                        m == &callee_sig.module_path && n == &callee_sig.name
+                        m == &callee_sig.module_path && (n == &callee_sig.name || n == "*")
                     });
                     // `use Mod.Type.Attr;` also authorizes any method call on that
                     // attr-namespaced impl — the impl is explicitly propagated, so its

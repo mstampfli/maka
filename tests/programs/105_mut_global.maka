@@ -1,0 +1,19 @@
+// Module-scope `mut` globals.  Reads work without ceremony; writes need the
+// `mut` keyword on the declaration (an immutable global is `<type> NAME = ...`).
+mut int frame = 0;
+mut int score = 0;
+int max_score = 1000;        // immutable, can be read but not written
+
+unit tick(int delta) {
+    frame = frame + 1;
+    score = score + delta;
+}
+
+unit main() {
+    tick(10);
+    tick(25);
+    tick(5);
+    log(frame);              // 3
+    log(score);              // 40
+    log(max_score);          // 1000
+}

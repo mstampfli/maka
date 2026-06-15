@@ -195,6 +195,32 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
     // Stored per HFunc-index: any instantiation requests queued during its checking.
     let mut pending_reqs: Vec<Vec<InstantiationReq>> = Vec::new();
 
+    // Globals: type-check each initializer and register the GlobalInfo before
+    // any function body sees a reference.  Each module's globals live in the
+    // file's module path; init expressions must be constant in the C sense
+    // (codegen passes them through as static initializers).
+    for (idx, item) in m.items.iter().enumerate() {
+        let maka_ast::Item::Global(g) = item else { continue; };
+        let item_module: Vec<String> = m.item_modules.get(idx).cloned().unwrap_or_default();
+        let tc = TypeChecker::new_with_logic(&sym, None);
+        let resolved_ty = resolve::resolve_type(&sym, &g.ty, &mut errors);
+        let init_h = match tc.check_global_init(&g.init, &resolved_ty) {
+            Ok(h) => h,
+            Err(es) => { errors.extend(es); continue; }
+        };
+        let c_name = format!("__maka_global__{}", g.name);
+        sym.globals.push(hir::GlobalInfo {
+            name: g.name.clone(),
+            c_name,
+            ty: resolved_ty,
+            init: init_h,
+            is_mut: g.is_mut,
+            is_pub: g.is_pub,
+            module_path: item_module,
+            span: g.span,
+        });
+    }
+
     // First pass: non-generic top-level + logic funcs.
     let mut seen_has_pairs: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
     for item in &m.items {
@@ -518,7 +544,7 @@ fn check_inline_propagate_compat(sym: &SymTab, funcs: &[HFunc], errors: &mut Vec
             HExprKind::HeapAlloc(inner) => walk_expr(sym, inner, ret, funcs, errors),
             HExprKind::CallIndirect { callee, args } => { walk_expr(sym, callee, ret, funcs, errors); for a in args { walk_expr(sym, a, ret, funcs, errors); } }
             HExprKind::Closure { env_values, .. } => for v in env_values { walk_expr(sym, v, ret, funcs, errors); },
-            HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) => walk_expr(sym, inner, ret, funcs, errors),
+            HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => walk_expr(sym, inner, ret, funcs, errors),
             _ => {}
         }
     }
@@ -633,7 +659,7 @@ fn check_inline_propagate_compat(sym: &SymTab, funcs: &[HFunc], errors: &mut Vec
                 for a in args { check_propagate_in_expr(a, ret, errs, call_span, funcs, visited); }
             }
             HExprKind::Closure { env_values, .. } => for v in env_values { check_propagate_in_expr(v, ret, errs, call_span, funcs, visited); },
-            HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) => check_propagate_in_expr(inner, ret, errs, call_span, funcs, visited),
+            HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => check_propagate_in_expr(inner, ret, errs, call_span, funcs, visited),
             _ => {}
         }
     }
@@ -742,7 +768,7 @@ fn collect_inline_callees_expr(sym: &SymTab, e: &HExpr, out: &mut Vec<u32>) {
             for a in args { collect_inline_callees_expr(sym, a, out); }
         }
         HExprKind::Closure { env_values, .. } => for v in env_values { collect_inline_callees_expr(sym, v, out); },
-        HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) => collect_inline_callees_expr(sym, inner, out),
+        HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => collect_inline_callees_expr(sym, inner, out),
         _ => {}
     }
 }
@@ -828,7 +854,7 @@ fn rewrite_placeholders(f: &mut HFunc, mapping: &[u32]) {
                 for v in env_values { rw_expr(v, mapping); }
             }
             HExprKind::Transfer(inner) => rw_expr(inner, mapping),
-            HExprKind::SliceLen(inner) => rw_expr(inner, mapping),
+            HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => rw_expr(inner, mapping),
             HExprKind::ArrayLit(es) => for e in es { rw_expr(e, mapping); },
             _ => {}
         }

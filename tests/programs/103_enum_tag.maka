@@ -1,0 +1,12 @@
+// `.tag` accessor exposes the discriminant of an enum value as an `int`.
+// Works for both simple (payload-less) and tagged enums.
+enum Color { Red, Green, Blue }
+enum Shape { Circle { int r }, Square { int side } }
+
+unit main() {
+    Color c = Color.Green;
+    log(c.tag);                       // 1
+
+    Shape s = Shape.Square{ side = 4 };
+    log(s.tag);                       // 1 (Square is variant index 1)
+}

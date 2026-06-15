@@ -52,6 +52,17 @@ impl Parser {
             if self.at(&TokKind::Dot) && matches!(self.peek_at(1), TokKind::LBrace) {
                 self.bump(); // .
             }
+            // `.*` wildcard — bring every `pub` item from the named module into
+            // scope.  The resolver expands the `*` into the concrete names at
+            // visibility-check time.
+            if self.at(&TokKind::Dot) && matches!(self.peek_at(1), TokKind::Star) {
+                self.bump(); // .
+                self.bump(); // *
+                names.push("*".to_string());
+                self.expect(&TokKind::Semicolon, "`;`")?;
+                imports.push(ImportDecl { path, names });
+                continue;
+            }
             if self.eat(&TokKind::LBrace) {
                 if !self.at(&TokKind::RBrace) {
                     loop {
@@ -123,6 +134,7 @@ impl Parser {
                 Item::Logic(l)  => l.is_pub = is_pub,
                 Item::Attr(a)   => a.is_pub = is_pub,
                 Item::Has(h)    => h.is_pub = is_pub,
+                Item::Global(g) => g.is_pub = is_pub,
                 _ => {}
             }
             items.push(item);
@@ -302,12 +314,44 @@ impl Parser {
             TokKind::Attr => Ok(Item::Attr(self.parse_attr()?)),
             TokKind::Inline => Ok(Item::Func(self.parse_func()?)),
             TokKind::Gate => Ok(Item::Func(self.parse_func()?)),
+            // Module-scope `mut Type NAME = expr;` — a mutable global.
+            TokKind::Mut => Ok(Item::Global(self.parse_global(true)?)),
             // `Type has Attr { ... }` — detect by looking two tokens ahead for `Has`.
             TokKind::Ident(_) if matches!(self.peek_at(1), TokKind::Has) => {
                 Ok(Item::Has(self.parse_has()?))
             }
-            _ => Ok(Item::Func(self.parse_func()?)),
+            _ => {
+                // Disambiguate `Type NAME = expr;` (immutable global) from
+                // `Type NAME(...) { ... }` (function). Both start with a type;
+                // the deciding tokens are after the identifier that follows it.
+                let save = self.pos;
+                let is_global = (|| -> bool {
+                    if self.parse_type().is_err() { return false; }
+                    if !matches!(self.peek(), TokKind::Ident(_)) { return false; }
+                    matches!(self.peek_at(1), TokKind::Eq)
+                })();
+                self.pos = save;
+                if is_global {
+                    Ok(Item::Global(self.parse_global(false)?))
+                } else {
+                    Ok(Item::Func(self.parse_func()?))
+                }
+            }
         }
+    }
+
+    /// Parse a module-scope `[mut|const]? Type NAME = expr;` global declaration.
+    /// `is_mut` is true when the leading `mut` keyword has been seen and is to
+    /// be consumed here; otherwise we're at an immutable / `const`-prefixed form.
+    fn parse_global(&mut self, is_mut: bool) -> Result<GlobalDecl, ParseError> {
+        let span = self.peek_span();
+        if is_mut { self.expect(&TokKind::Mut, "`mut`")?; }
+        let ty = self.parse_type()?;
+        let (name, _) = self.expect_ident("global name")?;
+        self.expect(&TokKind::Eq, "`=`")?;
+        let init = self.parse_expr()?;
+        self.expect(&TokKind::Semicolon, "`;`")?;
+        Ok(GlobalDecl { name, ty, init, is_mut, is_pub: false, span })
     }
 
     fn parse_attr(&mut self) -> Result<AttrDecl, ParseError> {

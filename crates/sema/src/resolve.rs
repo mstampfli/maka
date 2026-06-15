@@ -48,7 +48,7 @@ pub fn check_type_visibility(
     }
     fn is_imported(imports: &[(Vec<String>, String)], path: &[String], name: &str) -> bool {
         let tmpl = template_name(name);
-        imports.iter().any(|(p, n)| p.as_slice() == path && (n == name || n == tmpl))
+        imports.iter().any(|(p, n)| p.as_slice() == path && (n == name || n == tmpl || n == "*"))
     }
     fn walk(sym: &SymTab, ty: &HType, from: &[String], from_imports: &[(Vec<String>, String)], sp: maka_lexer::Span, errs: &mut Vec<SemaError>) {
         match ty {
@@ -651,6 +651,10 @@ impl SymTab {
                         funcs: func_ids,
                         span: l.span,
                     });
+                }
+                ast::Item::Global(_) => {
+                    // Handled in a dedicated pass below (needs the type-check
+                    // helpers since the initializer is an expression).
                 }
                 ast::Item::Constexpr(c) => {
                     if sym.constexprs.iter().any(|x| x.name == c.name && x.module_path.as_slice() == item_module.as_slice()) {

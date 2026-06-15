@@ -442,7 +442,7 @@ impl<'a> Analyzer<'a> {
                     self.mark_moved(id, span);
                 }
             }
-            HExprKind::SliceLen(inner) => self.walk_expr(inner),
+            HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => self.walk_expr(inner),
             HExprKind::FnRef(_) => {}
             HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields { self.walk_expr(fe); },
             HExprKind::Match { scrutinee, arms, .. } => {
@@ -740,7 +740,7 @@ fn fill_heap_drops(_sym: &SymTab, f: &mut HFunc) {
                 if let HExprKind::Local(id) = inner.kind { out.insert(id); }
                 moved_locals_in_expr(inner, out);
             }
-            HExprKind::SliceLen(inner) => moved_locals_in_expr(inner, out),
+            HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => moved_locals_in_expr(inner, out),
             HExprKind::FnRef(_) => {}
             HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields { moved_locals_in_expr(fe, out); },
             HExprKind::Match { scrutinee, arms, .. } => {
@@ -929,7 +929,7 @@ fn collect_param_moves_expr(e: &HExpr, out: &mut std::collections::HashSet<Local
             if let Some(id) = root_local(inner) { out.insert(id); }
             collect_param_moves_expr(inner, out);
         }
-        HExprKind::SliceLen(inner) => collect_param_moves_expr(inner, out),
+        HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => collect_param_moves_expr(inner, out),
         HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => {
             for (_, fe) in fields { collect_param_moves_expr(fe, out); }
         }

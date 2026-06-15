@@ -1,0 +1,6 @@
+// Writing to a non-`mut` field through a `mut` binding must point at the field.
+data Slot { int hp; }
+unit main() {
+    mut Slot s = { hp = 5 };
+    s.hp = 9;
+}

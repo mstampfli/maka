@@ -1,0 +1,5 @@
+// Writing to an immutable local must produce an error that names the binding.
+unit main() {
+    int counter = 0;
+    counter = counter + 1;
+}

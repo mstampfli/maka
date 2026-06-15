@@ -356,6 +356,13 @@ pub enum HExprKind {
     Transfer(Box<HExpr>),
     /// Length of a slice/vector value (used by for-each desugar).
     SliceLen(Box<HExpr>),
+    /// Discriminant tag of an enum value: `e.tag` -> int.  For simple enums
+    /// the value already is its tag, so this is identity; for tagged enums
+    /// codegen reads the `.tag` C struct field.
+    EnumTag(Box<HExpr>),
+    /// Read or write a module-scope global by id.  Codegen emits the global's
+    /// C name verbatim; mutability is gated by `GlobalInfo.is_mut`.
+    GlobalRef(GlobalId),
     /// Tagged-enum variant constructor: `Enum.Variant{...}`.
     VariantCtor { enum_id: EnumId, variant: usize, fields: Vec<(usize, HExpr)> },
     /// Match expression. Each arm has an optional variant tag (None = else/literal/wildcard),
@@ -517,12 +524,33 @@ pub struct SymTab {
     /// parser's fold map; cross-module references in expression position go
     /// through `find_constexpr` here (with the usual pub + import check).
     pub constexprs: Vec<ConstexprInfo>,
+    /// Module-scope `pub? mut Type NAME = <literal>;` declarations.
+    /// Reads / writes refer to these by `GlobalId` (index into the Vec).
+    pub globals: Vec<GlobalInfo>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ConstexprInfo {
     pub name: String,
     pub value: i64,
+    pub is_pub: bool,
+    pub module_path: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct GlobalId(pub u32);
+
+#[derive(Debug, Clone)]
+pub struct GlobalInfo {
+    pub name: String,
+    pub c_name: String,
+    pub ty: HType,
+    /// The user-supplied initializer expression, captured as HExpr.
+    /// Codegen emits its textual form as the C static initializer; the C
+    /// compiler enforces "must be a constant expression."
+    pub init: HExpr,
+    pub is_mut: bool,
     pub is_pub: bool,
     pub module_path: Vec<String>,
     pub span: Span,
