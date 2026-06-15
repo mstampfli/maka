@@ -102,11 +102,19 @@ crates/
   sema/         HIR, resolution, type check, lifetime/move
   codegen/      C emission
   driver/       CLI: makac
+stdlib/
+  std.maka      real Maka source for the stdlib (Option, Result, str_*),
+                embedded into the compiler at build time via include_str!
 tests/
   programs/     end-to-end .maka tests with .expected output
   run_all.sh    positive suite
   run_neg.sh    negative suite (every neg_*.maka must fail to compile)
 ```
+
+The stdlib lives in `module std;`. Types like `Option<T>` and `Result<T, E>`
+are accessible cross-module without import (same rule as any `pub data`);
+functions like `str_len` and `str_eq` need an explicit
+`import std.{str_len, str_eq};`.
 
 ## Building
 

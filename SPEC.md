@@ -760,17 +760,27 @@ pthread wrappers.
 
 ---
 
-### 14.0 String types and the prelude
+### 14.0 String types and the stdlib
 
 - **`string`** - a borrowed view of NUL-terminated bytes (`const char*`).
   Stack-only handle, never owns heap.  Literals, slices of buffers, and
-  borrowed views of `String` all have this type.
-- **`String`** - a prelude alias for `own *char`: heap-owned, NUL-terminated,
+  borrowed views of `String` all have this type.  Hardcoded type name.
+- **`String`** - a compiler alias for `own *char`: heap-owned, NUL-terminated,
   auto-freed at scope exit.  Returned by constructors (`a + b`, `read_line()`)
   and stored in `String` bindings.  Coerces to `string` for reads, log, and
-  function arguments.
-- **Prelude functions**: `str_len(string) -> usize`, `str_eq(string, string) -> bool`.
-- **Generic types in the prelude**: `Option<T>` and `Result<T, E>`.
+  function arguments.  Hardcoded type name in the compiler.
+
+Everything else stdlib lives in `stdlib/std.maka` (real Maka source,
+embedded into the compiler via `include_str!` at build time):
+
+- **Generic types**: `Option<T>`, `Result<T, E>` - accessible cross-module
+  without import (`pub` data and enum types follow that rule).
+- **Stdlib functions**: `str_len(string) -> usize`, `str_eq(string, string) -> bool` -
+  require `import std.{str_len, str_eq};` like any other cross-module function.
+
+Genuine compiler builtins (always in scope, never declared in Maka source):
+`log`, `panic`, `free`, `spawn`, `join`, `read_line`, `read_int`, `+` on
+strings, and `.len` on slices / arrays / vectors.
 
 ### 14.1 The `main` function
 

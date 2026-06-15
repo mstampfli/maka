@@ -1,0 +1,32 @@
+// Maka standard library.
+//
+// Imported on demand: `import std.{Option, Result, str_len, str_eq};`
+// (or any subset).  Genuine compiler builtins (log, panic, free, spawn,
+// join, read_line, read_int, `+` on strings, `.len` on slices) live in
+// the codegen crate and are not declared here; they're always in scope.
+//
+// One exception: `Option<T>` is also looked up by the `for x in
+// user_iterator` desugaring even when not explicitly imported, since
+// `for x in slice` doesn't require an import either.
+
+module std;
+
+// ---- generic tagged options --------------------------------------------
+
+pub enum Option<T> {
+    Some { T value },
+    None,
+}
+
+pub enum Result<T, E> {
+    Ok  { T value },
+    Err { E err   },
+}
+
+// ---- string helpers ----------------------------------------------------
+
+extern "strlen" usize __str_len(string s);
+extern "strcmp" i32   __str_cmp(string a, string b);
+
+pub usize str_len(string s)              { return __str_len(s); }
+pub bool  str_eq (string a, string b)    { return __str_cmp(a, b) == 0; }

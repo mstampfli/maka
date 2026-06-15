@@ -52,23 +52,25 @@ fn main() {
         has_imports: Vec::new(),
         item_has_imports: Vec::new(),
     };
-    // Prelude: types and functions every program can use without importing.
-    //   - `Option<T>` — generic tagged option.
-    //   - `String` — owned heap text (compiler alias for `own *char`).
-    //   - `str_*` — common string operations, implemented as externs to libc.
-    let prelude_src = "\
-        pub enum Option<T> { Some { T value }, None }\n\
-        pub enum Result<T, E> { Ok { T value }, Err { E err } }\n\
-        extern \"strlen\" usize __str_len(string s);\n\
-        pub usize str_len(string s) { return __str_len(s); }\n\
-        extern \"strcmp\" i32 __str_cmp(string a, string b);\n\
-        pub bool str_eq(string a, string b) { return __str_cmp(a, b) == 0; }\n\
-        ";
-    if let Ok(m) = maka_parser::parse(prelude_src) {
+    // Standard library: parsed at every build from `stdlib/std.maka`.  The
+    // file is embedded into the compiler binary at build time via
+    // `include_str!` so deployments stay single-binary, but it's a real Maka
+    // source file in the repo that anyone can read or edit.
+    //
+    // All items in `stdlib/std.maka` declare `module std;` and require an
+    // explicit `import std.Name;` to use - this is regular module visibility,
+    // not magic prelude.
+    let std_src = include_str!("../../../stdlib/std.maka");
+    if let Ok(m) = maka_parser::parse(std_src) {
+        let path: Vec<String> = m.module_path.clone().unwrap_or_default();
+        let flat_imports: Vec<(Vec<String>, String)> = m.imports.iter()
+            .flat_map(|imp| imp.names.iter().map(|n| (imp.path.clone(), n.clone())))
+            .collect();
+        let file_has_imports = m.has_imports.clone();
         for _ in &m.items {
-            merged.item_modules.push(Vec::new());
-            merged.item_imports.push(Vec::new());
-            merged.item_has_imports.push(Vec::new());
+            merged.item_modules.push(path.clone());
+            merged.item_imports.push(flat_imports.clone());
+            merged.item_has_imports.push(file_has_imports.clone());
         }
         merged.items.extend(m.items);
     }

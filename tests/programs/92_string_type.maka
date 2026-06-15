@@ -1,6 +1,8 @@
-// `String` is the owned heap-text name (prelude alias for `own *char`).
+// `String` is the owned heap-text name (compiler alias for `own *char`).
 // Auto-frees at scope exit; coerces to `string` for borrowed reads.
-// Prelude provides `str_len`, `str_eq`.
+// `str_len` and `str_eq` live in the stdlib and need an explicit import.
+import std.{str_len, str_eq};
+
 unit main() {
     String s = "hi" + " there";
     log(s);                        // hi there
