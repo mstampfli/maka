@@ -1,7 +1,7 @@
-# Maka Language Specification — Current Implementation
+# Maka Language Specification - Current Implementation
 
 This document reflects the **actual** state of the Maka compiler as of the most
-recent commit. It supersedes all prior `Maka_Spec_V1_*` documents — those drafts
+recent commit. It supersedes all prior `Maka_Spec_V1_*` documents - those drafts
 contain features that were proposed and later removed (optionals, `own *T` early
 drafts, `wall` keyword, separate `heap` value-form, etc.). When this document
 disagrees with an older spec, **this document wins**.
@@ -81,12 +81,12 @@ Postfix: `!` (pointer unwrap). Field: `.`. Index: `[]`. Cast: `as`, `as?`
 | `i8 i16 i32 i64` | `int8_t … int64_t` |
 | `u16 u32 u64` | `uint16_t … uint64_t` |
 | `isize` / `usize` | `intptr_t` / `uintptr_t` |
-| `f32` / `f64` | `double` (both — single precision is not yet distinct) |
+| `f32` / `f64` | `double` (both - single precision is not yet distinct) |
 
 `int` and the sized integers (`i32`, `u8`, etc.) are **distinct types**.
 Implicit conversion between them is forbidden; use `as` to convert.
 
-`char` and `u8` are the same byte type — they alias.
+`char` and `u8` are the same byte type - they alias.
 
 ### 2.2 Pointers and references
 
@@ -100,14 +100,14 @@ Five categories of pointer-like things, each with a distinct contract:
 | `&T` / `&mut T` | no | no | no | yes | auto | tracked borrow |
 | `raw *T` | yes | no | yes | no | `!` (inside `unsafe`) | unsafe escape, FFI |
 
-`own &T` is the same internal type that older specs called `heap T` — the
+`own &T` is the same internal type that older specs called `heap T` - the
 binding owns a single heap allocation that is auto-freed at scope exit or
 transferred via assignment. It is non-null by construction and accessed without
 `!`. The legacy keyword `heap` has been removed; write `own &T` instead.
 
 `*T` is the flexible escape valve: nullable, untracked, freely rebindable.
 Linked-list `next` pointers, optional struct fields, function returns where the
-caller manages free — all `*T`.
+caller manages free - all `*T`.
 
 `raw *T` is **never shareable**, **never auto-derefs**, and its observation
 (deref, field access through it, index, narrowing) requires the use site to be
@@ -124,7 +124,7 @@ declared with when the C side controls the pointer's lifetime.
 | `*T mut` | `*const T` | yes (drop write) |
 | `*T` | `raw *T` | yes (discarding tracking) |
 | `*T` | `own *T` | **no** (cannot claim ownership you don't have) |
-| `T` (struct/scalar) | `own &T`, `own *T` | yes — implicit heap-allocation |
+| `T` (struct/scalar) | `own &T`, `own *T` | yes - implicit heap-allocation |
 | `own &T` | `*T`, `own *T` | yes (downgrade) |
 | `own *T` | `*T` | yes (downgrade) |
 | `&T` / `&mut T` | `*T` | yes |
@@ -142,7 +142,7 @@ type is **context-typed** by the destination slot:
 - `*T x = alloc T { ... };` produces `*T` (no ownership tracking; caller must
   `free()` manually).
 
-`alloc` is no longer a type modifier — writing `alloc T` in a type position is
+`alloc` is no longer a type modifier - writing `alloc T` in a type position is
 a compile error directing the user at `own *T` or `own &T`.
 
 `free(p)` is the built-in deallocator for `*T`. Calling `free` on an `own *T` or
@@ -151,19 +151,19 @@ rejected.
 
 ### 2.4 Aggregate types
 
-- `data Name { fields }` — C-layout struct with named fields, optional defaults,
+- `data Name { fields }` - C-layout struct with named fields, optional defaults,
   optional `mut` per field.
-- `data Name<T, U> { fields }` — generic struct, monomorphized at use sites.
-- `enum Name { Variant, Variant{int field, ...} }` — tagged union. Variants
+- `data Name<T, U> { fields }` - generic struct, monomorphized at use sites.
+- `enum Name { Variant, Variant{int field, ...} }` - tagged union. Variants
   without payload are tag-only (C-style); with payload use the union layout.
-- `[N]T` — fixed-length array (C `T[N]`).
-- `[]T` / `[]mut T` — slice (pointer + length).
-- `[*]T` — vector payload (only inside `own &[*]T`).
-- `Name<T, U>` — generic instantiation. Monomorphized at compile time.
-- `RetType(P1, P2)` — function pointer type (also covers closure types via the
+- `[N]T` - fixed-length array (C `T[N]`).
+- `[]T` / `[]mut T` - slice (pointer + length).
+- `[*]T` - vector payload (only inside `own &[*]T`).
+- `Name<T, U>` - generic instantiation. Monomorphized at compile time.
+- `RetType(P1, P2)` - function pointer type (also covers closure types via the
   internal fat-callable representation).
 
-### 2.4.1 `embed` — composition with promotion
+### 2.4.1 `embed` - composition with promotion
 
 A field declared `embed` carries an unnamed inner struct whose fields and
 methods are promoted onto the outer struct:
@@ -190,7 +190,7 @@ in declaration order.
 
 **Method promotion.** A method whose first parameter's underlying type can be
 reached from the receiver through an `embed` chain is callable on the receiver
-— either as `outer.method(...)` or by passing `&outer` where `&Inner` is
+- either as `outer.method(...)` or by passing `&outer` where `&Inner` is
 wanted. The receiver expression is rewritten to drill through the embed fields
 automatically.
 
@@ -210,20 +210,20 @@ first `dyn` argument.
 
 Standard infix and unary operators with conventional precedence. Maka-specific:
 
-- `expr!` — pointer unwrap (deref). Required before field/index access on `*T`,
+- `expr!` - pointer unwrap (deref). Required before field/index access on `*T`,
   `own *T`, and `raw *T`. The compiler must prove the pointer is non-null at
-  this site — see §6.
-- `&x` / `&mut x` — borrow.
-- `alloc value` — heap allocation (see §2.3).
-- `expr as Type` — unchecked cast.
-- `expr as? Type` — checked cast (currently for `int → enum` and `int → char`).
-- `transfer x` / `share x` — only at direct argument positions of `gate`
+  this site - see §6.
+- `&x` / `&mut x` - borrow.
+- `alloc value` - heap allocation (see §2.3).
+- `expr as Type` - unchecked cast.
+- `expr as? Type` - checked cast (currently for `int → enum` and `int → char`).
+- `transfer x` / `share x` - only at direct argument positions of `gate`
   function calls (see §7).
-- `match (expr) { arms }` — pattern matching, can appear as expression or
+- `match (expr) { arms }` - pattern matching, can appear as expression or
   statement. Exhaustiveness checked.
-- `RetType(params) [captures] { body }` — lambda. Captures named with mode
+- `RetType(params) [captures] { body }` - lambda. Captures named with mode
   `[name]` (by value), `[&name]` (by const ref), `[&mut name]` (by mut ref).
-- `EnumName.Variant { field = expr, ... }` — tagged enum constructor.
+- `EnumName.Variant { field = expr, ... }` - tagged enum constructor.
 
 ---
 
@@ -257,11 +257,11 @@ caller invokes such a function, `propagate` returns from the **caller's** frame
 (GCC statement-expression trick), enabling early-exit error patterns. The
 expression is omitted (`propagate;`) when the caller returns `unit`; supplying
 an expression that doesn't match the caller's return type is a compile error,
-**including** for `propagate` reached through a chain of inline calls — the
+**including** for `propagate` reached through a chain of inline calls - the
 check follows transitively to the outermost non-inline caller.
 
 A `return` statement inside an `inline` function exits the *inline expansion*
-only — even when it appears inside a user-written loop in that inline body.
+only - even when it appears inside a user-written loop in that inline body.
 `propagate` is the only way to escape the surrounding non-inline frame.
 
 ---
@@ -283,16 +283,16 @@ cblock       := cblock "raw C source";
 constexpr    := constexpr Type NAME = constant_int_expr;
 ```
 
-`<TyParams>` accepts both `<T>` and `<T: Attr>` shorthand — the latter desugars
+`<TyParams>` accepts both `<T>` and `<T: Attr>` shorthand - the latter desugars
 to `where T has Attr`.
 
-`pub` is enforced cross-module — see §11.
+`pub` is enforced cross-module - see §11.
 
 `inline` marks a function for caller-frame splicing (statement-expression
 expansion). Recursion is forbidden among inline functions. `propagate` only
 works inside `inline`.
 
-`gate` marks a function as a synchronization-boundary crossing — see §7.
+`gate` marks a function as a synchronization-boundary crossing - see §7.
 
 ### 5.1 `cinclude` and `cblock`
 
@@ -304,7 +304,7 @@ cblock "static double sq(double x) { return x*x; }";
 
 `cinclude "name.h";` emits `#include <name.h>` in the generated C prologue.
 `cblock "..."` pastes the contents verbatim at module scope after typedefs
-and before any extern function prototypes. The string is treated raw — embedded
+and before any extern function prototypes. The string is treated raw - embedded
 braces, semicolons, etc. are fine.
 
 ### 5.2 `extern` and variadic FFI
@@ -363,7 +363,7 @@ runtime null-check macro. Proof comes from:
 - The local appears inside a `while (p != null)` body.
 
 Without a proof, the compiler rejects the deref with a message that suggests
-the appropriate guard. **There is no `MAKA_UNWRAP` runtime macro** — the
+the appropriate guard. **There is no `MAKA_UNWRAP` runtime macro** - the
 compiler will not insert a panic on null.
 
 ### 6.4 Dangling-pointer collapse + warning
@@ -376,11 +376,11 @@ every code path, a flow-sensitive warning fires:
 ```
 warning at L:C: pointer `p` was auto-nulled when its pointee went out of scope
 and has not been explicitly re-assigned on every code path since; this use
-observes that silent overwrite — re-assign `p` yourself before reading it
+observes that silent overwrite - re-assign `p` yourself before reading it
 ```
 
 Comparing the pointer to `null` (`p == null` / `p != null`) does **not**
-suppress the warning — the comparison reflects the silent overwrite and the
+suppress the warning - the comparison reflects the silent overwrite and the
 programmer should know. Only an explicit user assignment to the pointer (even
 to `null`) clears the warning state.
 
@@ -394,7 +394,7 @@ compile error** (`poisoned`).
 1. Casting an integer to a pointer (`usize as *T`, `int as *T`).
 2. Observing a `raw *T` (deref, field, index, narrowing-based deref).
 
-Inside `unsafe`, `raw *T` behaves identically to `*T` — the forced-handling
+Inside `unsafe`, `raw *T` behaves identically to `*T` - the forced-handling
 rule still applies (you still need narrowing to deref). `unsafe` does not turn
 off the lifetime pass; it just unlocks two specific operations.
 
@@ -417,7 +417,7 @@ unit main() {
 }
 ```
 
-`transfer X`: invalidates `X` in the caller — ownership crosses.
+`transfer X`: invalidates `X` in the caller - ownership crosses.
 
 `share X`: the type of `X` must be `Shareable`. Primitives, sync primitives,
 and structs whose every field is Shareable are auto-derived as Shareable. `*T`
@@ -429,7 +429,7 @@ Recognized Shareable types by name: `Mutex`, `RwLock`, `Spinlock`, `Channel`,
 
 Calls to non-`gate` functions reject `transfer`/`share` annotations.
 
-### 7.2 `spawn` and `join` — built-in thread API
+### 7.2 `spawn` and `join` - built-in thread API
 
 `spawn(closure) -> *Thread` runs a `unit()` closure on a fresh pthread and
 returns a handle. The closure may be bare (no captures) or `alloc`-wrapped
@@ -501,7 +501,7 @@ expression).
 // No-capture lambda
 unit() task = unit() { log("hello"); };
 
-// Capturing lambda — env on stack, must NOT escape
+// Capturing lambda - env on stack, must NOT escape
 int(int by) bump = int(int by) [&mut counter] { counter = counter + by; };
 
 // Heap env (for closures that escape via spawn or return)
@@ -509,11 +509,11 @@ own &unit() job = alloc unit() [transfer payload] { use(payload); };
 ```
 
 Capture modes:
-- `[x]` — by value.
-- `[&x]` — by const ref.
-- `[&mut x]` — by mut ref.
-- `[transfer x]` — moves an owning value into the closure env.
-- `[share x]` — shareable capture (Shareable types only).
+- `[x]` - by value.
+- `[&x]` - by const ref.
+- `[&mut x]` - by mut ref.
+- `[transfer x]` - moves an owning value into the closure env.
+- `[share x]` - shareable capture (Shareable types only).
 
 The **lambda-escape rule**: a closure with non-empty captures that escapes the
 spawning frame (returned by value, stored in `spawn`, etc.) requires its env to
@@ -540,8 +540,8 @@ etc. are expanded to distinct C structs.
 ```maka
 // Declare a contract.  `_` is the placeholder for the implementing type.
 attr Show {
-    unit show(&_ self);                       // signature-only — required
-    string label(&_ self) { return "any"; }   // default body — optional
+    unit show(&_ self);                       // signature-only - required
+    string label(&_ self) { return "any"; }   // default body - optional
 }
 
 // Implement.  `_` in the impl is rewritten to the receiver type.
@@ -556,7 +556,7 @@ Point has Show {
 **Contract matching.** Every `has` method must correspond to a method declared
 in the `attr`. Every attr method must either be implemented in the `has` block
 or have a default body in the attr. Signature mismatches (arity, param types,
-return type — compared after `_` is substituted with the implementing type) are
+return type - compared after `_` is substituted with the implementing type) are
 rejected.
 
 **Bound syntax.** Two surfaces are accepted and mean the same thing:
@@ -567,7 +567,7 @@ unit render<T>(&T x) where T has Show { x.show(); }      // long form
 ```
 
 At each generic instantiation, the substituted type must have a visible `has`
-impl for the named attr — otherwise the call is rejected.
+impl for the named attr - otherwise the call is rejected.
 
 **Method dispatch.** `x.show()` on a value of type `T` with bound `T: Show`
 resolves to the `has` impl chosen by the receiver's concrete type at
@@ -596,7 +596,7 @@ unit main() { Point p = { x = 42 }; go(&p); }
 ```
 
 Without the `use`, the bound check fails with a hint naming the exact `use`
-declaration needed. There is no implicit propagation — `pub has` impls are
+declaration needed. There is no implicit propagation - `pub has` impls are
 opt-in at every consumer.
 
 ### 10.2 `logic` blocks as legacy trait shape
@@ -613,13 +613,13 @@ render(&color);    // OK: Color implements Drawable (via the logic block)
 
 The older `logic Trait { method(&Receiver self) }` pattern is still accepted
 and registers an impl just like `has`: the first param's underlying nominal
-type becomes the implementer. The new `attr`/`has` form is preferred — it
+type becomes the implementer. The new `attr`/`has` form is preferred - it
 makes contract and impl explicit, supports default bodies, and is the only
 form that contract-matches.
 
 A `logic` block may be marked `pub`: the trait registration and every method
 inside it become exported.  Visibility composes with the same `use Mod.Type.Trait;`
-machinery as `has` impls — a `pub logic` is reachable cross-module only when
+machinery as `has` impls - a `pub logic` is reachable cross-module only when
 the consumer explicitly opts in.  Per-method `pub` on a logic-block method is
 not part of the grammar; visibility flows from the block.
 
@@ -689,7 +689,7 @@ imports, no cross-module symbols are visible (calls fail with the
 Names of built-in functions (`log`, `free`, `panic`, `spawn`, `join`) are
 always visible and require no import.
 
-### 11.5 `use ModPath.Type.Attr;` — explicit `has` propagation
+### 11.5 `use ModPath.Type.Attr;` - explicit `has` propagation
 
 ```maka
 use shapes.Point.Show;
@@ -698,11 +698,11 @@ use shapes.Point.Show;
 `use` declarations propagate a `pub has Type Attr` impl from another module
 into the current file's bound-check scope. They follow the same prelude region
 as `import` (after `module`, before any items). At least three dotted segments
-are required — the last two are always `(Type, Attr)`, everything before is
+are required - the last two are always `(Type, Attr)`, everything before is
 the module path.
 
 A `use` declaration also authorizes calls to that impl's methods across the
-module boundary — you do not need a separate `import` for each method, since
+module boundary - you do not need a separate `import` for each method, since
 the `use` covers the whole impl.
 
 ---
@@ -720,7 +720,7 @@ What a Maka program can do directly with C:
 - Escape lifetime tracking via `raw *T`.
 
 What a Maka program **cannot** do directly:
-- Use C macros that expand to non-function syntax — they must be wrapped in a
+- Use C macros that expand to non-function syntax - they must be wrapped in a
   cblock helper.
 - Use C struct types without declaring an equivalent `data` struct.
 - Vararg-call a non-extern function.
@@ -754,7 +754,7 @@ pthread wrappers.
 | `panic` | `u32::MAX - 2` | `unit panic(string msg)` | prints to stderr, calls `abort()` |
 | `spawn` | `u32::MAX - 3` | `*Thread spawn(unit() closure)` | accepts bare or alloc'd closure |
 | `join` | `u32::MAX - 4` | `unit join(*Thread t)` | blocks; reclaims handle |
-| `+` (concat) | `u32::MAX - 5` (and `_freel/_freer/_freeb`) | `own *char (string, string)` | binop on two `string`s — result is heap-allocated, auto-freed; chained concats use freeing variants so intermediates don't leak |
+| `+` (concat) | `u32::MAX - 5` (and `_freel/_freer/_freeb`) | `own *char (string, string)` | binop on two `string`s - result is heap-allocated, auto-freed; chained concats use freeing variants so intermediates don't leak |
 | `read_line` | `u32::MAX - 6` | `own *char read_line()` | reads one line from stdin (NUL-terminated, no trailing `\n`); returns `null` on EOF |
 | `read_int` | `u32::MAX - 7` | `int read_int()` | reads one base-10 integer from stdin; panics on malformed input |
 
@@ -762,16 +762,15 @@ pthread wrappers.
 
 ### 14.0 String types and the prelude
 
-- **`string`** — a borrowed view of NUL-terminated bytes (`const char*`).
+- **`string`** - a borrowed view of NUL-terminated bytes (`const char*`).
   Stack-only handle, never owns heap.  Literals, slices of buffers, and
   borrowed views of `String` all have this type.
-- **`String`** — a prelude alias for `own *char`: heap-owned, NUL-terminated,
+- **`String`** - a prelude alias for `own *char`: heap-owned, NUL-terminated,
   auto-freed at scope exit.  Returned by constructors (`a + b`, `read_line()`)
   and stored in `String` bindings.  Coerces to `string` for reads, log, and
   function arguments.
 - **Prelude functions**: `str_len(string) -> usize`, `str_eq(string, string) -> bool`.
-- **Generic types in the prelude**: `Option<T>`.  `Result<T, E>` is a planned
-  addition.
+- **Generic types in the prelude**: `Option<T>` and `Result<T, E>`.
 
 ### 14.1 The `main` function
 
@@ -785,7 +784,7 @@ int main([]string args)      // both: args + exit code
 The slice form receives a borrowed view of the OS-level `argv`: `args[0]` is
 the program name, `args[1..]` are user-supplied arguments. The slice and its
 strings are read-only and live for the program's lifetime; Maka code may not
-free them. The OS only delivers C strings — any further parsing (`--port 8080`
+free them. The OS only delivers C strings - any further parsing (`--port 8080`
 → int) is library/user code on top of `args`.
 
 ### 14.2 Slice / array / vector length
@@ -825,14 +824,14 @@ makac <input.maka>... [-o output] [--emit-c] [--run] [--link <file|flag>] [-l na
 The following appear in older drafts or aspirational discussions but are
 **not part of the current implementation**:
 
-- Optionals (`?T`, `??T`, etc.) — removed in v1.2 and never returned.
-- `await` and `async` — removed; the keywords no longer lex.
-- `heap` as a keyword — removed; use `own &T` for the strict-owning binding and
+- Optionals (`?T`, `??T`, etc.) - removed in v1.2 and never returned.
+- `await` and `async` - removed; the keywords no longer lex.
+- `heap` as a keyword - removed; use `own &T` for the strict-owning binding and
   `alloc value` for the allocation expression.
-- `alloc` as a type modifier — `alloc T` in a type position is a parse error.
-- The `wall` keyword — renamed to `gate`.
-- `move()` as an explicit operator — moves are implicit on assignment.
-- Self-hosting — the compiler is written in Rust.
+- `alloc` as a type modifier - `alloc T` in a type position is a parse error.
+- The `wall` keyword - renamed to `gate`.
+- `move()` as an explicit operator - moves are implicit on assignment.
+- Self-hosting - the compiler is written in Rust.
 
 ---
 
@@ -851,9 +850,7 @@ These are real limitations the implementation is honest about:
   outside that context, two identically-named methods on the same type need
   the surrounding where-bound to disambiguate.
 - **No auto-borrow on method calls.** `p.method()` requires `p` to match the
-  receiver's type exactly; if the method takes `&Self`, the call site must
+  receiver's type exactly; if the method takes `&_ self`, the call site must
   write `(&p).method()`.  No magic `&` insertion at dispatch.
-- **No `Result<T, E>` in the prelude.** `Option<T>` ships; `Result` is a
-  straightforward next addition.
 
 These are tractable to fix; they are not architectural blockers.

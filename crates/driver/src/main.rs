@@ -58,6 +58,7 @@ fn main() {
     //   - `str_*` — common string operations, implemented as externs to libc.
     let prelude_src = "\
         pub enum Option<T> { Some { T value }, None }\n\
+        pub enum Result<T, E> { Ok { T value }, Err { E err } }\n\
         extern \"strlen\" usize __str_len(string s);\n\
         pub usize str_len(string s) { return __str_len(s); }\n\
         extern \"strcmp\" i32 __str_cmp(string a, string b);\n\

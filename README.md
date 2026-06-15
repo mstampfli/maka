@@ -12,7 +12,7 @@ Maka is opinionated about a small set of things:
   the compiler can't see (C interop, fixed addresses, unsafe code).
 - **`alloc value` is the only allocator.** It must land in an owning slot.
 - **Forced handling.** You can't deref a nullable pointer without proof of
-  non-null at the deref site — narrowing windows, early-exit guards, or
+  non-null at the deref site - narrowing windows, early-exit guards, or
   immediate-from-`alloc`. No `MAKA_UNWRAP` macro, no runtime null check.
 - **`attr` + `has` instead of traits + impl.** An `attr` declares the
   contract (with optional default bodies); `Type has Attr { ... }` provides
@@ -68,7 +68,7 @@ inline int take(own *Box b) {
 
 unit main() {
     own *Box b = alloc Box { v = 42 };
-    log(take(b));    // 42 — ownership moves into `take`, freed at splice exit
+    log(take(b));    // 42 - ownership moves into `take`, freed at splice exit
 }
 ```
 
@@ -152,8 +152,8 @@ with any reasonably recent gcc/clang.
 
 What's intentionally *not* in v1, but is on the road:
 
-- `Result<T, E>` in the prelude.
-- Auto-borrow at method calls (today: `(&p).method()` for `&Self` receivers).
+- Auto-borrow at method calls (today: `(&p).method()` when the method's
+  receiver is `&_ self`, since dispatch matches receiver type exactly).
 - `Attr.method(x)` qualified-call form.
 - A `format(...)` for typed string interpolation.
 - File I/O beyond stdin/stdout.
