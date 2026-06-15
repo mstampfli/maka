@@ -1686,9 +1686,23 @@ impl<'a> TypeChecker<'a> {
                 if let ast::Expr::Ident(qual, _) = base.as_ref() {
                     if self.sym.logic_by_name(qual).is_some() || self.sym.attr_by_name(qual).is_some() {
                         (name.clone(), Some(qual.clone()), None)
-                    } else if self.lookup(qual).is_some() {
-                        // Local variable as receiver: postfix call.
-                        (name.clone(), None, Some((**base).clone()))
+                    } else if let Some(id) = self.lookup(qual) {
+                        // Local variable as receiver: postfix call.  When the
+                        // receiver is a `Rust<T>` opaque, the bridge emits its
+                        // methods as free functions named `T_<method>` — look
+                        // there first so `rng.pick(...)` dispatches without
+                        // requiring the user to spell out `Rng_pick(rng, ...)`.
+                        let local_ty = self.local(id).ty.clone();
+                        if let HType::RustOpaque(label) = &local_ty {
+                            let mangled = format!("{}_{}", label, name);
+                            if self.sym.func_by_name(&mangled).is_some() {
+                                (mangled, None, Some((**base).clone()))
+                            } else {
+                                (name.clone(), None, Some((**base).clone()))
+                            }
+                        } else {
+                            (name.clone(), None, Some((**base).clone()))
+                        }
                     } else if self.is_module_name(qual) {
                         // Module-qualified call: filter candidates by module path.
                         module_qualifier = Some(qual.clone());

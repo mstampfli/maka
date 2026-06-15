@@ -290,8 +290,12 @@ impl<'a> Cx<'a> {
             self.wl(&format!("struct {} {{", c_ident(&s.name)));
             self.open();
             for f in &s.fields {
-                let ty = self.c_type(&f.ty);
-                self.wl(&format!("{} {};", ty, c_ident(&f.name)));
+                // `c_decl` correctly places the field name in the middle for
+                // array-of-T fields (`T name[N]`) and uses the standard
+                // `T name` form for everything else.  Plain `c_type()` would
+                // emit `T[N] name`, which isn't valid C.
+                let decl = self.c_decl(&f.ty, &c_ident(&f.name));
+                self.wl(&format!("{};", decl));
             }
             self.close();
             self.wl("};");

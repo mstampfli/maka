@@ -890,6 +890,10 @@ impl Parser {
             TokKind::Match => {
                 self.bump();
                 let (scrut, arms) = self.parse_match_after_kw()?;
+                // Optional trailing `;` — match-as-statement reads more
+                // naturally with one (matches every other statement form's
+                // terminator).  The grammar accepts either shape.
+                let _ = self.eat(&TokKind::Semicolon);
                 Ok(Stmt::Match { scrutinee: scrut, arms, span: start })
             }
             TokKind::Yield => {
@@ -1652,6 +1656,13 @@ impl Parser {
                         | (TokKind::Underscore, _) => false,
                         (TokKind::Ident(_), TokKind::LParen) => false,
                         (TokKind::Ident(_), TokKind::Dot)    => false,
+                        // `Ident = ...` is an assignment statement — always a
+                        // block body.  (Literal-match destructure `{ field = N }`
+                        // is unused in practice; we tilt toward the common case.)
+                        (TokKind::Ident(_), TokKind::Eq)     => false,
+                        // `mut Type name = ...` and `Type name = ...` are let
+                        // statements that need a block body.
+                        (TokKind::Ident(_), TokKind::Ident(_)) => false,
                         _ => true,
                     };
                     if looks_like_destructure {
