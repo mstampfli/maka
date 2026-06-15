@@ -1,0 +1,22 @@
+// `break` inside `for x in user_iterator { ... }` exits the loop, not just
+// the iteration step.  The desugaring rewrites top-level `break` into a flag
+// + match-do-while-0 break, then the outer while sees the flag and exits.
+data Counter { mut int cur; int end; }
+
+logic CounterIter {
+    Option<int> next(&mut Counter self) {
+        if (self.cur >= self.end) { return Option.None; }
+        int v = self.cur;
+        self.cur = self.cur + 1;
+        return Option.Some{ value = v };
+    }
+}
+
+unit main() {
+    Counter c = { cur = 10, end = 20 };
+    for (int x in c) {
+        if (x == 13) { break; }     // exits the for-each
+        log(x);
+    }
+    log(999);
+}

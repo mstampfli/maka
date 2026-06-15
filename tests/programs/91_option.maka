@@ -1,0 +1,19 @@
+// `Option<T>` is a prelude-provided generic enum.  Two variants: `Some{value}`
+// carrying a `T`, and `None`.  Generic enums monomorphize like generic structs:
+// `Option<int>`, `Option<string>` each get a distinct concrete enum.
+unit main() {
+    Option<int> a = Option.Some{ value = 42 };
+    Option<int> b = Option.None;
+
+    int got_a = match (a) {
+        Some{value} value,
+        None 0,
+    };
+    log(got_a);    // 42
+
+    int got_b = match (b) {
+        Some{value} value,
+        None -1,
+    };
+    log(got_b);    // -1
+}

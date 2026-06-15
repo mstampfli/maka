@@ -1,0 +1,19 @@
+// User-defined iterator: any struct with a `next() -> Option<T>` method
+// participates in `for ... in ...` via AST-level desugaring to while+match.
+data Counter { mut int cur; int end; }
+
+logic CounterIter {
+    Option<int> next(&mut Counter self) {
+        if (self.cur >= self.end) { return Option.None; }
+        int v = self.cur;
+        self.cur = self.cur + 1;
+        return Option.Some{ value = v };
+    }
+}
+
+unit main() {
+    Counter c = { cur = 10, end = 13 };
+    for (int x in c) {
+        log(x);
+    }
+}
