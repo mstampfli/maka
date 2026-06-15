@@ -4,15 +4,15 @@ Maka exposes **three concurrency tiers**, each picking a different
 weight class.  All three follow the same surface shape:
 
     HandleType<T> h = <tier>(T() { body });   // spawn, get a handle
-    T value = h.await;                          // or join(h) — wait, get value
+    T value = join(h);                          // wait, get value
 
-Three keywords (`thread`, `spawn`, `job`), one operation (`.await` /
-`join`), plus a small set of composition helpers (`join(...)`,
-`select(...)`, `par_for`, `par_reduce`, `par_map`).  No `async`, no
-explicit Future trait at the user level, no Pin, no function
-coloring, no borrows-across-await rule.  Every concurrency tier is a
-real function with a real stack — code looks like blocking code, gets
-free concurrency.
+Three builtin spawners (`thread`, `spawn`, `job`), one waiting operation
+(`join`), plus a small set of composition helpers (`select`, `par_for`,
+`par_reduce`, `par_map`).  No `async` keyword, no `await` keyword, no
+`.await` postfix, no Future trait at the user level, no Pin, no
+function coloring, no borrows-across-await rule.  Every concurrency
+tier is a real function with a real stack — code looks like blocking
+code, gets free concurrency.
 
 `SPEC.md` §7 is the canonical short reference.  This document is the
 deep dive.
@@ -60,17 +60,16 @@ or panics.  At spawn time, the handle is returned synchronously
 
 ### 2.2 Awaiting / joining
 
-Get the handle's value by calling `.await` on it (postfix sugar for
-`join`):
+Get the handle's value by calling `join(h)` on it:
 
 ```maka
-int va = a.await;       // pause this caller until thread a finishes; get its value
-int vb = join(b);       // same thing, alternate syntax
-int vc = c.await;       // same shape for jobs
+int va = join(a);       // pause this caller until thread a finishes; get its value
+int vb = join(b);       // same shape for fibers
+int vc = join(c);       // same shape for jobs
 ```
 
-`.await` and `join(h)` are **identical** in semantics — pick whichever
-reads better at the call site.
+`join(h)` is the one waiting operation — no `.await` postfix, no
+`await` keyword, no separate name per tier.
 
 Dropping a handle without awaiting it **cancels the underlying work**
 at the next safe point:
@@ -140,8 +139,8 @@ spawn both and await each:
 Fiber<Profile>   hp = spawn(Profile()   { return fetch_profile(); });
 Fiber<[]Setting> hs = spawn([]Setting() { return fetch_settings(); });
 
-Profile      p = hp.await;       // hp finishes; hs runs concurrently
-[]Setting    s = hs.await;       // collect hs's result (probably already done)
+Profile      p = join(hp);       // hp finishes; hs runs concurrently
+[]Setting    s = join(hs);       // collect hs's result (probably already done)
 // Total time: max(profile_time, settings_time), not the sum.
 ```
 
@@ -360,7 +359,7 @@ workloads.
 
 ### 5.3 Sync to the calling fiber
 
-A `Job<T>` handle's `.await` either:
+A `Job<T>` handle's `join` either:
   - returns immediately if the job has already completed,
   - or parks the calling fiber on the job's completion latch.
 
@@ -408,31 +407,30 @@ All three are **builtin parametric types** registered by the sema
 crate (same as `Thread` already is in current Maka).  The runtime
 internally distinguishes them.
 
-All three implement an attribute `attr Awaitable<T>`:
+All three implement an attribute `attr Awaitable<T>` — purely an
+internal sema concept; the user never spells `.await` anywhere:
 
 ```maka
 pub attr Awaitable<T> {
-    T await(&mut _ self);
+    T __wait(&mut _ self);     // internal; users call `join(h)` instead
 }
 ```
 
-`h.await` is just `Awaitable.await(&mut h)`.  Each handle type
-implements it differently:
-  - `Thread<T>::await` calls `pthread_join`.
-  - `Fiber<T>::await` parks the calling fiber on the target fiber's
+Each handle type implements `__wait` differently:
+  - `Thread<T>::__wait` calls `pthread_join`.
+  - `Fiber<T>::__wait` parks the calling fiber on the target fiber's
     completion latch, returns the stored result.
-  - `Job<T>::await` parks the calling fiber on the job's completion
+  - `Job<T>::__wait` parks the calling fiber on the job's completion
     latch.
 
-### 6.2 `join(h)` — single-handle alias for `.await`
+### 6.2 `join(h)` — single-handle wait
 
 ```maka
-pub inline T join<T, H>(H h) where H has Awaitable<T> {
-    return h.await;
-}
+pub inline T join<T, H>(H h) where H has Awaitable<T>;
 ```
 
-Pure sugar — `join(h)` and `h.await` are identical.
+Dispatches to the handle's `__wait`.  Single way to wait — no
+`.await` postfix anywhere in the user surface.
 
 ### 6.3 `join(&[]Handle<T>)` — homogeneous wait-all
 
@@ -493,14 +491,14 @@ unit handle_request(TcpStream conn) {
     // CPU-bound transformation on a worker thread — let the fiber yield
     // until the thread completes.
     Thread<Response> bg = thread(Response() { return compute(req); });
-    Response resp = bg.await;
+    Response resp = join(bg);
 
     // Concurrent IO: fetch from upstream while preparing response.
-    // Different return types → spawn each, await each into typed var.
+    // Different return types → spawn each, join each into typed var.
     Fiber<Bytes> hf = spawn(Bytes() { return fetch_upstream(req); });
     Fiber<unit>  hp = spawn(unit()  { return prepare_response(); });
-    Bytes body = hf.await;
-    hp.await;
+    Bytes body = join(hf);
+    join(hp);
 
     write(&mut conn, body);
 }
@@ -520,7 +518,7 @@ unit frame() {
     update_ui();
 
     // Pick up the rendered image.
-    Image img = renderer.await;
+    Image img = join(renderer);
     present(img);
 }
 ```
@@ -553,7 +551,7 @@ unit frame() {
 | Area | Status |
 |---|---|
 | Surface (`thread`, `spawn`, `job` keywords + handle types) | Implemented |
-| `Awaitable<T>` attr + `.await` postfix dispatch | Implemented |
+| Internal `Awaitable<T>` attr + `join(h)` user surface | Implemented |
 | `join(h)` as alias | Implemented |
 | `join(&[]Handle<T>) -> []T` (homogeneous wait-all) | Pending — needs real fiber primitives |
 | `select(&[]Handle<T>) -> T` (homogeneous race) | Pending — needs real fiber primitives |
