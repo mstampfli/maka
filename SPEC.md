@@ -514,9 +514,14 @@ changing the surface.  User code written today against `thread` /
 `spawn` / `job` will keep working.
 
 Composition helpers documented in `CONCURRENCY.md`:
-  - `join(h1, h2, ..., hN)` → `JoinN<T1, ..., TN>` — wait for all
-  - `select(h1, h2, ..., hN)` → `SelectN<T1, ..., TN>` — wait for first
+  - `join(&[]Handle<T>) -> []T` — homogeneous wait-all
+  - `select(&[]Handle<T>) -> T` — homogeneous race, winner cancels losers
   - `par_for` / `par_reduce` / `par_map` — data-parallel over slices
+
+Heterogeneous composition (different return types) lives in user code:
+either wrap each spawn body's return in a common `enum` and pass a
+homogeneous slice, or spawn each handle separately and await each into
+its own typed variable.  No `JoinN<T1, T2, ...>` heterogeneous structs.
 
 These ship as part of the real runtime; not yet wired in this MVP.
 

@@ -82,37 +82,72 @@ at the next safe point:
     well-known points (next IO call etc.).  Not all blocking C calls
     can be cancelled mid-flight — that's the OS's behavior, not ours.
 
-### 2.3 Composition
+### 2.3 Composition — homogeneous-only
 
-Multiple handles in parallel — wait for all:
+`join` and `select` take a slice of same-typed handles.  No heterogeneous
+overloads, no auto-generated `JoinN` / `SelectN` structs, no per-arity
+field naming — `join` returns `[]T`, `select` returns `T`.
 
 ```maka
-Join2<int, string> r = join(spawn(int() { return n1(); }),
-                            spawn(string() { return s1(); }));
-log(r.first);
-log(r.second);
+// Wait for all — returns []T in spawn order.
+[]int counts = join([
+    spawn(int() { return fetch_count(1); }),
+    spawn(int() { return fetch_count(2); }),
+    spawn(int() { return fetch_count(3); }),
+]);
+log(counts[0]);
+log(counts[1]);
+log(counts.len);
+
+// Race — return the first finisher's value; cancel the rest.
+int winner = select([
+    spawn(int() { return read_mirror(1); }),
+    spawn(int() { return read_mirror(2); }),
+    spawn(int() { return read_mirror(3); }),
+]);
 ```
 
-`join(...)` overloaded for 2–8 handles, returns `JoinN<T1, T2, ...>`
-data structs (pre-monomorphised; no tuples).  For dynamic-size
-homogeneous joins:
+Signatures:
 
 ```maka
-pub []T join_all<T>(&[]Fiber<T> handles);
+pub []T join<T>(&[]Handle<T> handles);
+pub T   select<T>(&[]Handle<T> handles);
 ```
 
-Multiple handles, take whichever finishes first, cancel the rest:
+**Heterogeneous case — user wraps the returns in a common type.**  This is
+the answer to "but what if my two parallel operations return different
+types?":
 
 ```maka
-SelectResult<int, unit> r = select(read(&conn),
-                                    sleep(Duration.secs(5)));
+// "Race a read against a timeout" — both branches return the same enum.
+enum Event { Got { int value }, Timeout }
+
+Event r = select([
+    spawn(Event() { return Event.Got { value = read_int(&conn) }; }),
+    spawn(Event() { sleep(Duration.secs(5)); return Event.Timeout; }),
+]);
 match (r) {
-    First{value}  { log(value); },          // got the read
-    Second{value} { log("timeout"); },      // sleep won
+    Got{value} log(value),
+    Timeout    log("timed out"),
 };
 ```
 
-`select(...)` is also overloaded 2–8.
+**Spawn-and-await each separately** is the other pattern.  For "fetch
+profile AND settings in parallel" you don't need a join primitive — just
+spawn both and await each:
+
+```maka
+Fiber<Profile>   hp = spawn(Profile()   { return fetch_profile(); });
+Fiber<[]Setting> hs = spawn([]Setting() { return fetch_settings(); });
+
+Profile      p = hp.await;       // hp finishes; hs runs concurrently
+[]Setting    s = hs.await;       // collect hs's result (probably already done)
+// Total time: max(profile_time, settings_time), not the sum.
+```
+
+You get two named, typed variables — no wrapper struct, no `.v0` / `.v1`
+positional access, no anonymous bundling.  This is cleaner than any
+heterogeneous join primitive could be.
 
 ### 2.4 Data-parallel helpers (jobs under the hood)
 
@@ -389,7 +424,7 @@ implements it differently:
   - `Job<T>::await` parks the calling fiber on the job's completion
     latch.
 
-### 6.2 `join(h)` as alias
+### 6.2 `join(h)` — single-handle alias for `.await`
 
 ```maka
 pub inline T join<T, H>(H h) where H has Awaitable<T> {
@@ -399,39 +434,35 @@ pub inline T join<T, H>(H h) where H has Awaitable<T> {
 
 Pure sugar — `join(h)` and `h.await` are identical.
 
-### 6.3 `join(h1, h2, ...)` — concurrent wait-all
-
-Overloaded on arity 2–8.  Returns a `JoinN<T1, T2, ...>` data struct
-holding the results once all handles finish.
+### 6.3 `join(&[]Handle<T>)` — homogeneous wait-all
 
 ```maka
-pub data Join2<A, B> { A first; B second; }
-pub data Join3<A, B, C> { A first; B second; C third; }
-// ... Join4 .. Join8
-
-pub inline Join2<A, B> join<A, B, HA, HB>(HA a, HB b)
-    where HA has Awaitable<A>, HB has Awaitable<B>;
+pub []T join<T, H>(&[]H handles) where H has Awaitable<T>;
 ```
 
-Implementation: poll each handle in sequence; each await suspends the
-caller until that handle is ready.  Total wait is `max(t_i)` because
-the children are running concurrently — only the AWAIT IS SEQUENTIAL
-on the caller, the workloads run in parallel.
+Takes a slice of same-typed handles.  Returns `[]T` with results in
+spawn order.  Implementation: await each handle in sequence; total
+wait is `max(t_i)` because the children run concurrently.
 
-### 6.4 `select(h1, h2, ...)` — race / first-finishes-wins
+Heterogeneous case: not supported.  Wrap the differing return types in
+a common `enum` (one variant per branch) so all spawn bodies return
+that enum; the slice is then homogeneous.  Or — more often the right
+choice — spawn each separately and await each into its own typed
+variable (no slice, just N independent named values).
 
-Overloaded on arity 2–8.  Returns a `SelectN<T1, T2, ...>` tagged
-enum.
+### 6.4 `select(&[]Handle<T>)` — homogeneous race / first-wins
 
 ```maka
-pub enum Select2<A, B> { First { A value }, Second { B value } }
-// ... Select3 .. Select8
+pub T select<T, H>(&[]H handles) where H has Awaitable<T>;
 ```
+
+Takes a slice of same-typed handles.  Returns the first finisher's
+value; all losing handles are dropped (= cancelled).  Same wrap-in-
+enum pattern handles the heterogeneous use case explicitly.
 
 Implementation: register a completion notifier on every handle
-pointing to the calling fiber.  On first wake, the caller scans which
-handle finished, retrieves its value, and **drops the rest** —
-dropping cancels them.
+pointing to the calling fiber.  On first wake, the caller retrieves
+the winner's value, drops the rest.
 
 ---
 
@@ -465,12 +496,13 @@ unit handle_request(TcpStream conn) {
     Response resp = bg.await;
 
     // Concurrent IO: fetch from upstream while preparing response.
-    Join2<Bytes, unit> fetched = join(
-        spawn(Bytes() { return fetch_upstream(req); }),
-        spawn(unit()  { return prepare_response(); })
-    );
+    // Different return types → spawn each, await each into typed var.
+    Fiber<Bytes> hf = spawn(Bytes() { return fetch_upstream(req); });
+    Fiber<unit>  hp = spawn(unit()  { return prepare_response(); });
+    Bytes body = hf.await;
+    hp.await;
 
-    write(&mut conn, fetched.first);
+    write(&mut conn, body);
 }
 ```
 
@@ -504,7 +536,10 @@ unit frame() {
 - ❌ Function coloring.
 - ❌ "Borrows can't cross await" — borrows work everywhere; the
   fiber's stack is stable.
-- ❌ Tuples (`JoinN` data structs instead).
+- ❌ Tuples.  No `JoinN` / `SelectN` heterogeneous structs either —
+  homogeneous-only `join` / `select` returning `[]T` / `T`; the
+  heterogeneous case lives in user-written enums or separate
+  spawn-and-await pairs.
 - ❌ `?` for error propagation in async (use `.must()` from `std.err`
   same as everywhere else).
 - ❌ `CancellationToken` — drop the handle.
@@ -520,8 +555,8 @@ unit frame() {
 | Surface (`thread`, `spawn`, `job` keywords + handle types) | Implemented |
 | `Awaitable<T>` attr + `.await` postfix dispatch | Implemented |
 | `join(h)` as alias | Implemented |
-| `join(h1, ..., hN)` for N=2..8 | Implemented |
-| `select(h1, ..., hN)` for N=2..8 | Implemented |
+| `join(&[]Handle<T>) -> []T` (homogeneous wait-all) | Pending — needs real fiber primitives |
+| `select(&[]Handle<T>) -> T` (homogeneous race) | Pending — needs real fiber primitives |
 | `par_for`, `par_reduce`, `par_map` | Implemented (job-pool-backed) |
 | `Thread<T>` backed by pthread | Implemented |
 | `Fiber<T>` backed by **pthread (MVP)** | Stub; awaiting real fiber runtime |
