@@ -469,6 +469,14 @@ pub enum Item {
     /// process-wide state (frame counters, debug flags, RNG seeds, etc.) that
     /// would otherwise be threaded through every function signature.
     Global(GlobalDecl),
+    /// `rblock "raw Rust source";` — inline Rust source compiled into a sidecar
+    /// crate.  Each `pub fn` becomes a callable Maka function via auto-generated
+    /// `extern "C"` shims.  See RUST_INTEROP.md.
+    Rblock(String, Span),
+    /// `rdep name = "version";` — a Cargo dependency line added to the sidecar
+    /// crate's `Cargo.toml`.  Right-hand side is spliced verbatim (`"1.10"` or
+    /// `"{ version = \"1\", features = [\"derive\"] }"`).
+    Rdep(String, String, Span),
 }
 
 #[derive(Debug, Clone)]

@@ -310,6 +310,8 @@ impl Parser {
             TokKind::Extern => Ok(Item::Extern(self.parse_extern()?)),
             TokKind::Cinclude => self.parse_cinclude(),
             TokKind::Cblock => self.parse_cblock(),
+            TokKind::Rblock => self.parse_rblock(),
+            TokKind::Rdep => self.parse_rdep(),
             TokKind::Logic => Ok(Item::Logic(self.parse_logic()?)),
             TokKind::Attr => Ok(Item::Attr(self.parse_attr()?)),
             TokKind::Inline => Ok(Item::Func(self.parse_func()?)),
@@ -546,6 +548,30 @@ impl Parser {
         };
         self.expect(&TokKind::Semicolon, "`;`")?;
         Ok(Item::CBlock(body, kw.span))
+    }
+
+    fn parse_rblock(&mut self) -> Result<Item, ParseError> {
+        let kw = self.expect(&TokKind::Rblock, "`rblock`")?;
+        let body = if let TokKind::StrLit(_) = self.peek() {
+            if let TokKind::StrLit(s) = self.bump().kind { s } else { unreachable!() }
+        } else {
+            return Err(ParseError { msg: "expected string literal after `rblock`".into(), span: self.peek_span() });
+        };
+        self.expect(&TokKind::Semicolon, "`;`")?;
+        Ok(Item::Rblock(body, kw.span))
+    }
+
+    fn parse_rdep(&mut self) -> Result<Item, ParseError> {
+        let kw = self.expect(&TokKind::Rdep, "`rdep`")?;
+        let (name, _) = self.expect_ident("crate name")?;
+        self.expect(&TokKind::Eq, "`=`")?;
+        let version = if let TokKind::StrLit(_) = self.peek() {
+            if let TokKind::StrLit(s) = self.bump().kind { s } else { unreachable!() }
+        } else {
+            return Err(ParseError { msg: "expected string literal after `=` in `rdep`".into(), span: self.peek_span() });
+        };
+        self.expect(&TokKind::Semicolon, "`;`")?;
+        Ok(Item::Rdep(name, version, kw.span))
     }
 
     fn parse_extern(&mut self) -> Result<ExternDecl, ParseError> {

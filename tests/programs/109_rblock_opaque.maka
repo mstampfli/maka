@@ -1,0 +1,17 @@
+// rblock: opaque heap-handle round-trip.  Counter has no #[repr(C)] mirror
+// on the Maka side, so it is carried as an `own *mut unit` opaque pointer.
+// Maka auto-drops the boxed value at scope exit via the generated dropper.
+rblock "
+    pub struct Counter { n: i64 }
+    pub fn new_counter() -> Counter { Counter { n: 0 } }
+    pub fn tick(c: &mut Counter, delta: i64) { c.n += delta; }
+    pub fn value(c: &Counter) -> i64 { c.n }
+";
+
+unit main() {
+    own *mut unit c = new_counter();
+    tick(c, 10);
+    tick(c, 7);
+    tick(c, 25);
+    log(value(c));     // 42
+}

@@ -1,0 +1,10 @@
+// rblock: primitive in, primitive out — round-trips through a Rust shim.
+rblock "
+    pub fn rust_add(a: i32, b: i32) -> i32 { a + b }
+    pub fn rust_mul(a: i64, b: i64) -> i64 { a * b }
+";
+
+unit main() {
+    log(rust_add(2, 3));      // 5
+    log(rust_mul(11, 12));    // 132
+}

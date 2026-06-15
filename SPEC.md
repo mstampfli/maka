@@ -41,7 +41,7 @@ A `.maka` source file consists of:
 
 ```
 mut const constexpr unsafe inline propagate
-extern cinclude cblock raw own alloc
+extern cinclude cblock rblock rdep raw own alloc
 data enum logic attr has where dyn
 if else while for in break continue match yield return
 gate transfer share thread_local module import use pub
@@ -301,6 +301,8 @@ attr_method  := RetType name (params) [where ...]  ";" | block
 use_decl     := use ModPath . Type . Attr ;
 cinclude     := cinclude "header.h";
 cblock       := cblock "raw C source";
+rblock       := rblock "raw Rust source";
+rdep         := rdep NAME = "version";
 constexpr    := [pub]? constexpr Type NAME = constant_int_expr;
 global       := [pub]? [mut]? Type NAME = expr;
 ```
@@ -332,7 +334,18 @@ works inside `inline`.
 
 `gate` marks a function as a synchronization-boundary crossing - see §7.
 
-### 5.1 `cinclude` and `cblock`
+### 5.1 `cinclude`, `cblock`, `rblock`, `rdep`
+
+Inline Rust via `rblock` and Cargo deps via `rdep` are documented separately
+in [`RUST_INTEROP.md`](RUST_INTEROP.md): the driver compiles each rblock as
+a sidecar Cargo crate, emits `#[no_mangle] extern "C"` shims per `pub fn`,
+and injects matching Maka `extern` declarations into the AST so calls
+look like ordinary Maka function calls.  Type marshalling auto-handles
+primitives, `&str`, `String`, and `#[repr(C)]` structs; everything else
+flows through as an opaque heap handle (`own *mut unit` on the Maka
+side, `Box::into_raw` ↔ `Box::from_raw` on the Rust side, auto-dropped).
+
+### 5.2 `cinclude` and `cblock`
 
 ```maka
 cinclude "math.h";

@@ -1,5 +1,7 @@
 //! `makac` — compile a Maka source file to C and (optionally) invoke a C compiler.
 
+mod rust_bridge;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -98,7 +100,29 @@ fn main() {
             Err(e) => { eprintln!("{}: {}", f, e); std::process::exit(1); }
         }
     }
-    let module = merged;
+    let mut module = merged;
+
+    // Rust interop bridge: build sidecar crates from rblocks, inject extern
+    // decls + staticlib paths.  Skipped when no rblock/rdep is present, so
+    // builds with zero rust interop pay zero cost.
+    let bridge_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match rust_bridge::process(&module, &bridge_root) {
+        Ok(out) => {
+            for (mod_path, item) in out.injected {
+                module.items.push(item);
+                module.item_modules.push(mod_path);
+                module.item_imports.push(Vec::new());
+                module.item_has_imports.push(Vec::new());
+            }
+            for lib in out.staticlibs {
+                link_c.push(lib);
+            }
+        }
+        Err(e) => {
+            eprintln!("rust bridge: {}", e);
+            std::process::exit(1);
+        }
+    }
 
     // Sema
     let hir = match maka_sema::analyze(&module) {
