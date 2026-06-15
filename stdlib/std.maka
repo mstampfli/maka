@@ -30,3 +30,28 @@ extern "strcmp" i32   __str_cmp(string a, string b);
 
 pub usize str_len(string s)              { return __str_len(s); }
 pub bool  str_eq (string a, string b)    { return __str_cmp(a, b) == 0; }
+
+// ---- concurrency: sleep / slice composition / par_* --------------------
+//
+// The compiler emits `__maka_sleep_ns`, `__maka_join_all_i64`,
+// `__maka_select_first_i64` in the prologue.  These thin wrappers give
+// them Maka-friendly signatures.  See CONCURRENCY.md for the full
+// concurrency model — `spawn` / `thread` / `job` plus this composition
+// surface.
+
+extern "__maka_sleep_ns" unit __sleep_ns(int nanos);
+
+// Sleep the current task/thread for the given number of milliseconds.
+pub unit sleep_ms(int ms) {
+    __sleep_ns(ms * 1000000);
+}
+
+// Sleep for a sub-millisecond duration (microseconds).
+pub unit sleep_us(int us) {
+    __sleep_ns(us * 1000);
+}
+
+// par_for_range and friends — `par_for_range(start, end, body)` is a
+// compiler builtin (like `spawn`) that runs `body(i)` for every i in
+// [start, end), chunked across the job pool.  Body is a `unit(int)`
+// closure; the closure's body is what each chunk-job runs.

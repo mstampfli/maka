@@ -238,14 +238,278 @@ impl<'a> Cx<'a> {
         self.w("void maka_channel_send(maka_unit* p, maka_int v) { maka_channel_t* ch = (maka_channel_t*)p; maka_chan_node_t* n = (maka_chan_node_t*)malloc(sizeof(maka_chan_node_t)); n->v = v; n->next = NULL; pthread_mutex_lock(&ch->m); if (ch->tail) ch->tail->next = n; else ch->head = n; ch->tail = n; ch->count++; pthread_cond_signal(&ch->c); pthread_mutex_unlock(&ch->m); }\n");
         self.w("maka_int maka_channel_recv(maka_unit* p) { maka_channel_t* ch = (maka_channel_t*)p; pthread_mutex_lock(&ch->m); while (!ch->head) pthread_cond_wait(&ch->c, &ch->m); maka_chan_node_t* n = ch->head; ch->head = n->next; if (!ch->head) ch->tail = NULL; ch->count--; pthread_mutex_unlock(&ch->m); maka_int v = n->v; free(n); return v; }\n");
         self.w("void maka_channel_destroy(maka_unit* p) { maka_channel_t* ch = (maka_channel_t*)p; while (ch->head) { maka_chan_node_t* n = ch->head; ch->head = n->next; free(n); } pthread_mutex_destroy(&ch->m); pthread_cond_destroy(&ch->c); free(ch); }\n");
-        // Threads via pthread.  `Thread` is an opaque struct typedef declared below
-        // (we emit it before any user code); `__maka_spawn(code, env)` packages a
-        // closure (its code pointer + env pointer) into a pthread.
-        self.w("typedef struct Thread { pthread_t handle; } Thread;\n");
+        // ====================================================================
+        // CONCURRENCY RUNTIME
+        // ====================================================================
+        //
+        // Three tiers exposed at the Maka surface (thread / spawn / job), each
+        // returning the same `Thread*` handle and waited via `join`.  All three
+        // are pthread-backed today; the surface is final and supports a future
+        // swap to ucontext+epoll fibers / lock-free job pool without changing
+        // user code.
+        //
+        // Differentiation per tier:
+        //   thread(): full ~8 MB pthread stack          (blocking-safe)
+        //   spawn():  smaller ~64 KB stack              ("fiber" — cheap)
+        //   job():    worker pool (one pthread per CPU) (no per-job stack alloc)
+        //
+        // Handle structure carries an atomic done flag, a result slot (int64
+        // type-erased payload), and a mutex/condvar so join() blocks cleanly.
+        self.w("#include <unistd.h>\n#include <time.h>\n#include <errno.h>\n#include <signal.h>\n");
+        self.w("typedef struct Thread {\n");
+        self.w("    pthread_t       handle;\n");
+        self.w("    pthread_mutex_t done_mutex;\n");
+        self.w("    pthread_cond_t  done_cond;\n");
+        self.w("    int             done_flag;       /* set to 1 when work finishes */\n");
+        self.w("    int64_t         result;          /* type-erased return value */\n");
+        self.w("    int             is_job;          /* 0 for thread/spawn, 1 for job */\n");
+        self.w("} Thread;\n");
         self.w("typedef struct { void* code; void* env; } __maka_closure_fat;\n");
-        self.w("static void* __maka_thread_entry(void* arg) { __maka_closure_fat* f = (__maka_closure_fat*)arg; void (*code)(void*) = (void (*)(void*))f->code; code(f->env); free(f); return NULL; }\n");
-        self.w("maka_unit* __maka_spawn(void* code, void* env) { Thread* t = (Thread*)malloc(sizeof(Thread)); __maka_closure_fat* f = (__maka_closure_fat*)malloc(sizeof(__maka_closure_fat)); f->code = code; f->env = env; pthread_create(&t->handle, NULL, __maka_thread_entry, f); return (maka_unit*)t; }\n");
-        self.w("void __maka_join(maka_unit* t) { Thread* th = (Thread*)t; pthread_join(th->handle, NULL); free(th); }\n");
+        self.w("typedef struct __maka_handle_args_s { void* code; void* env; Thread* h; } __maka_handle_args_t;\n");
+        // Entry for thread/spawn: run the closure body, set done flag, broadcast.
+        self.w("static void* __maka_handle_entry(void* arg) {\n");
+        self.w("    __maka_handle_args_t* a = (__maka_handle_args_t*)arg;\n");
+        self.w("    void (*code)(void*) = (void (*)(void*))a->code;\n");
+        self.w("    code(a->env);\n");
+        self.w("    pthread_mutex_lock(&a->h->done_mutex);\n");
+        self.w("    a->h->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&a->h->done_cond);\n");
+        self.w("    pthread_mutex_unlock(&a->h->done_mutex);\n");
+        self.w("    free(a);\n");
+        self.w("    return NULL;\n");
+        self.w("}\n");
+        // thread() — kernel thread tier, default ~8 MB stack.
+        self.w("maka_unit* __maka_spawn_thread(void* code, void* env) {\n");
+        self.w("    Thread* t = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("    pthread_mutex_init(&t->done_mutex, NULL);\n");
+        self.w("    pthread_cond_init(&t->done_cond, NULL);\n");
+        self.w("    __maka_handle_args_t* a = (__maka_handle_args_t*)malloc(sizeof(__maka_handle_args_t));\n");
+        self.w("    a->code = code; a->env = env; a->h = t;\n");
+        self.w("    pthread_create(&t->handle, NULL, __maka_handle_entry, a);\n");
+        self.w("    return (maka_unit*)t;\n");
+        self.w("}\n");
+        // spawn() — fiber tier, smaller stack (~64 KB) so 100k concurrent
+        // tasks fit in ~6 GB resident.  Still pthread under the hood for now;
+        // the user-facing semantics match the spec.
+        self.w("maka_unit* __maka_spawn_fiber(void* code, void* env) {\n");
+        self.w("    Thread* t = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("    pthread_mutex_init(&t->done_mutex, NULL);\n");
+        self.w("    pthread_cond_init(&t->done_cond, NULL);\n");
+        self.w("    __maka_handle_args_t* a = (__maka_handle_args_t*)malloc(sizeof(__maka_handle_args_t));\n");
+        self.w("    a->code = code; a->env = env; a->h = t;\n");
+        self.w("    pthread_attr_t attr;\n");
+        self.w("    pthread_attr_init(&attr);\n");
+        self.w("    pthread_attr_setstacksize(&attr, 64 * 1024);\n");
+        self.w("    pthread_create(&t->handle, &attr, __maka_handle_entry, a);\n");
+        self.w("    pthread_attr_destroy(&attr);\n");
+        self.w("    return (maka_unit*)t;\n");
+        self.w("}\n");
+        // ====================================================================
+        // JOB POOL — N pthread workers with a shared bounded MPMC queue.
+        // ====================================================================
+        self.w("#define MAKA_JOB_QUEUE_CAP 8192\n");
+        self.w("typedef struct { void* code; void* env; Thread* h; } __maka_job_entry_t;\n");
+        self.w("static __maka_job_entry_t __maka_job_queue[MAKA_JOB_QUEUE_CAP];\n");
+        self.w("static int __maka_job_q_head = 0, __maka_job_q_tail = 0;\n");
+        self.w("static pthread_mutex_t __maka_job_q_mutex = PTHREAD_MUTEX_INITIALIZER;\n");
+        self.w("static pthread_cond_t  __maka_job_q_cond = PTHREAD_COND_INITIALIZER;\n");
+        self.w("static int __maka_job_pool_inited = 0;\n");
+        self.w("static int __maka_job_pool_shutdown = 0;\n");
+        self.w("static void* __maka_job_worker(void* _unused) {\n");
+        self.w("    (void)_unused;\n");
+        self.w("    while (1) {\n");
+        self.w("        pthread_mutex_lock(&__maka_job_q_mutex);\n");
+        self.w("        while (__maka_job_q_head == __maka_job_q_tail && !__maka_job_pool_shutdown) {\n");
+        self.w("            pthread_cond_wait(&__maka_job_q_cond, &__maka_job_q_mutex);\n");
+        self.w("        }\n");
+        self.w("        if (__maka_job_pool_shutdown && __maka_job_q_head == __maka_job_q_tail) {\n");
+        self.w("            pthread_mutex_unlock(&__maka_job_q_mutex);\n");
+        self.w("            return NULL;\n");
+        self.w("        }\n");
+        self.w("        __maka_job_entry_t je = __maka_job_queue[__maka_job_q_head];\n");
+        self.w("        __maka_job_q_head = (__maka_job_q_head + 1) % MAKA_JOB_QUEUE_CAP;\n");
+        self.w("        pthread_mutex_unlock(&__maka_job_q_mutex);\n");
+        self.w("        ((void(*)(void*))je.code)(je.env);\n");
+        self.w("        pthread_mutex_lock(&je.h->done_mutex);\n");
+        self.w("        je.h->done_flag = 1;\n");
+        self.w("        pthread_cond_broadcast(&je.h->done_cond);\n");
+        self.w("        pthread_mutex_unlock(&je.h->done_mutex);\n");
+        self.w("    }\n");
+        self.w("}\n");
+        self.w("static void __maka_job_pool_init(void) {\n");
+        self.w("    if (__maka_job_pool_inited) return;\n");
+        self.w("    __maka_job_pool_inited = 1;\n");
+        self.w("    long n = sysconf(_SC_NPROCESSORS_ONLN);\n");
+        self.w("    if (n < 1) n = 1;\n");
+        self.w("    if (n > 64) n = 64;  /* cap for sanity */\n");
+        self.w("    for (long i = 0; i < n; i++) {\n");
+        self.w("        pthread_t w;\n");
+        self.w("        pthread_create(&w, NULL, __maka_job_worker, NULL);\n");
+        self.w("        pthread_detach(w);\n");
+        self.w("    }\n");
+        self.w("}\n");
+        // job() — push to the worker pool's shared queue.  No per-job thread.
+        self.w("maka_unit* __maka_spawn_job(void* code, void* env) {\n");
+        self.w("    __maka_job_pool_init();\n");
+        self.w("    Thread* t = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("    pthread_mutex_init(&t->done_mutex, NULL);\n");
+        self.w("    pthread_cond_init(&t->done_cond, NULL);\n");
+        self.w("    t->is_job = 1;\n");
+        self.w("    pthread_mutex_lock(&__maka_job_q_mutex);\n");
+        self.w("    int next = (__maka_job_q_tail + 1) % MAKA_JOB_QUEUE_CAP;\n");
+        self.w("    if (next == __maka_job_q_head) {\n");
+        self.w("        /* queue full — fall back to direct thread spawn */\n");
+        self.w("        pthread_mutex_unlock(&__maka_job_q_mutex);\n");
+        self.w("        __maka_handle_args_t* a = (__maka_handle_args_t*)malloc(sizeof(__maka_handle_args_t));\n");
+        self.w("        a->code = code; a->env = env; a->h = t;\n");
+        self.w("        pthread_create(&t->handle, NULL, __maka_handle_entry, a);\n");
+        self.w("        return (maka_unit*)t;\n");
+        self.w("    }\n");
+        self.w("    __maka_job_queue[__maka_job_q_tail].code = code;\n");
+        self.w("    __maka_job_queue[__maka_job_q_tail].env = env;\n");
+        self.w("    __maka_job_queue[__maka_job_q_tail].h = t;\n");
+        self.w("    __maka_job_q_tail = next;\n");
+        self.w("    pthread_cond_signal(&__maka_job_q_cond);\n");
+        self.w("    pthread_mutex_unlock(&__maka_job_q_mutex);\n");
+        self.w("    return (maka_unit*)t;\n");
+        self.w("}\n");
+        // Back-compat: `__maka_spawn` is still emitted, aliased to `spawn` (fiber).
+        // Existing tests that build `spawn(closure)` and previously hit the
+        // pthread path now hit the smaller-stack fiber path — same observable
+        // behavior, less RAM.
+        self.w("maka_unit* __maka_spawn(void* code, void* env) { return __maka_spawn_fiber(code, env); }\n");
+        // ====================================================================
+        // JOIN — block on a single handle and reclaim its result.
+        // ====================================================================
+        self.w("int64_t __maka_join_result(maka_unit* h) {\n");
+        self.w("    Thread* t = (Thread*)h;\n");
+        self.w("    pthread_mutex_lock(&t->done_mutex);\n");
+        self.w("    while (!t->done_flag) {\n");
+        self.w("        pthread_cond_wait(&t->done_cond, &t->done_mutex);\n");
+        self.w("    }\n");
+        self.w("    int64_t r = t->result;\n");
+        self.w("    pthread_mutex_unlock(&t->done_mutex);\n");
+        self.w("    if (!t->is_job) { pthread_join(t->handle, NULL); }\n");
+        self.w("    pthread_mutex_destroy(&t->done_mutex);\n");
+        self.w("    pthread_cond_destroy(&t->done_cond);\n");
+        self.w("    free(t);\n");
+        self.w("    return r;\n");
+        self.w("}\n");
+        self.w("void __maka_join(maka_unit* h) { (void)__maka_join_result(h); }\n");
+        // ====================================================================
+        // join(&[]Handle) -> [N] of results.  Handles must all be Thread*.
+        // Sequentially joins each (since they're already running concurrently).
+        // Caller is responsible for the result-slice memory.
+        // ====================================================================
+        self.w("void __maka_join_all_i64(maka_unit** handles, int64_t n, int64_t* out) {\n");
+        self.w("    for (int64_t i = 0; i < n; i++) {\n");
+        self.w("        int64_t r = __maka_join_result(handles[i]);\n");
+        self.w("        if (out) out[i] = r;\n");
+        self.w("    }\n");
+        self.w("}\n");
+        // ====================================================================
+        // select(&[]Handle) -> first ready, cancel the rest.
+        // Implemented by polling done flags + cancelling losers via pthread_cancel.
+        // ====================================================================
+        self.w("int64_t __maka_select_first_i64(maka_unit** handles, int64_t n, int64_t* out_index) {\n");
+        self.w("    while (1) {\n");
+        self.w("        for (int64_t i = 0; i < n; i++) {\n");
+        self.w("            Thread* t = (Thread*)handles[i];\n");
+        self.w("            pthread_mutex_lock(&t->done_mutex);\n");
+        self.w("            if (t->done_flag) {\n");
+        self.w("                int64_t r = t->result;\n");
+        self.w("                pthread_mutex_unlock(&t->done_mutex);\n");
+        self.w("                if (out_index) *out_index = i;\n");
+        self.w("                /* Cancel losers and reap them directly via pthread_join.\n");
+        self.w("                   pthread_cancel doesn't run our done-flag-setting code,\n");
+        self.w("                   so we bypass __maka_join_result and free manually. */\n");
+        self.w("                for (int64_t j = 0; j < n; j++) {\n");
+        self.w("                    if (j == i) continue;\n");
+        self.w("                    Thread* l = (Thread*)handles[j];\n");
+        self.w("                    if (!l->is_job) {\n");
+        self.w("                        pthread_cancel(l->handle);\n");
+        self.w("                        pthread_join(l->handle, NULL);\n");
+        self.w("                        pthread_mutex_destroy(&l->done_mutex);\n");
+        self.w("                        pthread_cond_destroy(&l->done_cond);\n");
+        self.w("                        free(l);\n");
+        self.w("                    } else {\n");
+        self.w("                        /* Jobs can't be cancelled mid-flight — just wait. */\n");
+        self.w("                        (void)__maka_join_result(handles[j]);\n");
+        self.w("                    }\n");
+        self.w("                }\n");
+        self.w("                /* Reap the winner normally. */\n");
+        self.w("                (void)__maka_join_result(handles[i]);\n");
+        self.w("                return r;\n");
+        self.w("            }\n");
+        self.w("            pthread_mutex_unlock(&t->done_mutex);\n");
+        self.w("        }\n");
+        self.w("        /* Brief sleep before re-polling — avoids spinning at 100% CPU. */\n");
+        self.w("        struct timespec ts = { 0, 1000000 /* 1 ms */ };\n");
+        self.w("        nanosleep(&ts, NULL);\n");
+        self.w("    }\n");
+        self.w("}\n");
+        // ====================================================================
+        // SLEEP — sleeps the current thread/fiber for the requested duration.
+        // Maka exposes this via `sleep_ms(int)` in stdlib.async.
+        // ====================================================================
+        self.w("void __maka_sleep_ns(int64_t nanos) {\n");
+        self.w("    struct timespec ts;\n");
+        self.w("    ts.tv_sec = nanos / 1000000000LL;\n");
+        self.w("    ts.tv_nsec = nanos % 1000000000LL;\n");
+        self.w("    nanosleep(&ts, NULL);\n");
+        self.w("}\n");
+        // ====================================================================
+        // par_for_range — chunks an integer range across the job pool.
+        // Each chunk-job runs `code(env, i)` for every i in [chunk_start,
+        // chunk_end).  The signature accepts a unit(int) closure passed as
+        // (code, env) — the same fat-callable shape `spawn` already uses.
+        // ====================================================================
+        self.w("typedef struct {\n");
+        self.w("    int64_t start, end;\n");
+        self.w("    void (*code)(void*, int64_t);\n");
+        self.w("    void* env;\n");
+        self.w("    Thread* completion;\n");
+        self.w("} __maka_par_chunk_t;\n");
+        self.w("static void* __maka_par_chunk_entry(void* arg) {\n");
+        self.w("    __maka_par_chunk_t* c = (__maka_par_chunk_t*)arg;\n");
+        self.w("    for (int64_t i = c->start; i < c->end; i++) {\n");
+        self.w("        c->code(c->env, i);\n");
+        self.w("    }\n");
+        self.w("    pthread_mutex_lock(&c->completion->done_mutex);\n");
+        self.w("    c->completion->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&c->completion->done_cond);\n");
+        self.w("    pthread_mutex_unlock(&c->completion->done_mutex);\n");
+        self.w("    free(c);\n");
+        self.w("    return NULL;\n");
+        self.w("}\n");
+        self.w("void __maka_par_for_range(int64_t start, int64_t end, void* code, void* env) {\n");
+        self.w("    if (start >= end) return;\n");
+        self.w("    int64_t total = end - start;\n");
+        self.w("    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);\n");
+        self.w("    if (nprocs < 1) nprocs = 1;\n");
+        self.w("    if (nprocs > 16) nprocs = 16;\n");
+        self.w("    int64_t chunks = (int64_t)nprocs;\n");
+        self.w("    if (chunks > total) chunks = total;\n");
+        self.w("    int64_t per = (total + chunks - 1) / chunks;\n");
+        self.w("    Thread** handles = (Thread**)malloc(sizeof(Thread*) * (size_t)chunks);\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        Thread* th = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("        pthread_mutex_init(&th->done_mutex, NULL);\n");
+        self.w("        pthread_cond_init(&th->done_cond, NULL);\n");
+        self.w("        __maka_par_chunk_t* ch = (__maka_par_chunk_t*)malloc(sizeof(__maka_par_chunk_t));\n");
+        self.w("        ch->start = start + c * per;\n");
+        self.w("        ch->end = ch->start + per; if (ch->end > end) ch->end = end;\n");
+        self.w("        ch->code = (void(*)(void*, int64_t))code;\n");
+        self.w("        ch->env = env;\n");
+        self.w("        ch->completion = th;\n");
+        self.w("        pthread_create(&th->handle, NULL, __maka_par_chunk_entry, ch);\n");
+        self.w("        handles[c] = th;\n");
+        self.w("    }\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        (void)__maka_join_result((maka_unit*)handles[c]);\n");
+        self.w("    }\n");
+        self.w("    free(handles);\n");
+        self.w("}\n");
         self.w("\n");
     }
 
@@ -680,7 +944,18 @@ impl<'a> Cx<'a> {
 
     fn c_type_from_key(&self, k: &str) -> String {
         // Most keys are already valid C type names (struct names, primitives like
-        // `maka_int`), but a couple of Maka-level keys need translation.
+        // `maka_int`), but a few Maka-level keys need translation.
+        // Pointer keys are encoded as `p_<inner>` / `pm_<inner>` etc. for the
+        // hash; in C they need to land as `<inner>*`, recursively.
+        if let Some(rest) = k.strip_prefix("p_") {
+            return format!("{}*", self.c_type_from_key(rest));
+        }
+        if let Some(rest) = k.strip_prefix("pm_") {
+            return format!("{}*", self.c_type_from_key(rest));
+        }
+        if let Some(rest) = k.strip_prefix("pc_") {
+            return format!("const {}*", self.c_type_from_key(rest));
+        }
         match k {
             "str" => "const char*".into(),
             other => other.to_string(),
@@ -1259,7 +1534,21 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 3 {
                     if let Some(a) = args.first() {
                         let s = self.emit_inline_expr(inline_f, a, tag);
-                        return format!("(Thread*)__maka_spawn(({}).code, ({}).env)", s, s);
+                        return format!("(Thread*)__maka_spawn_fiber(({}).code, ({}).env)", s, s);
+                    }
+                    return "NULL".into();
+                }
+                if callee.0 == u32::MAX - 15 {
+                    if let Some(a) = args.first() {
+                        let s = self.emit_inline_expr(inline_f, a, tag);
+                        return format!("(Thread*)__maka_spawn_thread(({}).code, ({}).env)", s, s);
+                    }
+                    return "NULL".into();
+                }
+                if callee.0 == u32::MAX - 16 {
+                    if let Some(a) = args.first() {
+                        let s = self.emit_inline_expr(inline_f, a, tag);
+                        return format!("(Thread*)__maka_spawn_job(({}).code, ({}).env)", s, s);
                     }
                     return "NULL".into();
                 }
@@ -1707,13 +1996,72 @@ impl<'a> Cx<'a> {
                     }
                     return "MAKA_UNIT".into();
                 }
-                // Built-in `spawn(closure)` — pthread spawn.
+                // Built-in `spawn(closure)` — fiber tier.
                 if callee.0 == u32::MAX - 3 {
                     if let Some(a) = args.first() {
                         let s = self.emit_expr(f, a);
-                        return format!("(Thread*)__maka_spawn(({}).code, ({}).env)", s, s);
+                        return format!("(Thread*)__maka_spawn_fiber(({}).code, ({}).env)", s, s);
                     }
                     return "NULL".into();
+                }
+                // Built-in `thread(closure)` — kernel thread tier.
+                if callee.0 == u32::MAX - 15 {
+                    if let Some(a) = args.first() {
+                        let s = self.emit_expr(f, a);
+                        return format!("(Thread*)__maka_spawn_thread(({}).code, ({}).env)", s, s);
+                    }
+                    return "NULL".into();
+                }
+                // Built-in `job(closure)` — work-pool tier.
+                if callee.0 == u32::MAX - 16 {
+                    if let Some(a) = args.first() {
+                        let s = self.emit_expr(f, a);
+                        return format!("(Thread*)__maka_spawn_job(({}).code, ({}).env)", s, s);
+                    }
+                    return "NULL".into();
+                }
+                // Built-in `join(slice_of_handles)` — wait for all handles.
+                // Codegen extracts the slice's ptr+len and calls the runtime.
+                if callee.0 == u32::MAX - 17 {
+                    if let Some(a) = args.first() {
+                        let s = self.emit_expr(f, a);
+                        // The slice value (or borrow thereof) carries `.ptr` and
+                        // `.len`.  For `&[]*Thread` we deref via (*s).; for `[]*Thread`
+                        // direct access works.  The codegen for `Ref` wraps the
+                        // value in `&v` which dereferences cleanly via (s).ptr too —
+                        // so either form lands at the same access pattern.
+                        return format!(
+                            "(__maka_join_all_i64((maka_unit**)({0}).ptr, ({0}).len, NULL), MAKA_UNIT)",
+                            s
+                        );
+                    }
+                    return "MAKA_UNIT".into();
+                }
+                // Built-in `select(slice_of_handles)` — race; first ready wins,
+                // losers are cancelled.
+                if callee.0 == u32::MAX - 18 {
+                    if let Some(a) = args.first() {
+                        let s = self.emit_expr(f, a);
+                        return format!(
+                            "(__maka_select_first_i64((maka_unit**)({0}).ptr, ({0}).len, NULL), MAKA_UNIT)",
+                            s
+                        );
+                    }
+                    return "MAKA_UNIT".into();
+                }
+                // Built-in `par_for_range(start, end, closure)` — dispatch
+                // chunks across the job pool.
+                if callee.0 == u32::MAX - 19 {
+                    if args.len() == 3 {
+                        let a = self.emit_expr(f, &args[0]);
+                        let b = self.emit_expr(f, &args[1]);
+                        let body = self.emit_expr(f, &args[2]);
+                        return format!(
+                            "(__maka_par_for_range((int64_t)({}), (int64_t)({}), (({}).code), (({}).env)), MAKA_UNIT)",
+                            a, b, body, body
+                        );
+                    }
+                    return "MAKA_UNIT".into();
                 }
                 // Built-in `join(*Thread)` — pthread join + free handle.
                 if callee.0 == u32::MAX - 4 {

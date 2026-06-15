@@ -1,0 +1,16 @@
+// All three tiers spawn the same closure shape with different sleep
+// durations to make the ordering deterministic.  Each tier independently
+// produces its own log.
+import std.{sleep_ms};
+
+unit short_sleep(int ms) { sleep_ms(ms); }
+
+unit main() {
+    *Thread ht = thread(unit() { short_sleep(50); log(1); });   // 50ms
+    *Thread hf = spawn(unit()  { short_sleep(20); log(2); });   // 20ms
+    *Thread hj = job(unit()    {                  log(3); });   // immediate
+    join(hj);
+    join(hf);
+    join(ht);
+    log(0);
+}

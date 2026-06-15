@@ -1811,29 +1811,121 @@ impl<'a> TypeChecker<'a> {
             // Thread handle type: *Thread (lookup the builtin struct).
             let thread_id = self.sym.struct_by_name("Thread").map(|(id, _)| id).expect("Thread struct registered");
             let ret_ty = HType::Ptr { mutable: true, inner: Box::new(HType::Struct(thread_id)) };
+            // Pick the right runtime entry by tier — codegen recognizes the
+            // FuncIds and emits __maka_spawn_thread / _fiber / _job.
+            let fid = match name.as_str() {
+                "thread" => FuncId(u32::MAX - 15),
+                "job"    => FuncId(u32::MAX - 16),
+                _        => FuncId(u32::MAX - 3),    // spawn (fiber) — keeps legacy id
+            };
             return HExpr {
-                kind: HExprKind::Call { callee: FuncId(u32::MAX - 3), args: hargs },
+                kind: HExprKind::Call { callee: fid, args: hargs },
                 ty: ret_ty,
                 span: sp,
             };
         }
-        // Built-in `join(*Thread)` — blocks until the thread finishes.
-        if name == "join" && qualifier.is_none() {
+        // Built-in `join(*Thread)` — blocks until that handle finishes.
+        // Also accepts `join(&[]*Thread)` or `join([]*Thread)` to wait for an
+        // entire slice of handles (homogeneous, all the same backing tier).
+        // `select(&[]*Thread)` is the race variant — first handle to finish
+        // wins; the rest are cancelled.
+        if (name == "join" || name == "select") && qualifier.is_none() {
             let mut hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
             if hargs.len() != 1 {
-                self.err("join expects exactly one *Thread argument", sp);
-            } else {
-                let ok = matches!(&hargs[0].ty,
+                self.err(format!("{} expects exactly one argument", name), sp);
+                return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
+            }
+            // Sniff the arg's type to choose the variant.
+            let arg_ty = hargs[0].ty.clone();
+            let is_thread_ptr = matches!(&arg_ty,
+                HType::Ptr { inner, .. } if matches!(**inner, HType::Struct(id) if {
+                    let info = self.sym.struct_info(id);
+                    info.name == "Thread"
+                }));
+            let is_thread_slice = matches!(&arg_ty,
+                HType::Slice { elem, .. } if matches!(
+                    elem.as_ref(),
                     HType::Ptr { inner, .. } if matches!(**inner, HType::Struct(id) if {
                         let info = self.sym.struct_info(id);
                         info.name == "Thread"
-                    }));
-                if !ok {
-                    self.err(format!("join expects `*Thread`, got `{}`", type_str(&hargs[0].ty)), sp);
+                    })
+                ));
+            let is_thread_slice_ref = matches!(&arg_ty,
+                HType::Ref { inner, .. } if matches!(
+                    inner.as_ref(),
+                    HType::Slice { elem, .. } if matches!(
+                        elem.as_ref(),
+                        HType::Ptr { inner: i2, .. } if matches!(**i2, HType::Struct(id) if {
+                            let info = self.sym.struct_info(id);
+                            info.name == "Thread"
+                        })
+                    )
+                ));
+
+            if name == "join" && is_thread_ptr {
+                // Single-handle join — existing path.
+                return HExpr {
+                    kind: HExprKind::Call { callee: FuncId(u32::MAX - 4), args: hargs },
+                    ty: HType::Unit,
+                    span: sp,
+                };
+            }
+            if (is_thread_slice || is_thread_slice_ref) && (name == "join" || name == "select") {
+                // Slice path: codegen recognises the FuncId and emits a call
+                // to the runtime's __maka_join_all_i64 / __maka_select_first_i64.
+                let fid = if name == "join" {
+                    FuncId(u32::MAX - 17)   // join_all
+                } else {
+                    FuncId(u32::MAX - 18)   // select_first
+                };
+                return HExpr {
+                    kind: HExprKind::Call { callee: fid, args: hargs },
+                    ty: HType::Unit,    // result-value capture deferred (closures return unit today)
+                    span: sp,
+                };
+            }
+            self.err(
+                format!(
+                    "{} expects `*Thread`, `[]*Thread`, or `&[]*Thread`; got `{}`",
+                    name,
+                    type_str(&arg_ty)
+                ),
+                sp,
+            );
+            return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
+        }
+        // Built-in `par_for_range(start, end, closure)` — runs `closure(i)`
+        // for every i in [start, end), chunked across the job-pool's
+        // workers.  Body must be a `unit(int)` closure.
+        if name == "par_for_range" && qualifier.is_none() {
+            let mut hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 3 {
+                self.err("par_for_range expects (int start, int end, unit(int) body)", sp);
+            } else {
+                let ok_int_a = matches!(&hargs[0].ty, HType::Int);
+                let ok_int_b = matches!(&hargs[1].ty, HType::Int);
+                let body = &hargs[2];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(
+                    body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Unit) && params.len() == 1 && matches!(params[0], HType::Int)
+                );
+                if !ok_int_a || !ok_int_b {
+                    self.err("par_for_range: first two args must be `int`", sp);
+                }
+                if !ok_body {
+                    self.err(format!("par_for_range body must be `unit(int)`, got `{}`", type_str(&body.ty)), sp);
                 }
             }
             return HExpr {
-                kind: HExprKind::Call { callee: FuncId(u32::MAX - 4), args: hargs },
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 19), args: hargs },
                 ty: HType::Unit,
                 span: sp,
             };

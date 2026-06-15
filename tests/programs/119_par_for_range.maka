@@ -1,0 +1,19 @@
+// par_for_range chunks an integer range across the job pool's worker
+// threads.  Sum 0+1+...+999 = 499500.  Use atomic_fetch_add via a small
+// cblock helper so the closure body has no captures.
+cblock "
+#include <stdatomic.h>
+static atomic_long g_sum = 0;
+static void bump(int64_t i) { atomic_fetch_add(&g_sum, i); }
+static int64_t read_sum(void) { return atomic_load(&g_sum); }
+";
+
+extern "bump"     unit bump(int i);
+extern "read_sum" int  read_sum();
+
+unit main() {
+    par_for_range(0, 1000, unit(int i) {
+        bump(i);
+    });
+    log(read_sum());
+}

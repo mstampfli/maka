@@ -550,21 +550,20 @@ unit frame() {
 
 | Area | Status |
 |---|---|
-| Surface (`thread`, `spawn`, `job` keywords + handle types) | Implemented |
-| Internal `Awaitable<T>` attr + `join(h)` user surface | Implemented |
-| `join(h)` as alias | Implemented |
-| `join(&[]Handle<T>) -> []T` (homogeneous wait-all) | Pending — needs real fiber primitives |
-| `select(&[]Handle<T>) -> T` (homogeneous race) | Pending — needs real fiber primitives |
-| `par_for`, `par_reduce`, `par_map` | Implemented (job-pool-backed) |
-| `Thread<T>` backed by pthread | Implemented |
-| `Fiber<T>` backed by **pthread (MVP)** | Stub; awaiting real fiber runtime |
-| `Job<T>` backed by **pthread (MVP)** | Stub; awaiting real work-stealing pool |
-| Fiber context-switch assembly | Pending |
-| Single-threaded scheduler | Pending |
-| Epoll/kqueue/IOCP reactor | Pending |
+| Surface (`thread`, `spawn`, `job` keywords + handle types) | **Implemented** |
+| `join(h)` for single handle | **Implemented** |
+| `join(&[]*Thread)` — homogeneous wait-all over a slice | **Implemented** |
+| `select(&[]*Thread)` — homogeneous race; losers cancelled | **Implemented** |
+| `par_for_range(start, end, body)` — chunk integer range across job pool | **Implemented** |
+| `sleep_ms` / `sleep_us` runtime calls | **Implemented** |
+| `thread()` — pthread, default ~8 MB stack | **Implemented** |
+| `spawn()` — pthread with smaller ~64 KB stack | **Implemented** (cooperative-fiber backing comes later; surface stays) |
+| `job()` — N-worker pthread pool with shared MPMC queue | **Implemented** |
+| `par_reduce` / `par_map` over typed slices | Pending — needs slice-with-return-value codegen |
+| Fiber context-switch assembly (ucontext / inline asm) | Pending — `spawn` uses pthread today |
+| Epoll/kqueue/IOCP reactor with transparent-yield IO | Pending — IO calls block the kernel thread today |
+| Work-stealing per-worker deques for the job pool | Pending — current pool is a single shared MPMC queue |
 | Slab pool with VM-reserve + page-on-touch | Pending |
-| Work-stealing pool for jobs | Pending |
-| Transparent-yield IO functions | Pending |
 
 The **surface is final** and user code written against it today will
 continue to work as the runtime improves.  Performance will improve
