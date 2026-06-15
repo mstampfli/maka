@@ -1,0 +1,19 @@
+// Stage 2A: a `#[repr(C)] pub struct` is auto-mirrored as a Maka data type
+// so user code can read fields natively.  The struct passes by value at
+// the C ABI; impl methods (Stage 2B) become free Maka functions named
+// `TypeName_method`.
+rblock "
+    #[repr(C)] pub struct V2 { pub x: f64, pub y: f64 }
+    impl V2 {
+        pub fn new(x: f64, y: f64) -> V2 { V2 { x, y } }
+        pub fn add(self_: V2, other: V2) -> V2 { V2 { x: self_.x + other.x, y: self_.y + other.y } }
+    }
+";
+
+unit main() {
+    V2 a = V2_new(1.0, 2.0);
+    V2 b = V2_new(3.0, 4.0);
+    V2 c = V2_add(a, b);
+    log(c.x as int);    // 4
+    log(c.y as int);    // 6
+}

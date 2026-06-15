@@ -20,6 +20,8 @@ fn main() {
     let mut output: Option<String> = None;
     let mut emit_c = false;
     let mut run = false;
+    let mut rust_profile: Option<String> = None;
+    let mut no_rust = false;
     let mut i = 1;
     while i < args.len() {
         let a = &args[i];
@@ -27,6 +29,11 @@ fn main() {
             "-o" => { i += 1; output = Some(args[i].clone()); }
             "--emit-c" => { emit_c = true; }
             "--run" => { run = true; }
+            "--no-rust" => { no_rust = true; }
+            "--rust-profile" => { i += 1; rust_profile = Some(args[i].clone()); }
+            s if s.starts_with("--rust-profile=") => {
+                rust_profile = Some(s.trim_start_matches("--rust-profile=").to_string());
+            }
             "--link" => {
                 i += 1;
                 let v = &args[i];
@@ -106,7 +113,11 @@ fn main() {
     // decls + staticlib paths.  Skipped when no rblock/rdep is present, so
     // builds with zero rust interop pay zero cost.
     let bridge_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    match rust_bridge::process(&module, &bridge_root) {
+    let bridge_opts = rust_bridge::BridgeOptions {
+        no_rust,
+        profile: rust_profile.unwrap_or_else(|| "release".into()),
+    };
+    match rust_bridge::process(&module, &bridge_root, &bridge_opts) {
         Ok(out) => {
             for (mod_path, item) in out.injected {
                 module.items.push(item);

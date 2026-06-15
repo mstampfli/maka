@@ -9,7 +9,7 @@ rblock "
 ";
 
 unit main() {
-    own *mut unit c = new_counter();
+    Rust<Counter> c = new_counter();
     tick(c, 10);
     tick(c, 7);
     tick(c, 25);

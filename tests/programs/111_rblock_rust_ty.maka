@@ -1,0 +1,17 @@
+// Stage 2C: `Rust<T>` is the Maka surface for owned Rust handles.  It
+// lowers to `own *mut unit` at the C ABI but carries the type name `T`
+// for diagnostics (and, in future, per-call-site Send/Sync probes).
+rblock "
+    pub struct Bag { items: Vec<i64> }
+    pub fn new_bag() -> Bag { Bag { items: Vec::new() } }
+    pub fn put(b: &mut Bag, x: i64) { b.items.push(x); }
+    pub fn sum(b: &Bag) -> i64 { b.items.iter().sum() }
+";
+
+unit main() {
+    Rust<Bag> b = new_bag();
+    put(b, 10);
+    put(b, 20);
+    put(b, 5);
+    log(sum(b));     // 35
+}

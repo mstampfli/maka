@@ -242,23 +242,57 @@ not free).
 
 Maka's concurrency primitives (`spawn`, `share`, `transfer`) already
 enforce `Shareable` / sendable bounds for native Maka types.  For
-`Rust<T>` values, Maka delegates the check to rustc:
+`Rust<T>` values, Maka delegates the check to rustc.
 
-For every Maka call site that crosses threads with a `Rust<T>`, the
-codegen emits a one-time assertion into the sidecar:
+### 6.1 What ships today
+
+The bridge emits an unconditional `Send` probe for every Rust type that
+appears opaquely (as `Rust<T>`, `&T`, or `&mut T`) in any rblock
+signature.  The probe lives in a `const _: () = { ... }` block at the
+bottom of the generated `lib.rs`:
+
+```rust
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<serde_json::Value>();
+    assert_send::<Counter>();
+    // ...
+};
+```
+
+`cargo build` either accepts or rejects.  On rejection, the rustc error
+surfaces verbatim (see §7), e.g.:
+
+```
+error[E0277]: `Rc<String>` cannot be sent between threads safely
+   --> src/lib.rs:33:29
+```
+
+The check is over-conservative — it asserts `Send` for every exposed
+opaque type whether or not Maka code actually crosses threads with
+it.  In practice all common Rust crates expose `Send` types, so this
+catches the genuinely dangerous cases (`Rc<T>`, `RefCell<T>` in
+positions Maka would later spawn) without false positives on real
+ecosystem code.
+
+### 6.2 What's planned
+
+Per-call-site probes (Send for `spawn`/`transfer`, Sync for `share`)
+require sema to track `Rust<T>` type names through call-site analysis
+and feed them back to the bridge before cargo builds.  The
+architecture for that is:
 
 ```rust
 const _: () = {
     fn assert_send<T: Send>() {}
     fn assert_sync<T: Sync>() {}
-    assert_send::<serde_json::Value>();   // for a spawn / transfer site
-    assert_sync::<serde_json::Value>();   // for a share site
+    assert_send::<serde_json::Value>();   // emitted at spawn / transfer sites
+    assert_sync::<serde_json::Value>();   // emitted at share sites
 };
 ```
 
-The next `cargo build` either accepts or rejects.  On rejection, the
-driver scrapes the rustc diagnostic and remaps it onto the Maka source
-line that did the thread-crossing:
+with the driver scraping any rustc error and remapping back to the
+Maka source line that did the thread-crossing:
 
 ```
 maka error at app.maka:42: cannot `spawn` with `Rust<Rc<String>>`
@@ -266,10 +300,9 @@ maka error at app.maka:42: cannot `spawn` with `Rust<Rc<String>>`
   (Rc is single-threaded; use Arc instead)
 ```
 
-This means `Rust<T>` slots into Maka's existing concurrency rules
-without reimplementing trait inference inside Maka.  The probes are
-deduplicated so a type is only checked once per (Send/Sync) kind
-even if used across many sites.
+This loses no functionality — the unconditional check in §6.1 is a
+strict superset of the per-call check — but trades better diagnostics
+for a future sema pass.
 
 ---
 
@@ -277,10 +310,11 @@ even if used across many sites.
 
 ### 7.1 Rust compile errors
 
-`cargo build` failures are captured and surfaced verbatim, with line
-numbers remapped: a `lib.rs:42:7` error becomes
-`app.maka:LINE:COL: <message>` where `LINE` is the source line of the
-`rblock` plus the offset within the rblock.
+`cargo build` failures are captured and surfaced verbatim — the rustc
+error including its source span is printed under a header pointing at
+the sidecar directory.  Line-by-line remapping back to the original
+`.maka` file is planned but not yet wired (would require carrying
+rblock byte offsets through the AST).
 
 ### 7.2 Cannot-cross-boundary errors
 

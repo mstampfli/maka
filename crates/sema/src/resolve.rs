@@ -248,6 +248,14 @@ pub fn resolve_type_in(
             HType::FnPtr { ret: Box::new(r), params: ps }
         }
         ast::Type::Generic { name, args, span } => {
+            // Built-in `Rust<T>` from the Maka↔Rust bridge: an opaque heap
+            // handle to a Rust value.  Represented as `own *mut unit` at the
+            // HIR / C-ABI level.  The phantom `T` is preserved at the AST
+            // level for diagnostics and Send/Sync probe routing but carries
+            // no runtime weight.
+            if name == "Rust" && args.len() == 1 {
+                return HType::OwnPtr { mutable: true, inner: Box::new(HType::Unit) };
+            }
             let resolved_args: Vec<HType> = args.iter().map(|a| resolve_type_in(sym, a, type_params, errors)).collect();
             let key = resolved_args.iter().map(|t| t.key()).collect::<Vec<_>>().join(",");
             // Concrete instantiation already monomorphized → use it.
@@ -899,6 +907,11 @@ fn scan_struct_insts(
 ) {
     match t {
         ast::Type::Generic { name, args, .. } => {
+            // `Rust<T>` is a built-in bridge type (see resolve_type_in); no
+            // instantiation needed — it lowers directly to `own *mut unit`.
+            if name == "Rust" && args.len() == 1 {
+                return;
+            }
             for a in args { scan_struct_insts(sym, a, type_params, out, errors); }
             let resolved: Vec<HType> = args.iter().map(|a| resolve_type_in(sym, a, type_params, errors)).collect();
             // Only record if all args are concrete (no TyVars) — a fully-applied instantiation.
