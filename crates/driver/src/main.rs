@@ -117,22 +117,20 @@ fn main() {
         no_rust,
         profile: rust_profile.unwrap_or_else(|| "release".into()),
     };
-    match rust_bridge::process(&module, &bridge_root, &bridge_opts) {
-        Ok(out) => {
-            for (mod_path, item) in out.injected {
-                module.items.push(item);
-                module.item_modules.push(mod_path);
-                module.item_imports.push(Vec::new());
-                module.item_has_imports.push(Vec::new());
-            }
-            for lib in out.staticlibs {
-                link_c.push(lib);
-            }
-        }
+    // Phase 1: parse rblocks, inject extern decls + mirrored data types into
+    // the AST so sema can resolve names and collect Send/Sync probes.
+    let prep = match rust_bridge::prepare(&module, &bridge_root, &bridge_opts) {
+        Ok(p) => p,
         Err(e) => {
             eprintln!("rust bridge: {}", e);
             std::process::exit(1);
         }
+    };
+    for (mod_path, item) in prep.injected.clone() {
+        module.items.push(item);
+        module.item_modules.push(mod_path);
+        module.item_imports.push(Vec::new());
+        module.item_has_imports.push(Vec::new());
     }
 
     // Sema
@@ -143,6 +141,20 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // Phase 2: now that sema has surfaced per-call-site Send/Sync probes,
+    // build the sidecar crates and add their staticlibs to the C link line.
+    match rust_bridge::finish(prep, &hir.sym.send_probes, &hir.sym.sync_probes, &bridge_opts) {
+        Ok(libs) => {
+            for lib in libs {
+                link_c.push(lib);
+            }
+        }
+        Err(e) => {
+            eprintln!("rust bridge: {}", e);
+            std::process::exit(1);
+        }
+    }
     // Non-fatal diagnostics: print to stderr, but don't fail the build.
     for w in &hir.warnings {
         eprintln!("{}", w);

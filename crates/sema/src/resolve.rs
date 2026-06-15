@@ -249,12 +249,15 @@ pub fn resolve_type_in(
         }
         ast::Type::Generic { name, args, span } => {
             // Built-in `Rust<T>` from the Maka↔Rust bridge: an opaque heap
-            // handle to a Rust value.  Represented as `own *mut unit` at the
-            // HIR / C-ABI level.  The phantom `T` is preserved at the AST
-            // level for diagnostics and Send/Sync probe routing but carries
-            // no runtime weight.
+            // handle to a Rust value.  Same ABI as `own *mut unit`; the `T`
+            // label is carried so Maka can route per-call-site Send / Sync
+            // probes back to the sidecar at thread-crossing sites.
             if name == "Rust" && args.len() == 1 {
-                return HType::OwnPtr { mutable: true, inner: Box::new(HType::Unit) };
+                let label = match &args[0] {
+                    ast::Type::Named(n, _) => n.clone(),
+                    other => format!("{:?}", other),
+                };
+                return HType::RustOpaque(label);
             }
             let resolved_args: Vec<HType> = args.iter().map(|a| resolve_type_in(sym, a, type_params, errors)).collect();
             let key = resolved_args.iter().map(|t| t.key()).collect::<Vec<_>>().join(",");

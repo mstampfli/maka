@@ -14,6 +14,12 @@ pub struct TypeChecker<'a> {
     locals: Vec<LocalInfo>,
     scopes: Vec<Scope>,
     errors: Vec<SemaError>,
+    /// `Rust<T>` types observed at `transfer` / `spawn` sites — emitted as
+    /// `assert_send::<T>()` probes by the rust-bridge after sema completes.
+    pub send_probes: Vec<String>,
+    /// `Rust<T>` types observed at `share` sites — emitted as
+    /// `assert_sync::<T>()` probes.
+    pub sync_probes: Vec<String>,
     /// current function return type (for `return` validation)
     cur_ret: HType,
     /// Whether the current function is `inline` (governs `propagate` legality).
@@ -69,6 +75,13 @@ pub struct SynthDecls {
     pub structs: Vec<StructInfo>,
     pub sigs: Vec<FuncSig>,
     pub funcs: Vec<HFunc>,
+    /// `Rust<T>` type names that must satisfy `Send`.  Collected at
+    /// `transfer` / `spawn` sites.  Bubbled up to `SymTab.send_probes`
+    /// after this function is checked.
+    pub send_probes: Vec<String>,
+    /// `Rust<T>` type names that must satisfy `Sync` — collected at
+    /// `share` sites.
+    pub sync_probes: Vec<String>,
 }
 
 #[derive(Default)]
@@ -81,12 +94,77 @@ impl<'a> TypeChecker<'a> {
         Self::new_with_logic(sym, None)
     }
 
+    /// Walk a spawn'd closure (possibly wrapped in `alloc` / `heap`) and
+    /// record a `Send` probe for every captured `Rust<T>` value.  The
+    /// captures live in `HExprKind::Closure { env_values }`; we scan
+    /// each one for opaque types.
+    fn collect_send_from_closure(&mut self, arg: &HExpr) {
+        let mut cur = arg;
+        loop {
+            match &cur.kind {
+                HExprKind::Closure { env_values, .. } => {
+                    for v in env_values {
+                        self.collect_send_from_expr(v);
+                    }
+                    return;
+                }
+                HExprKind::HeapAlloc(inner) | HExprKind::DropWrite(inner)
+                | HExprKind::DerefRef(inner) | HExprKind::Transfer(inner) => {
+                    cur = inner;
+                }
+                _ => return,
+            }
+        }
+    }
+
+    /// Recursively scan an expression tree for `Rust<T>` types, accumulating
+    /// Send probes.  Conservative — we record every observed label so even
+    /// values that flow through arithmetic / casts get covered.
+    fn collect_send_from_expr(&mut self, e: &HExpr) {
+        if let HType::RustOpaque(label) = &e.ty {
+            self.send_probes.push(label.clone());
+        }
+        match &e.kind {
+            HExprKind::Bin { lhs, rhs, .. } => {
+                self.collect_send_from_expr(lhs);
+                self.collect_send_from_expr(rhs);
+            }
+            HExprKind::Un { expr: inner, .. }
+            | HExprKind::Cast { expr: inner, .. }
+            | HExprKind::CheckedCast { expr: inner, .. }
+            | HExprKind::DerefRef(inner)
+            | HExprKind::DropWrite(inner)
+            | HExprKind::HeapAlloc(inner)
+            | HExprKind::ArrayToSlice { base: inner, .. }
+            | HExprKind::Transfer(inner)
+            | HExprKind::SliceLen(inner)
+            | HExprKind::EnumTag(inner) => self.collect_send_from_expr(inner),
+            HExprKind::Call { args, .. }
+            | HExprKind::CallIndirect { args, .. }
+            | HExprKind::InlineCall { args, .. } => {
+                for a in args { self.collect_send_from_expr(a); }
+            }
+            HExprKind::ArrayLit(elems) => {
+                for e in elems { self.collect_send_from_expr(e); }
+            }
+            HExprKind::Closure { env_values, .. } => {
+                for v in env_values { self.collect_send_from_expr(v); }
+            }
+            HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => {
+                for (_, e) in fields { self.collect_send_from_expr(e); }
+            }
+            _ => {}
+        }
+    }
+
     pub fn new_with_logic(sym: &'a SymTab, logic: Option<&str>) -> Self {
         Self {
             sym,
             locals: Vec::new(),
             scopes: Vec::new(),
             errors: Vec::new(),
+            send_probes: Vec::new(),
+            sync_probes: Vec::new(),
             cur_ret: HType::Unit,
             cur_is_inline: false,
             cur_module: Vec::new(),
@@ -165,6 +243,8 @@ impl<'a> TypeChecker<'a> {
             structs: self.synth_structs,
             sigs: self.synth_sigs,
             funcs: self.synth_funcs,
+            send_probes: self.send_probes,
+            sync_probes: self.sync_probes,
         };
         Ok((HFunc {
             id: fid,
@@ -636,13 +716,21 @@ impl<'a> TypeChecker<'a> {
                 let h = self.check_expr(expr, expected);
                 match mode {
                     ast::WallMode::Share => {
-                        if !self.is_shareable(&h.ty) {
+                        // `Rust<T>` is opaque to Maka's Shareable check; delegate
+                        // to rustc by emitting a `Sync` probe.  Native Maka types
+                        // still go through the Shareable rule.
+                        if let HType::RustOpaque(label) = &h.ty {
+                            self.sync_probes.push(label.clone());
+                        } else if !self.is_shareable(&h.ty) {
                             self.err(format!("type `{}` is not Shareable; cannot `share` across a gate", type_str(&h.ty)), *span);
                         }
                         h
                     }
                     ast::WallMode::Transfer => {
-                        // Wrap in Transfer so the lifetime pass marks the source-local as moved.
+                        // `Rust<T>` transferred across a gate needs `Send`.
+                        if let HType::RustOpaque(label) = &h.ty {
+                            self.send_probes.push(label.clone());
+                        }
                         let ty = h.ty.clone();
                         HExpr {
                             kind: HExprKind::Transfer(Box::new(h)),
@@ -1051,6 +1139,10 @@ impl<'a> TypeChecker<'a> {
             HType::Dyn { .. } => false,
             HType::FnPtr { .. } => true,
             HType::TyVar(_) => false,
+            // A `Rust<T>` is `own *mut unit` semantically: sole-owner, never
+            // shareable.  Probe routing for `share` is delegated to rustc's
+            // `Sync` bound; see RUST_INTEROP.md §6.
+            HType::RustOpaque(_) => false,
         }
     }
 
@@ -1696,6 +1788,9 @@ impl<'a> TypeChecker<'a> {
                 if !ok {
                     self.err(format!("spawn expects a `unit()` closure, got `{}`", type_str(&arg.ty)), sp);
                 }
+                // Closure captures of `Rust<T>` cross the thread boundary —
+                // record `T` for a `Send` probe in the sidecar.
+                self.collect_send_from_closure(arg);
             }
             // Thread handle type: *Thread (lookup the builtin struct).
             let thread_id = self.sym.struct_by_name("Thread").map(|(id, _)| id).expect("Thread struct registered");
@@ -2961,6 +3056,11 @@ impl<'a> TypeChecker<'a> {
                 return HExpr { ty: target.clone(), ..e };
             }
         }
+        // Rust<T> → *T (any inner type the target wants).  Lossy at the type
+        // level — we trust the bridge-generated extern signatures.
+        if let (HType::RustOpaque(_), HType::Ptr { .. }) = (&e.ty, target) {
+            return HExpr { ty: target.clone(), ..e };
+        }
         // own &T (= Heap) → own *T (loosen strict to nullable).
         if let (HType::Heap { inner: ai }, HType::OwnPtr { mutable: _, inner: bi }) = (&e.ty, target) {
             if type_eq(ai, bi) {
@@ -3268,6 +3368,13 @@ pub fn type_eq(a: &HType, b: &HType) -> bool {
             type_eq(ar, br) && ap.len() == bp.len() && ap.iter().zip(bp.iter()).all(|(a, b)| type_eq(a, b))
         }
         (TyVar(a), TyVar(b)) => a == b,
+        // Two `Rust<T>` are type-equal regardless of label — the label is
+        // metadata, not part of the layout.  A `Rust<T>` is also equal to
+        // a plain `own *mut unit` so coercion at extern call sites works
+        // without ceremony.
+        (RustOpaque(_), RustOpaque(_)) => true,
+        (RustOpaque(_), OwnPtr { mutable: true, inner }) | (OwnPtr { mutable: true, inner }, RustOpaque(_))
+            if matches!(**inner, HType::Unit) => true,
         _ => false,
     }
 }
@@ -3299,6 +3406,7 @@ pub fn type_str(t: &HType) -> String {
             format!("{}({})", type_str(ret), parts.join(", "))
         }
         HType::TyVar(n) => format!("'{}", n),
+        HType::RustOpaque(label) => format!("Rust<{}>", label),
     }
 }
 
@@ -3346,6 +3454,12 @@ pub fn param_compatible(param: &HType, actual: &HType, type_params: &[String]) -
     // Allow own *T → *T downgrade (passing an owner as a borrow).
     if let (HType::Ptr { mutable: pm, inner: pi }, HType::OwnPtr { mutable: am, inner: ai }) = (param, actual) {
         if (*am || !*pm) && type_eq(pi, ai) { return true; }
+    }
+    // `Rust<T>` is one pointer at the ABI; allow it to pass as any `*T`
+    // (raw pointer) parameter — bridge-generated externs use that shape
+    // for &T / &mut T params.
+    if matches!((param, actual), (HType::Ptr { .. }, HType::RustOpaque(_))) {
+        return true;
     }
     // Allow own &T → &T downgrade.
     if let (HType::Ref { mutable: _, inner: pi }, HType::Heap { inner: ai }) = (param, actual) {

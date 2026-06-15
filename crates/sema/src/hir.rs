@@ -49,6 +49,12 @@ pub enum HType {
     FnPtr { ret: Box<HType>, params: Vec<HType> },
     /// Unresolved type variable from a generic decl (used during sema's pre-monomorphization phase).
     TyVar(String),
+    /// `Rust<T>` — an opaque handle to a Rust-side heap value.  Layout / ABI
+    /// identical to `OwnPtr { mutable: true, inner: Unit }`; the `String`
+    /// carries the Rust type name so Maka can route per-call-site
+    /// `Send` / `Sync` probes back to the sidecar at thread-crossing
+    /// (spawn / transfer / share) sites.
+    RustOpaque(String),
 }
 
 impl HType {
@@ -99,7 +105,18 @@ impl HType {
                 s
             }
             HType::TyVar(n) => format!("'{}", n),
+            // Key is shared with `own *mut unit` so monomorphisation, dedup, and
+            // type-equality treat the two as the same — the label is purely
+            // out-of-band metadata for probe routing.
+            HType::RustOpaque(_) => format!("OPm{}", HType::Unit.key()),
         }
+    }
+
+    /// Pull the carried Rust type name from a `Rust<T>` opaque, if any.
+    /// Returns `None` for any other type — including the normalised
+    /// `OwnPtr<Unit>` form that `Rust<T>` shares its layout with.
+    pub fn rust_opaque_label(&self) -> Option<&str> {
+        if let HType::RustOpaque(s) = self { Some(s.as_str()) } else { None }
     }
 
     pub fn is_ref_like(&self) -> bool {
@@ -527,6 +544,13 @@ pub struct SymTab {
     /// Module-scope `pub? mut Type NAME = <literal>;` declarations.
     /// Reads / writes refer to these by `GlobalId` (index into the Vec).
     pub globals: Vec<GlobalInfo>,
+    /// `Rust<T>` type names that must satisfy `Send` because they're
+    /// transferred or spawned across threads.  Collected by sema and
+    /// emitted as `assert_send::<T>()` into the sidecar by the rust-bridge.
+    pub send_probes: Vec<String>,
+    /// `Rust<T>` type names that must satisfy `Sync` because they're
+    /// `share`d across a gate.  Emitted as `assert_sync::<T>()`.
+    pub sync_probes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

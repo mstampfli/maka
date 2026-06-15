@@ -245,67 +245,66 @@ not free).
 
 Maka's concurrency primitives (`spawn`, `share`, `transfer`) already
 enforce `Shareable` / sendable bounds for native Maka types.  For
-`Rust<T>` values, Maka delegates the check to rustc.
+`Rust<T>` values, Maka delegates the check to rustc by emitting
+per-call-site assertions into the sidecar.
 
-### 6.1 What ships today
+### 6.1 Probe collection
 
-The bridge emits an unconditional `Send` probe for every Rust type that
-appears opaquely (as `Rust<T>`, `&T`, or `&mut T`) in any rblock
-signature.  The probe lives in a `const _: () = { ... }` block at the
-bottom of the generated `lib.rs`:
+Sema walks every program and records:
+
+  - `transfer x` where `x` is `Rust<T>`  → `T` joins the `Send` probe list.
+  - `spawn(closure)` whose closure captures any `Rust<T>` → each captured
+    `T` joins the `Send` probe list.
+  - `share x` where `x` is `Rust<T>`  → `T` joins the `Sync` probe list.
+
+Native Maka types still go through the existing `Shareable` rule
+unchanged; the new probes are exclusive to `Rust<T>` opaques.
+
+### 6.2 Probe emission
+
+The bridge runs in two phases:
+
+  1. **prepare** — pre-sema; parses rblocks, sig-extracts surface,
+     injects extern decls and mirrored data types into the AST.
+  2. **finish** — post-sema; takes the Send / Sync probe lists from
+     `SymTab`, filters each to the types the local sidecar can see,
+     emits the probes into a `const _: () = { ... }` block at the
+     bottom of `lib.rs`, and runs `cargo build`.
+
+The emitted block looks like:
 
 ```rust
 const _: () = {
     const fn assert_send<T: Send>() {}
-    assert_send::<serde_json::Value>();
-    assert_send::<Counter>();
-    // ...
+    const fn assert_sync<T: Sync>() {}
+    assert_send::<Counter>();        // emitted by `transfer counter`
+    assert_sync::<Counter>();        // emitted by `share counter`
 };
 ```
 
-`cargo build` either accepts or rejects.  On rejection, the rustc error
-surfaces verbatim (see §7), e.g.:
+Adding a thread crossing (or removing one) invalidates the bridge cache
+key — the next `makac` rebuilds the sidecar so the probes always
+reflect the current program.
+
+### 6.3 Violations surface as precise rustc errors
+
+A `transfer` of `Rust<RcString>` where `RcString` wraps a `Rc<String>`
+fails with:
 
 ```
 error[E0277]: `Rc<String>` cannot be sent between threads safely
-   --> src/lib.rs:33:29
+   --> src/lib.rs:NN
 ```
 
-The check is over-conservative — it asserts `Send` for every exposed
-opaque type whether or not Maka code actually crosses threads with
-it.  In practice all common Rust crates expose `Send` types, so this
-catches the genuinely dangerous cases (`Rc<T>`, `RefCell<T>` in
-positions Maka would later spawn) without false positives on real
-ecosystem code.
-
-### 6.2 What's planned
-
-Per-call-site probes (Send for `spawn`/`transfer`, Sync for `share`)
-require sema to track `Rust<T>` type names through call-site analysis
-and feed them back to the bridge before cargo builds.  The
-architecture for that is:
-
-```rust
-const _: () = {
-    fn assert_send<T: Send>() {}
-    fn assert_sync<T: Sync>() {}
-    assert_send::<serde_json::Value>();   // emitted at spawn / transfer sites
-    assert_sync::<serde_json::Value>();   // emitted at share sites
-};
-```
-
-with the driver scraping any rustc error and remapping back to the
-Maka source line that did the thread-crossing:
+A `share` of `Rust<Cell>` where `Cell` wraps a `RefCell<i64>` fails with:
 
 ```
-maka error at app.maka:42: cannot `spawn` with `Rust<Rc<String>>`
-  rustc: `Rc<String>` cannot be sent between threads safely
-  (Rc is single-threaded; use Arc instead)
+error[E0277]: `RefCell<i64>` cannot be shared between threads safely
+   --> src/lib.rs:NN
 ```
 
-This loses no functionality — the unconditional check in §6.1 is a
-strict superset of the per-call check — but trades better diagnostics
-for a future sema pass.
+The `Rust<T>` label is preserved through `HType::RustOpaque(String)`
+so the probe always targets exactly the types Maka chose to expose.
 
 ---
 

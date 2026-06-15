@@ -1,0 +1,17 @@
+// `transfer` of a `Rust<T>` across a `gate` triggers the Send probe in
+// the sidecar: rustc verifies that `Counter: Send`.  Counter is just an
+// `i64`, so the probe succeeds and the program compiles and runs.
+rblock "
+    pub struct Counter { n: i64 }
+    pub fn new_c() -> Counter { Counter { n: 0 } }
+    pub fn take(c: Counter) -> i64 { c.n + 99 }
+";
+
+gate unit accept(Rust<Counter> c) {
+    log(take(c));      // 99
+}
+
+unit main() {
+    Rust<Counter> c = new_c();
+    accept(transfer c);
+}

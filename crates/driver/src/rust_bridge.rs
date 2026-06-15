@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use maka_ast::{
@@ -41,9 +41,28 @@ pub struct BridgeOptions {
     pub profile: String,
 }
 
-/// Top-level entry — walk the merged Maka module, build any needed sidecar
-/// crates, and return the externs + staticlibs to splice into the build.
-pub fn process(module: &Module, project_root: &Path, opts: &BridgeOptions) -> Result<BridgeOutput, String> {
+/// Per-module state captured during `prepare` and consumed by `finish`.
+pub struct BridgePrep {
+    project_root: PathBuf,
+    rustc_version_bytes: Vec<u8>,
+    modules: Vec<PreparedModule>,
+    /// Items the driver should splice into the Maka AST before running sema
+    /// (extern decls, mirrored data, container struct data, etc.).
+    pub injected: Vec<(Vec<String>, Item)>,
+}
+
+struct PreparedModule {
+    module_path: Vec<String>,
+    surface: RustSurface,
+    combined_rust: String,
+    rdeps: Vec<(String, String)>,
+}
+
+/// Phase 1 — parse + inject.  Walks the merged Maka module, sig-parses each
+/// module's rblocks, and returns the items to splice into the AST along with
+/// a `BridgePrep` token to feed into `finish` once sema has produced its
+/// `Send`/`Sync` probe lists.
+pub fn prepare(module: &Module, project_root: &Path, opts: &BridgeOptions) -> Result<BridgePrep, String> {
     let mut per_module: HashMap<Vec<String>, ModuleBundle> = HashMap::new();
     for (idx, item) in module.items.iter().enumerate() {
         let mp = module.item_modules.get(idx).cloned().unwrap_or_default();
@@ -55,8 +74,8 @@ pub fn process(module: &Module, project_root: &Path, opts: &BridgeOptions) -> Re
         }
     }
 
+    let mut prepped: Vec<PreparedModule> = Vec::new();
     let mut injected: Vec<(Vec<String>, Item)> = Vec::new();
-    let mut staticlibs: Vec<String> = Vec::new();
 
     for (module_path, bundle) in &per_module {
         if bundle.rblocks.is_empty() {
@@ -68,32 +87,6 @@ pub fn process(module: &Module, project_root: &Path, opts: &BridgeOptions) -> Re
             }
             continue;
         }
-
-        let combined_rust = bundle.rblocks.join("\n\n// ----- rblock boundary -----\n\n");
-        let surface = parse_rust_surface(&combined_rust)
-            .map_err(|e| format!("rust signature parse error: {}", e))?;
-
-        // Cache key
-        let mut hasher = DefaultHasher::new();
-        combined_rust.hash(&mut hasher);
-        for (k, v) in &bundle.rdeps {
-            k.hash(&mut hasher);
-            v.hash(&mut hasher);
-        }
-        let rustc_v = Command::new("rustc")
-            .arg("--version")
-            .output()
-            .map_err(|e| format!("`rustc --version` failed (is rustc installed?): {}", e))?;
-        rustc_v.stdout.hash(&mut hasher);
-        let hash = format!("{:016x}", hasher.finish());
-
-        // Crate name embeds the hash so a shared `CARGO_TARGET_DIR` produces a
-        // distinct staticlib per sidecar (no overwriting across modules/tests).
-        let crate_name = format!("{}_{}", sidecar_crate_name(module_path), &hash[..12]);
-        let sidecar_dir = project_root.join(".maka_cache").join("rust").join(&hash);
-        let shared_target_root = project_root.join(".maka_cache").join("rust").join("_shared_target");
-        let built_marker = sidecar_dir.join(".built");
-
         if opts.no_rust {
             return Err(format!(
                 "`--no-rust` is set but module `{}` contains rblock(s); pass without `--no-rust` to build them",
@@ -101,45 +94,143 @@ pub fn process(module: &Module, project_root: &Path, opts: &BridgeOptions) -> Re
             ));
         }
 
-        // With --rust-profile=dev, the staticlib lives under target/debug/.
-        let profile_dir = if opts.profile == "dev" { "debug" } else { "release" };
-        let staticlib_path = shared_target_root
-            .join(profile_dir)
-            .join(format!("lib{}.a", crate_name));
-        let _ = staticlib_path;
-        // Recompute below; this scope was just for shadowing.
-        let staticlib_path = shared_target_root
-            .join(profile_dir)
-            .join(format!("lib{}.a", crate_name));
+        let combined_rust = bundle.rblocks.join("\n\n// ----- rblock boundary -----\n\n");
+        let surface = parse_rust_surface(&combined_rust)
+            .map_err(|e| format!("rust signature parse error: {}", e))?;
 
-        if !built_marker.exists() || !staticlib_path.exists() {
-            build_sidecar(&sidecar_dir, &crate_name, &combined_rust, &surface, &bundle.rdeps, &opts.profile)?;
-        }
-
-        staticlibs.push(staticlib_path.to_string_lossy().to_string());
-
-        // Inject mirrored Maka data decls for each #[repr(C)] struct so user
-        // code can read/write fields natively.
+        // Inject mirrored Maka data decls for each #[repr(C)] struct, all
+        // container instantiations, and one extern per free fn / impl method.
         for s in &surface.structs {
             if !s.repr_c {
                 continue;
             }
             injected.push((module_path.clone(), Item::Data(build_data_decl(s))));
         }
-        // Inject one Maka data decl per container instantiation used in any
-        // signature (`Option<T>`, `Result<T,E>`, `Vec<T>`).  Layouts match
-        // the auto-emitted Rust `#[repr(C)]` structs in the sidecar.
         let containers = collect_container_insts(&surface);
         for d in build_container_data_decls(&containers) {
             injected.push((module_path.clone(), Item::Data(d)));
         }
-        // Inject one extern per free fn / impl method.
         for f in &surface.fns {
             let extern_decl = build_extern_decl(f);
             injected.push((module_path.clone(), Item::Extern(extern_decl)));
         }
+
+        prepped.push(PreparedModule {
+            module_path: module_path.clone(),
+            surface,
+            combined_rust,
+            rdeps: bundle.rdeps.clone(),
+        });
     }
 
+    let rustc_v = Command::new("rustc")
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("`rustc --version` failed (is rustc installed?): {}", e))?;
+
+    Ok(BridgePrep {
+        project_root: project_root.to_path_buf(),
+        rustc_version_bytes: rustc_v.stdout,
+        modules: prepped,
+        injected,
+    })
+}
+
+/// Phase 2 — build sidecar crates with per-call-site `Send` / `Sync` probes
+/// supplied by sema.  Returns staticlib paths to feed the C linker.
+pub fn finish(
+    prep: BridgePrep,
+    send_probes: &[String],
+    sync_probes: &[String],
+    opts: &BridgeOptions,
+) -> Result<Vec<String>, String> {
+    let mut staticlibs: Vec<String> = Vec::new();
+    for pm in &prep.modules {
+        // Filter the global probe lists down to the types this module's
+        // sidecar can actually see in scope — anything else would cause a
+        // gratuitous rustc error rather than an honest one.
+        let known: std::collections::HashSet<String> = pm
+            .surface
+            .structs
+            .iter()
+            .map(|s| s.name.clone())
+            .chain(pm.surface.fns.iter().flat_map(|f| {
+                let mut v = Vec::new();
+                for p in &f.params { collect_opaque_names(&p.ty, &mut v); }
+                collect_opaque_names(&f.ret, &mut v);
+                v
+            }))
+            .collect();
+        let local_send: Vec<&String> = send_probes.iter().filter(|t| known.contains(*t)).collect();
+        let local_sync: Vec<&String> = sync_probes.iter().filter(|t| known.contains(*t)).collect();
+
+        // Cache key now folds in the probes — adding or removing a thread
+        // crossing invalidates the cache, so the next build re-verifies.
+        let mut hasher = DefaultHasher::new();
+        pm.combined_rust.hash(&mut hasher);
+        for (k, v) in &pm.rdeps {
+            k.hash(&mut hasher);
+            v.hash(&mut hasher);
+        }
+        prep.rustc_version_bytes.hash(&mut hasher);
+        for p in &local_send { ("send", p).hash(&mut hasher); }
+        for p in &local_sync { ("sync", p).hash(&mut hasher); }
+        let hash = format!("{:016x}", hasher.finish());
+
+        let crate_name = format!("{}_{}", sidecar_crate_name(&pm.module_path), &hash[..12]);
+        let sidecar_dir = prep.project_root.join(".maka_cache").join("rust").join(&hash);
+        let shared_target_root = prep
+            .project_root
+            .join(".maka_cache")
+            .join("rust")
+            .join("_shared_target");
+        let profile_dir = if opts.profile == "dev" { "debug" } else { "release" };
+        let staticlib_path = shared_target_root
+            .join(profile_dir)
+            .join(format!("lib{}.a", crate_name));
+        let built_marker = sidecar_dir.join(".built");
+
+        if !built_marker.exists() || !staticlib_path.exists() {
+            build_sidecar_with_probes(
+                &sidecar_dir,
+                &crate_name,
+                &pm.combined_rust,
+                &pm.surface,
+                &pm.rdeps,
+                &opts.profile,
+                &local_send,
+                &local_sync,
+            )?;
+        }
+
+        staticlibs.push(staticlib_path.to_string_lossy().to_string());
+    }
+    Ok(staticlibs)
+}
+
+/// Pull opaque-type label names out of a `RustType`, recursing into
+/// containers.  Used to compute the set of Rust type names visible to a
+/// given module's sidecar (for probe filtering).
+fn collect_opaque_names(ty: &RustType, out: &mut Vec<String>) {
+    match ty {
+        RustType::Opaque(n) | RustType::RefOpaque(n) | RustType::RefMutOpaque(n) => out.push(n.clone()),
+        RustType::OptionOf(inner) | RustType::VecOf(inner) => collect_opaque_names(inner, out),
+        RustType::ResultOf(ok, err) => {
+            collect_opaque_names(ok, out);
+            collect_opaque_names(err, out);
+        }
+        _ => {}
+    }
+}
+
+/// Back-compat top-level entry: one-shot parse + build with NO per-call-site
+/// probes.  Kept so that callers that don't have access to sema's probe
+/// output (e.g. dev tooling) still work.  The two-phase `prepare` / `finish`
+/// path is preferred and is what the production driver uses.
+pub fn process(module: &Module, project_root: &Path, opts: &BridgeOptions) -> Result<BridgeOutput, String> {
+    let prep = prepare(module, project_root, opts)?;
+    let injected = prep.injected.clone();
+    let staticlibs = finish(prep, &[], &[], opts)?;
     Ok(BridgeOutput { injected, staticlibs })
 }
 
@@ -160,6 +251,8 @@ fn sidecar_crate_name(module_path: &[String]) -> String {
 // ------------------------------------------------------------------------
 // Sidecar emission
 
+/// Convenience wrapper: invoke `build_sidecar_with_probes` with empty probe
+/// lists.  Used by the legacy one-shot `process` entry point.
 fn build_sidecar(
     dir: &Path,
     crate_name: &str,
@@ -167,6 +260,29 @@ fn build_sidecar(
     surface: &RustSurface,
     rdeps: &[(String, String)],
     profile: &str,
+) -> Result<(), String> {
+    let no_probes: Vec<&String> = Vec::new();
+    build_sidecar_with_probes(
+        dir,
+        crate_name,
+        rust_src,
+        surface,
+        rdeps,
+        profile,
+        &no_probes,
+        &no_probes,
+    )
+}
+
+fn build_sidecar_with_probes(
+    dir: &Path,
+    crate_name: &str,
+    rust_src: &str,
+    surface: &RustSurface,
+    rdeps: &[(String, String)],
+    profile: &str,
+    extra_send: &[&String],
+    extra_sync: &[&String],
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir.join("src")).map_err(|e| e.to_string())?;
 
@@ -210,19 +326,24 @@ fn build_sidecar(
         lib_rs.push_str(&emit_shim(f));
         lib_rs.push('\n');
     }
-    // Send probes for every Rust type that crosses the Maka boundary.
-    // Catches `Rc<T>` and other thread-hostile types at sidecar build time;
-    // the user gets a precise rustc error rather than a runtime data race.
-    // Sync probes are per-call-site and require sema integration (deferred).
-    lib_rs.push_str("\n// ===== auto-generated Send probes =====\n");
-    lib_rs.push_str("// Asserts that every opaque type exposed via `Rust<T>` is `Send` so\n");
-    lib_rs.push_str("// Maka can pass it across thread boundaries.  Failure of a probe means\n");
-    lib_rs.push_str("// the underlying Rust type is single-threaded (e.g. `Rc<T>`); wrap it\n");
-    lib_rs.push_str("// in `Arc<T>` or refactor before exposing across the bridge.\n");
-    lib_rs.push_str("const _: () = {\n    const fn assert_send<T: Send>() {}\n");
-    let probes = collect_send_probes(surface);
-    for ty in &probes {
+    // Per-call-site Send / Sync probes routed from sema.  A `Send` probe
+    // is emitted for every `Rust<T>` that's `transfer`'d, spawn-captured,
+    // or otherwise carried across a thread boundary.  `Sync` probes
+    // come from `share` sites.  rustc rejects with a precise message
+    // ("Rc<T> cannot be sent between threads safely") on violation.
+    lib_rs.push_str("\n// ===== auto-generated thread-crossing probes =====\n");
+    lib_rs.push_str("const _: () = {\n");
+    lib_rs.push_str("    const fn assert_send<T: Send>() {}\n");
+    lib_rs.push_str("    const fn assert_sync<T: Sync>() {}\n");
+    let mut send_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for ty in extra_send { send_set.insert((*ty).clone()); }
+    for ty in &send_set {
         lib_rs.push_str(&format!("    assert_send::<{}>();\n", ty));
+    }
+    let mut sync_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for ty in extra_sync { sync_set.insert((*ty).clone()); }
+    for ty in &sync_set {
+        lib_rs.push_str(&format!("    assert_sync::<{}>();\n", ty));
     }
     lib_rs.push_str("};\n");
     std::fs::write(dir.join("src/lib.rs"), &lib_rs).map_err(|e| e.to_string())?;

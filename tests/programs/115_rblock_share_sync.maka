@@ -1,0 +1,17 @@
+// `share` of a `Rust<T>` across a `gate` triggers the Sync probe in the
+// sidecar.  Counter is Sync (a single i64), so rustc accepts and the
+// program runs.
+rblock "
+    pub struct Counter { n: i64 }
+    pub fn new_c(n: i64) -> Counter { Counter { n } }
+    pub fn read(c: &Counter) -> i64 { c.n }
+";
+
+gate unit observe(Rust<Counter> c) {
+    log(read(c));      // 42
+}
+
+unit main() {
+    Rust<Counter> c = new_c(42);
+    observe(share c);
+}

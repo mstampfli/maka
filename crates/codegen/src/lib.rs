@@ -669,6 +669,8 @@ impl<'a> Cx<'a> {
                 s
             }
             HType::TyVar(n) => format!("T_{}", n),
+            // `Rust<T>` shares the C layout of `own *mut unit` (= `void*`).
+            HType::RustOpaque(_) => "p_maka_unit".into(),
         }
     }
 
@@ -719,6 +721,8 @@ impl<'a> Cx<'a> {
                 format!("Callable_{}", fn_sig_key(ret, params))
             }
             HType::TyVar(_) => "void*".into(), // erased; not expected at codegen
+            // `Rust<T>` is `own *mut unit` at the C layer (= `void*`).
+            HType::RustOpaque(_) => "void*".into(),
         }
     }
 

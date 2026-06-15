@@ -233,6 +233,8 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                         for s in synth.structs { sym.structs.push(s); }
                         for s in synth.sigs { sym.sigs.push(s); }
                         for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
+                        sym.send_probes.extend(synth.send_probes);
+                        sym.sync_probes.extend(synth.sync_probes);
                         match lifetime::analyze_func(&sym, &mut hfunc) {
                             Ok(ws) => warnings.extend(ws),
                             Err(es) => errors.extend(es),
@@ -254,6 +256,8 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                             for s in synth.structs { sym.structs.push(s); }
                             for s in synth.sigs { sym.sigs.push(s); }
                             for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
+                            sym.send_probes.extend(synth.send_probes);
+                            sym.sync_probes.extend(synth.sync_probes);
                             if let Err(es) = lifetime::analyze_func(&sym, &mut hfunc) {
                                 errors.extend(es);
                             }
@@ -295,6 +299,8 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                             for s in synth.structs { sym.structs.push(s); }
                             for s in synth.sigs { sym.sigs.push(s); }
                             for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
+                            sym.send_probes.extend(synth.send_probes);
+                            sym.sync_probes.extend(synth.sync_probes);
                             if let Err(es) = lifetime::analyze_func(&sym, &mut hfunc) {
                                 errors.extend(es);
                             }
@@ -438,6 +444,8 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                         for s in synth.structs { sym.structs.push(s); }
                         for s in synth.sigs { sym.sigs.push(s); }
                         for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
+                        sym.send_probes.extend(synth.send_probes);
+                        sym.sync_probes.extend(synth.sync_probes);
                         match lifetime::analyze_func(&sym, &mut hf) {
                             Ok(ws) => warnings.extend(ws),
                             Err(es) => errors.extend(es),
