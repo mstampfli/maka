@@ -124,18 +124,21 @@ the call boundary:
 
 | Rust                | Maka              | Shim mechanism                                      |
 |---------------------|-------------------|-----------------------------------------------------|
-| `&str`              | `string`          | `(ptr, len)` via `from_raw_parts` + `from_utf8`     |
-| `String`            | `String`          | `leak()` to ptr; Maka frees via `__maka_free_cstr`  |
-| `&[T]`              | `[]T`             | `(ptr, len)` slice struct                            |
-| `Vec<T>`            | `Vec<T>`          | `(ptr, len, cap)` struct; ownership transfers        |
-| `Option<T>`         | `Option<T>`       | tagged struct `{tag: u8, value: T}` (Maka enum)     |
-| `Result<T, E>`      | `Result<T, E>`    | tagged struct `{tag: u8, ok: T, err: E}`            |
+| `&str`              | `string`          | `CStr::from_ptr` → `&str`                            |
+| `String`            | `String`          | `libc::malloc` copy + NUL terminator; Maka auto-frees |
+| `Option<T>`         | `__MakaOpt_T`     | `#[repr(C)] { tag: i64, value: T }` mirrored as a Maka data decl |
+| `Result<T, E>`      | `__MakaRes_T_E`   | `#[repr(C)] { tag: i64, ok: T, err: E }`             |
+| `Vec<T>`            | `__MakaVec_T`     | `#[repr(C)] { ptr: *mut T, len: usize, cap: usize }`, copied to `libc::malloc`'d buffer |
 
-The inner `T`/`E` of `Vec`, `Option`, `Result` is recursively
-classified.  If any inner type is itself unmarshallable, the outer is
-unmarshallable too (the shim cannot construct a tagged Maka enum
-around an opaque payload without further machinery — that may relax
-later).
+For `Option<T>`, `Result<T,E>`, and `Vec<T>`, the bridge generates one
+`#[repr(C)]` Rust struct per unique element-type tuple **and** one
+matching Maka `data` decl with the same field layout.  The user reads
+the tagged-union fields directly (`.tag`, `.value`, `.ok`, `.err`,
+`.ptr`, `.len`).
+
+The inner `T`/`E` must be a primitive or a `#[repr(C)]` struct for the
+typed shim to kick in.  If it isn't, the container falls back to an
+opaque `Rust<T>` handle (§3.3).
 
 ### 3.3 Opaque handles
 

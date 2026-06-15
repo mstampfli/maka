@@ -1,0 +1,18 @@
+// Stage 2D: `Vec<T>` (for primitive T) mirrors as `__MakaVec_<T>` — a
+// `(ptr, len, cap)` C-ABI struct.  The shim copies elements into a
+// `libc::malloc`'d buffer so Maka can free the bytes with `free(v.ptr)`
+// after use.  Maka users can pass the struct back to a Rust function
+// to inspect or transform; element-by-element access from pure Maka
+// uses raw pointer arithmetic under `unsafe`.
+rblock "
+    pub fn make_squares(n: i64) -> Vec<i64> {
+        (1..=n).map(|i| (i * i) as i64).collect()
+    }
+    pub fn sum_of(v: Vec<i64>) -> i64 { v.iter().sum() }
+";
+
+unit main() {
+    __MakaVec_i64 v = make_squares(5);
+    log(v.len as int);   // 5
+    log(sum_of(v));      // 1 + 4 + 9 + 16 + 25 = 55
+}

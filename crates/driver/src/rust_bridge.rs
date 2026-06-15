@@ -126,6 +126,13 @@ pub fn process(module: &Module, project_root: &Path, opts: &BridgeOptions) -> Re
             }
             injected.push((module_path.clone(), Item::Data(build_data_decl(s))));
         }
+        // Inject one Maka data decl per container instantiation used in any
+        // signature (`Option<T>`, `Result<T,E>`, `Vec<T>`).  Layouts match
+        // the auto-emitted Rust `#[repr(C)]` structs in the sidecar.
+        let containers = collect_container_insts(&surface);
+        for d in build_container_data_decls(&containers) {
+            injected.push((module_path.clone(), Item::Data(d)));
+        }
         // Inject one extern per free fn / impl method.
         for f in &surface.fns {
             let extern_decl = build_extern_decl(f);
@@ -188,6 +195,17 @@ fn build_sidecar(
     lib_rs.push_str("\n\n// ===== auto-generated maka shims =====\n\n");
     lib_rs.push_str("use std::os::raw::c_char;\n");
     lib_rs.push_str("use std::ffi::CStr;\n\n");
+    // Collect every Option<T>, Result<T,E>, Vec<T> instantiation used in any
+    // signature; emit a single `#[repr(C)]` struct definition per unique
+    // shape into the prologue so all shims can refer to it by name.
+    let containers = collect_container_insts(surface);
+    if !containers.is_empty() {
+        lib_rs.push_str("// auto-generated typed-container ABI structs\n");
+        for c in &containers {
+            lib_rs.push_str(&emit_container_struct(c));
+        }
+        lib_rs.push('\n');
+    }
     for f in &surface.fns {
         lib_rs.push_str(&emit_shim(f));
         lib_rs.push('\n');
@@ -335,6 +353,13 @@ fn rust_marshal_in_ty(ty: &RustType) -> String {
         RustType::RefMutOpaque(_) => "*mut u8".to_string(),
         RustType::RawConstPtr => "*const u8".to_string(),
         RustType::RawMutPtr => "*mut u8".to_string(),
+        RustType::OptionOf(inner) => format!("__MakaOpt_{}", sanitise(&rust_name_of(inner))),
+        RustType::ResultOf(ok, err) => format!(
+            "__MakaRes_{}_{}",
+            sanitise(&rust_name_of(ok)),
+            sanitise(&rust_name_of(err)),
+        ),
+        RustType::VecOf(inner) => format!("__MakaVec_{}", sanitise(&rust_name_of(inner))),
     }
 }
 
@@ -354,6 +379,13 @@ fn rust_marshal_out_ty(ty: &RustType) -> String {
         RustType::RefMutOpaque(_) => "*mut u8".to_string(),
         RustType::RawConstPtr => "*const u8".to_string(),
         RustType::RawMutPtr => "*mut u8".to_string(),
+        RustType::OptionOf(inner) => format!("__MakaOpt_{}", sanitise(&rust_name_of(inner))),
+        RustType::ResultOf(ok, err) => format!(
+            "__MakaRes_{}_{}",
+            sanitise(&rust_name_of(ok)),
+            sanitise(&rust_name_of(err)),
+        ),
+        RustType::VecOf(inner) => format!("__MakaVec_{}", sanitise(&rust_name_of(inner))),
     }
 }
 
@@ -411,6 +443,45 @@ fn unmarshal_in(name: &str, ty: &RustType) -> (String, String) {
             format!("let {n} = unsafe {{ &mut *{n} }};", n = name),
             name.to_string(),
         ),
+        // Inbound `Option<T>` / `Result<T,E>`: reconstruct from the tagged
+        // struct's tag + payload fields.
+        RustType::OptionOf(inner) => {
+            let inner_ty = rust_name_of(inner);
+            (
+                format!(
+                    "let {n} = if {n}.tag == 0 {{ Some({n}.value as {ty}) }} else {{ None }};",
+                    n = name,
+                    ty = inner_ty
+                ),
+                name.to_string(),
+            )
+        }
+        RustType::ResultOf(ok, err) => {
+            let ok_ty = rust_name_of(ok);
+            let err_ty = rust_name_of(err);
+            (
+                format!(
+                    "let {n} = if {n}.tag == 0 {{ Ok({n}.ok as {ok}) }} else {{ Err({n}.err as {err}) }};",
+                    n = name,
+                    ok = ok_ty,
+                    err = err_ty
+                ),
+                name.to_string(),
+            )
+        }
+        // Inbound `Vec<T>`: copy from the user-provided libc-malloc'd buffer
+        // into a fresh Rust Vec so allocator boundaries stay clean.
+        RustType::VecOf(inner) => {
+            let inner_ty = rust_name_of(inner);
+            (
+                format!(
+                    "let {n} = unsafe {{ if {n}.ptr.is_null() {{ Vec::new() }} else {{ std::slice::from_raw_parts({n}.ptr as *const {ty}, {n}.len).to_vec() }} }};",
+                    n = name,
+                    ty = inner_ty
+                ),
+                name.to_string(),
+            )
+        }
     }
 }
 
@@ -442,6 +513,49 @@ fn marshal_out(value: &str, ty: &RustType) -> String {
         RustType::ReprC(_) => format!("{}", value),
         RustType::RefReprC(name) => format!("({} as *const {})", value, name),
         RustType::RefMutReprC(name) => format!("({} as *const {} as *mut {})", value, name, name),
+        RustType::OptionOf(inner) => {
+            let inner_ty = rust_name_of(inner);
+            let lbl = sanitise(&inner_ty);
+            // Default-zero the payload on None so the Maka side reads a
+            // deterministic value when `tag == 1`.
+            format!(
+                "match {v} {{ Some(x) => __MakaOpt_{lbl} {{ tag: 0, value: x as {ty} }}, None => __MakaOpt_{lbl} {{ tag: 1, value: 0 as {ty} }}, }}",
+                v = value,
+                lbl = lbl,
+                ty = inner_ty
+            )
+        }
+        RustType::ResultOf(ok, err) => {
+            let ok_ty = rust_name_of(ok);
+            let err_ty = rust_name_of(err);
+            let ok_lbl = sanitise(&ok_ty);
+            let err_lbl = sanitise(&err_ty);
+            format!(
+                "match {v} {{ Ok(x) => __MakaRes_{ol}_{el} {{ tag: 0, ok: x as {okty}, err: 0 as {errty} }}, Err(e) => __MakaRes_{ol}_{el} {{ tag: 1, ok: 0 as {okty}, err: e as {errty} }}, }}",
+                v = value,
+                ol = ok_lbl,
+                el = err_lbl,
+                okty = ok_ty,
+                errty = err_ty
+            )
+        }
+        RustType::VecOf(inner) => {
+            let inner_ty = rust_name_of(inner);
+            let lbl = sanitise(&inner_ty);
+            // Copy from Rust's allocator into a libc::malloc'd buffer so
+            // Maka can free the bytes with `free(v.ptr)` after use.
+            format!(
+                "{{ let __v: Vec<{ty}> = {v}; let __len = __v.len(); \
+                 if __len == 0 {{ __MakaVec_{lbl} {{ ptr: std::ptr::null_mut(), len: 0, cap: 0 }} }} else {{ \
+                 let __bytes = __len * std::mem::size_of::<{ty}>(); \
+                 let __ptr = unsafe {{ libc::malloc(__bytes) as *mut {ty} }}; \
+                 if !__ptr.is_null() {{ unsafe {{ std::ptr::copy_nonoverlapping(__v.as_ptr(), __ptr, __len); }} }} \
+                 __MakaVec_{lbl} {{ ptr: __ptr, len: __len, cap: __len }} }} }}",
+                v = value,
+                lbl = lbl,
+                ty = inner_ty
+            )
+        }
     }
 }
 
@@ -529,6 +643,22 @@ fn rust_to_maka_ty(ty: &RustType, sp: Span) -> Type {
             inner: Box::new(Type::Named(name.clone(), sp)),
             span: sp,
         },
+        RustType::OptionOf(inner) => Type::Named(
+            format!("__MakaOpt_{}", sanitise(&rust_name_of(inner))),
+            sp,
+        ),
+        RustType::ResultOf(ok, err) => Type::Named(
+            format!(
+                "__MakaRes_{}_{}",
+                sanitise(&rust_name_of(ok)),
+                sanitise(&rust_name_of(err))
+            ),
+            sp,
+        ),
+        RustType::VecOf(inner) => Type::Named(
+            format!("__MakaVec_{}", sanitise(&rust_name_of(inner))),
+            sp,
+        ),
     }
 }
 
@@ -621,6 +751,17 @@ enum RustType {
     Opaque(String),       // any owned named type (Foo, Vec<T>, HashMap<...>)
     RefOpaque(String),    // &T  (T not specially marshalled)
     RefMutOpaque(String), // &mut T
+    /// `Option<T>` where `T` is a primitive — mirrored as a C-ABI tagged
+    /// struct on both sides.  Maka users read `.tag` (0 = Some, 1 = None)
+    /// and `.value`.
+    OptionOf(Box<RustType>),
+    /// `Result<T, E>` where `T` and `E` are primitives — same mechanism as
+    /// `OptionOf`: `.tag` (0 = Ok, 1 = Err), `.value`, `.err`.
+    ResultOf(Box<RustType>, Box<RustType>),
+    /// `Vec<T>` where `T` is a primitive — `(ptr, len, cap)` struct.  The
+    /// shim copies into a `libc::malloc`'d buffer so Maka can free
+    /// element memory with its standard `free()`.
+    VecOf(Box<RustType>),
     RawConstPtr,          // *const T
     RawMutPtr,            // *mut T
 }
@@ -890,6 +1031,45 @@ fn map_syn_type(
                 | "usize" | "f32" | "f64" => Ok(RustType::Prim(ident)),
                 "bool" => Ok(RustType::Bool),
                 "String" => Ok(RustType::OwnedString),
+                "Option" => {
+                    let arg = first_generic_arg(&last.arguments)
+                        .ok_or_else(|| "Option needs one type argument".to_string())?;
+                    let inner = map_syn_type(arg, known_repr_c)?;
+                    if marshallable_in_container(&inner) {
+                        Ok(RustType::OptionOf(Box::new(inner)))
+                    } else {
+                        // Fall back to opaque if the inner type isn't a scalar
+                        // we can pack into a C-ABI tagged struct.
+                        let mut s = String::new();
+                        write_syn_type(t, &mut s);
+                        Ok(RustType::Opaque(s))
+                    }
+                }
+                "Result" => {
+                    let (a, b) = first_two_generic_args(&last.arguments)
+                        .ok_or_else(|| "Result needs two type arguments".to_string())?;
+                    let ok = map_syn_type(a, known_repr_c)?;
+                    let err = map_syn_type(b, known_repr_c)?;
+                    if marshallable_in_container(&ok) && marshallable_in_container(&err) {
+                        Ok(RustType::ResultOf(Box::new(ok), Box::new(err)))
+                    } else {
+                        let mut s = String::new();
+                        write_syn_type(t, &mut s);
+                        Ok(RustType::Opaque(s))
+                    }
+                }
+                "Vec" => {
+                    let arg = first_generic_arg(&last.arguments)
+                        .ok_or_else(|| "Vec needs one type argument".to_string())?;
+                    let inner = map_syn_type(arg, known_repr_c)?;
+                    if marshallable_in_container(&inner) {
+                        Ok(RustType::VecOf(Box::new(inner)))
+                    } else {
+                        let mut s = String::new();
+                        write_syn_type(t, &mut s);
+                        Ok(RustType::Opaque(s))
+                    }
+                }
                 _ if known_repr_c.contains(&ident) => Ok(RustType::ReprC(ident)),
                 _ => {
                     let mut s = String::new();
@@ -936,6 +1116,41 @@ fn map_syn_type(
             Ok(RustType::Opaque(s))
         }
     }
+}
+
+fn first_generic_arg(args: &syn::PathArguments) -> Option<&syn::Type> {
+    if let syn::PathArguments::AngleBracketed(ab) = args {
+        for a in &ab.args {
+            if let syn::GenericArgument::Type(t) = a {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+fn first_two_generic_args(args: &syn::PathArguments) -> Option<(&syn::Type, &syn::Type)> {
+    if let syn::PathArguments::AngleBracketed(ab) = args {
+        let mut tys: Vec<&syn::Type> = ab
+            .args
+            .iter()
+            .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
+            .collect();
+        if tys.len() >= 2 {
+            return Some((tys.remove(0), tys.remove(0)));
+        }
+    }
+    None
+}
+
+/// Which types are valid as the inner element of a typed container
+/// (`Option<T>`, `Result<T, E>`, `Vec<T>`).  Restricted to scalars for now;
+/// later stages can allow `#[repr(C)]` structs and even nested containers.
+fn marshallable_in_container(ty: &RustType) -> bool {
+    matches!(
+        ty,
+        RustType::Prim(_) | RustType::Bool | RustType::ReprC(_)
+    )
 }
 
 fn write_syn_type(t: &syn::Type, out: &mut String) {
@@ -1002,6 +1217,186 @@ fn write_syn_type(t: &syn::Type, out: &mut String) {
             out.push_str("; _]");
         }
         _ => out.push('_'),
+    }
+}
+
+/// A unique typed-container shape used somewhere in the surface.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+enum ContainerInst {
+    /// `Option<T>` for a particular concrete T.
+    Option(String),
+    /// `Result<T, E>`.
+    Result(String, String),
+    /// `Vec<T>`.
+    Vec(String),
+}
+
+/// Walk the surface and collect every container shape we need to define a
+/// matching `#[repr(C)]` struct for.  Each shape is generated exactly once,
+/// keyed by its element type(s).
+fn collect_container_insts(surface: &RustSurface) -> Vec<ContainerInst> {
+    let mut seen = std::collections::BTreeSet::new();
+    for f in &surface.fns {
+        for p in &f.params {
+            push_container(&p.ty, &mut seen);
+        }
+        push_container(&f.ret, &mut seen);
+    }
+    seen.into_iter().collect()
+}
+
+fn push_container(ty: &RustType, out: &mut std::collections::BTreeSet<ContainerInst>) {
+    match ty {
+        RustType::OptionOf(inner) => {
+            out.insert(ContainerInst::Option(rust_name_of(inner)));
+            push_container(inner, out);
+        }
+        RustType::ResultOf(a, b) => {
+            out.insert(ContainerInst::Result(rust_name_of(a), rust_name_of(b)));
+            push_container(a, out);
+            push_container(b, out);
+        }
+        RustType::VecOf(inner) => {
+            out.insert(ContainerInst::Vec(rust_name_of(inner)));
+            push_container(inner, out);
+        }
+        _ => {}
+    }
+}
+
+/// Stringified Rust type (for use inside generated Rust code).
+fn rust_name_of(ty: &RustType) -> String {
+    match ty {
+        RustType::Prim(s) => s.clone(),
+        RustType::Bool => "bool".to_string(),
+        RustType::Unit => "()".to_string(),
+        RustType::StrSlice => "&str".to_string(),
+        RustType::OwnedString => "String".to_string(),
+        RustType::ReprC(n) => n.clone(),
+        _ => "u64".to_string(),
+    }
+}
+
+/// Maka-side name component for a container instantiation.  Sanitised so
+/// it's a valid Maka identifier (e.g. `int`, `bool`, `V2`).
+fn maka_label_of(ty: &RustType) -> String {
+    match ty {
+        RustType::Prim(_) => "int".to_string(),
+        RustType::Bool => "bool".to_string(),
+        RustType::ReprC(n) => n.clone(),
+        _ => "opaque".to_string(),
+    }
+}
+
+/// Emit the `#[repr(C)]` Rust struct definition for one container shape.
+/// Same layout is mirrored on the Maka side via `inject_container_data`.
+fn emit_container_struct(c: &ContainerInst) -> String {
+    match c {
+        ContainerInst::Option(t) => format!(
+            "#[repr(C)] pub struct __MakaOpt_{lbl} {{ pub tag: i64, pub value: {t}, }}\n",
+            t = t,
+            lbl = sanitise(t),
+        ),
+        ContainerInst::Result(ok, err) => format!(
+            "#[repr(C)] pub struct __MakaRes_{ok_lbl}_{err_lbl} {{ pub tag: i64, pub ok: {ok}, pub err: {err}, }}\n",
+            ok = ok,
+            err = err,
+            ok_lbl = sanitise(ok),
+            err_lbl = sanitise(err),
+        ),
+        ContainerInst::Vec(t) => format!(
+            "#[repr(C)] pub struct __MakaVec_{lbl} {{ pub ptr: *mut {t}, pub len: usize, pub cap: usize, }}\n",
+            t = t,
+            lbl = sanitise(t),
+        ),
+    }
+}
+
+/// Make a Rust type name safe to use as a struct-name suffix.
+fn sanitise(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect()
+}
+
+/// Build Maka `data` decls that mirror each container struct.  Field
+/// layouts match the Rust `#[repr(C)]` definitions exactly so values
+/// pass by value across the C ABI.
+fn build_container_data_decls(insts: &[ContainerInst]) -> Vec<DataDecl> {
+    let sp = Span { start: 0, end: 0, line: 0, col: 0 };
+    let mut out = Vec::new();
+    for c in insts {
+        let (name, fields) = match c {
+            ContainerInst::Option(t) => {
+                let elem_ty = rust_name_to_maka_ty(t, sp);
+                (
+                    format!("__MakaOpt_{}", sanitise(t)),
+                    vec![
+                        ("tag".to_string(), Type::Named("int".to_string(), sp)),
+                        ("value".to_string(), elem_ty),
+                    ],
+                )
+            }
+            ContainerInst::Result(ok, err) => {
+                let ok_ty = rust_name_to_maka_ty(ok, sp);
+                let err_ty = rust_name_to_maka_ty(err, sp);
+                (
+                    format!("__MakaRes_{}_{}", sanitise(ok), sanitise(err)),
+                    vec![
+                        ("tag".to_string(), Type::Named("int".to_string(), sp)),
+                        ("ok".to_string(), ok_ty),
+                        ("err".to_string(), err_ty),
+                    ],
+                )
+            }
+            ContainerInst::Vec(t) => {
+                let elem_ty = rust_name_to_maka_ty(t, sp);
+                (
+                    format!("__MakaVec_{}", sanitise(t)),
+                    vec![
+                        (
+                            "ptr".to_string(),
+                            Type::Ptr {
+                                mutness: Mutness::Mut,
+                                inner: Box::new(elem_ty),
+                                span: sp,
+                            },
+                        ),
+                        ("len".to_string(), Type::Named("usize".to_string(), sp)),
+                        ("cap".to_string(), Type::Named("usize".to_string(), sp)),
+                    ],
+                )
+            }
+        };
+        let fields = fields
+            .into_iter()
+            .map(|(n, ty)| FieldDecl {
+                mutness: Mutness::Mut,
+                ty,
+                name: n,
+                default: None,
+                is_embed: false,
+                span: sp,
+            })
+            .collect();
+        out.push(DataDecl {
+            name,
+            type_params: Vec::new(),
+            fields,
+            where_clauses: Vec::new(),
+            is_pub: true,
+            span: sp,
+        });
+    }
+    out
+}
+
+/// Map a Rust scalar / repr-C name to its Maka type for `data` field decls.
+fn rust_name_to_maka_ty(name: &str, sp: Span) -> Type {
+    match name {
+        "f32" | "f64" => Type::Named("float".to_string(), sp),
+        "bool" => Type::Named("bool".to_string(), sp),
+        _ => Type::Named("int".to_string(), sp),
     }
 }
 

@@ -1,0 +1,27 @@
+// Stage 2E: `Option<T>` and `Result<T, E>` (for primitive T / E) mirror as
+// C-ABI tagged structs on both sides.  The bridge injects `__MakaOpt_int`
+// and `__MakaRes_int_int` Maka data types automatically; the user reads
+// `.tag` (0 = Some/Ok, 1 = None/Err) and the corresponding payload field.
+rblock "
+    pub fn find_digit(s: &str) -> Option<i64> {
+        s.chars().find_map(|c| c.to_digit(10).map(|d| d as i64))
+    }
+
+    pub fn safe_div(a: i64, b: i64) -> Result<i64, i64> {
+        if b == 0 { Err(-1) } else { Ok(a / b) }
+    }
+";
+
+unit main() {
+    __MakaOpt_i64 o1 = find_digit("abc7def");
+    if (o1.tag == 0) { log(o1.value); } else { log(-1); }     // 7
+
+    __MakaOpt_i64 o2 = find_digit("abc");
+    if (o2.tag == 0) { log(o2.value); } else { log(-1); }     // -1
+
+    __MakaRes_i64_i64 r1 = safe_div(20, 4);
+    if (r1.tag == 0) { log(r1.ok); } else { log(-99); }       // 5
+
+    __MakaRes_i64_i64 r2 = safe_div(10, 0);
+    if (r2.tag == 0) { log(r2.ok); } else { log(r2.err); }    // -1
+}
