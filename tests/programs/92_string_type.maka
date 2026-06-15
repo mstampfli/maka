@@ -1,0 +1,14 @@
+// `String` is the owned heap-text name (prelude alias for `own *char`).
+// Auto-frees at scope exit; coerces to `string` for borrowed reads.
+// Prelude provides `str_len`, `str_eq`.
+unit main() {
+    String s = "hi" + " there";
+    log(s);                        // hi there
+
+    log(str_len(s));               // 8
+
+    String t = read_line();
+    log(str_eq(t, "world"));       // true (when stdin provides "world\n")
+
+    // `String` going out of scope auto-frees the buffer.
+}

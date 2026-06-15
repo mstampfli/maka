@@ -1,0 +1,11 @@
+// `module.func(args)` is a module-qualified call.  Disambiguates when two
+// imports bring the same name in from different modules, and lets users be
+// explicit even when only one is in scope.
+module app;
+
+import shapes.area;
+
+unit main() {
+    log(shapes.area(3, 4));    // 12 — explicit
+    log(area(5, 6));            // 30 — unqualified, same function
+}

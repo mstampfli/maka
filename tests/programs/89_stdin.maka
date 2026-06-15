@@ -1,0 +1,8 @@
+// `read_line()` returns one heap-owned line (no trailing newline) — auto-freed
+// at scope exit.  `read_int()` reads a base-10 integer.
+unit main() {
+    string greeting = read_line();
+    log("hi " + greeting);
+    int n = read_int();
+    log(n + 100);
+}

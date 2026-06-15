@@ -1,0 +1,14 @@
+// Storing a borrow into a struct field reached through a parameter is rejected
+// — without lifetime annotations the compiler can't prove the borrow's source
+// outlives the struct.  Closes the "callee stashes &mut T" escape hole.
+data Box { mut &int p; }
+
+unit stash(&int x, &mut Box b) {
+    b.p = x;        // ❌ x's borrow could outlive its source via b
+}
+
+unit main() {
+    int n = 5;
+    mut Box b = { p = &n };
+    stash(&n, &mut b);
+}
