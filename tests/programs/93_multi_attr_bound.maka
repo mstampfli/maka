@@ -1,0 +1,15 @@
+// Multi-arg attribute bound: `attr Convert<U>` parameterizes the attr, and
+// `<T: Convert<int>>` constrains both the receiver type AND the attr arg.
+attr Convert<U> { U to(&_ self); }
+
+data Cents { int v; }
+Cents has Convert<int> {
+    int to(&Cents self) { return self.v; }
+}
+
+unit demo<T: Convert<int>>(&T x) { log(x.to()); }
+
+unit main() {
+    Cents c = { v = 99 };
+    demo(&c);     // 99
+}

@@ -1,0 +1,23 @@
+// Two impls of the same method on the same type, distinguished only by attr
+// args.  At a call site inside a generic with `where T has Convert<int>`, the
+// dispatcher consults the where-bound to pick the int impl; same for string.
+attr Convert<U> { U to(&_ self); }
+
+data Cents { int v; }
+
+Cents has Convert<int> {
+    int to(&Cents self) { return self.v; }
+}
+
+Cents has Convert<string> {
+    string to(&Cents self) { return "cents"; }
+}
+
+unit demo_int<T: Convert<int>>(&T x) { log(x.to()); }
+unit demo_str<T: Convert<string>>(&T x) { log(x.to()); }
+
+unit main() {
+    Cents c = { v = 99 };
+    demo_int(&c);    // 99
+    demo_str(&c);    // cents
+}
