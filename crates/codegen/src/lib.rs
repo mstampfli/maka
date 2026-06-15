@@ -1586,6 +1586,16 @@ impl<'a> Cx<'a> {
                 let l = self.emit_expr(f, lhs);
                 let r = self.emit_expr(f, rhs);
                 let opc = binop_c(*op);
+                // Tagged enum eq/ne: compare `.tag` on each side.  Simple
+                // (payload-less) enums are already represented as integers in
+                // C, so a direct compare works there.
+                if matches!(op, HBinOp::Eq | HBinOp::Ne) {
+                    if let (HType::Enum(le), HType::Enum(re)) = (&lhs.ty, &rhs.ty) {
+                        if le == re && !self.sym.enum_info(*le).is_simple() {
+                            return format!("(({}).tag {} ({}).tag)", l, opc, r);
+                        }
+                    }
+                }
                 format!("(({}) {} ({}))", l, opc, r)
             }
             HExprKind::Un { op, expr } => {

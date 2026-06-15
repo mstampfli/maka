@@ -221,6 +221,16 @@ Standard infix and unary operators with conventional precedence. Maka-specific:
   function calls (see §7).
 - `match (expr) { arms }` - pattern matching, can appear as expression or
   statement. Exhaustiveness checked.
+- `if (cond) { ... } else { ... }` as an expression - arms use `yield` to
+  produce values, exactly like match arms.  `else` is required for the
+  expression form; `else if` chains work naturally.  Statement-form `if`
+  (without an `else`) is also fine; you only see the value-yielding form
+  in expression position.
+- `[expr; N]` - array fill-literal.  Replicates `expr` N times (N must be
+  a compile-time integer).  Same shape as Rust's array fill.
+- Direct `==` / `!=` on enum values of the same enum type.  Simple
+  (payload-less) enums compare as plain ints; tagged enums compare via
+  the discriminant tag.
 - `RetType(params) [captures] { body }` - lambda. Captures named with mode
   `[name]` (by value), `[&name]` (by const ref), `[&mut name]` (by mut ref).
 - `EnumName.Variant { field = expr, ... }` - tagged enum constructor.
@@ -280,8 +290,13 @@ attr_method  := RetType name (params) [where ...]  ";" | block
 use_decl     := use ModPath . Type . Attr ;
 cinclude     := cinclude "header.h";
 cblock       := cblock "raw C source";
-constexpr    := constexpr Type NAME = constant_int_expr;
+constexpr    := [pub]? constexpr Type NAME = constant_int_expr;
 ```
+
+`pub constexpr` is exportable: another module brings the name in with
+`import path.NAME;`, and references in expression position substitute the
+integer value at the use site.  Array-size references must still be
+in-file constexprs (the parser folds at parse time).
 
 `<TyParams>` accepts both `<T>` and `<T: Attr>` shorthand - the latter desugars
 to `where T has Attr`.
@@ -344,6 +359,13 @@ own &Node b = a;                  // move
 
 Returning an owning value moves it to the caller. Passing it as a `own *T` /
 `own &T` argument moves it into the callee.
+
+**Implicit reborrow.** Inside a function with `&mut T` (or `&T`) parameter
+`g`, writing `&mut g` (or `&g`) at a call site that wants `&mut T` would
+yield `&mut &mut T` - one borrow layer too many.  The compiler peels the
+outer borrow automatically, so helper-to-helper chains can write either
+`g` (the parameter itself) or `&mut g` (visually explicit) without
+worrying about the wrapper layer.
 
 ### 6.2 Auto-free at scope exit
 

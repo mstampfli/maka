@@ -512,6 +512,20 @@ pub struct SymTab {
     /// `trait_impls` map above is a fast-path index; this list is what bound
     /// checks scan when filtering by `pub`/`use` imports.
     pub has_impls: Vec<HasImpl>,
+    /// Top-level `pub? constexpr int NAME = ...;` declarations, registered as
+    /// importable named-int constants.  In-file uses still resolve via the
+    /// parser's fold map; cross-module references in expression position go
+    /// through `find_constexpr` here (with the usual pub + import check).
+    pub constexprs: Vec<ConstexprInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstexprInfo {
+    pub name: String,
+    pub value: i64,
+    pub is_pub: bool,
+    pub module_path: Vec<String>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]

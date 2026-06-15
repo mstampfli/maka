@@ -652,6 +652,19 @@ impl SymTab {
                         span: l.span,
                     });
                 }
+                ast::Item::Constexpr(c) => {
+                    if sym.constexprs.iter().any(|x| x.name == c.name && x.module_path.as_slice() == item_module.as_slice()) {
+                        errors.push(SemaError { msg: format!("duplicate constexpr `{}`", c.name), span: c.span });
+                        continue;
+                    }
+                    sym.constexprs.push(ConstexprInfo {
+                        name: c.name.clone(),
+                        value: c.value,
+                        is_pub: c.is_pub,
+                        module_path: item_module.clone(),
+                        span: c.span,
+                    });
+                }
                 ast::Item::Attr(a) => {
                     if sym.attr_by_name(&a.name).is_some() {
                         errors.push(SemaError { msg: format!("duplicate attr `{}`", a.name), span: a.span });

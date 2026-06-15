@@ -1,0 +1,18 @@
+// Match-arm bodies in block form `Pattern { stmt; ... }` now disambiguate
+// cleanly from variant-destructure patterns (`Pattern{field=value}`).  The
+// parser peeks past `{` and routes block-shape contents to the body parser.
+enum Light { Red, Yellow, Green }
+
+unit step(Light c) {
+    match (c) {
+        Red    { log(0); }
+        Yellow { log(1); }
+        Green  { log(2); }
+    }
+}
+
+unit main() {
+    step(Light.Red);
+    step(Light.Yellow);
+    step(Light.Green);
+}

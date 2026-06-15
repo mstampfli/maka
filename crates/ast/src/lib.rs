@@ -460,6 +460,19 @@ pub enum Item {
     CInclude(String, Span),
     /// `cblock { ...raw C... }` — paste verbatim into the generated C at module scope.
     CBlock(String, Span),
+    /// `pub? constexpr T NAME = expr;` — a named compile-time integer constant.
+    /// Always available in the defining file via the parser's pre-scan fold map;
+    /// also registered as a symbol so it can be imported and used by name in
+    /// expression position from other modules.
+    Constexpr(ConstexprDecl),
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstexprDecl {
+    pub name: String,
+    pub value: i64,
+    pub is_pub: bool,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]

@@ -1,0 +1,4 @@
+module config;
+
+pub constexpr int MAX_HP = 100;
+pub constexpr int START_ROOM = 3;

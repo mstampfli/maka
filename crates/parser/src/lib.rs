@@ -103,9 +103,14 @@ impl Parser {
         while !self.at(&TokKind::Eof) {
             // Optional `pub` modifier on top-level items.
             let is_pub = self.eat(&TokKind::Pub);
-            // Skip module-scope constexpr decls — they were captured in the pre-pass.
+            // Module-scope constexpr decls.  The pre-scan already captured the
+            // value into our fold map (so array sizes and in-file folds work);
+            // we additionally emit an `Item::Constexpr` so the resolver can
+            // register it as a cross-module-importable symbol.
             if self.at(&TokKind::Constexpr) {
-                self.skip_constexpr_decl()?;
+                if let Some(decl) = self.parse_constexpr_decl(is_pub)? {
+                    items.push(Item::Constexpr(decl));
+                }
                 continue;
             }
             let mut item = self.parse_item()?;
@@ -170,12 +175,33 @@ impl Parser {
         self.pos = save;
     }
 
-    // Skip past a module-scope `constexpr T NAME = expr;` decl during the main parse loop.
-    fn skip_constexpr_decl(&mut self) -> Result<(), ParseError> {
-        // We're at TokKind::Constexpr.
+    // Parse a module-scope `constexpr T NAME = expr;` declaration and return
+    // a ConstexprDecl (already-folded value).  The pre-scan path computed the
+    // value; here we just walk the tokens to extract the name and reach `;`.
+    fn parse_constexpr_decl(&mut self, is_pub: bool) -> Result<Option<ConstexprDecl>, ParseError> {
+        let kw_span = self.peek_span();
+        self.bump();                          // `constexpr`
+        // Skip the type tokens until we find the name (Ident followed by `=`).
+        let mut name: Option<String> = None;
+        while self.pos < self.toks.len() && !matches!(self.peek(), TokKind::Semicolon | TokKind::Eof) {
+            if let TokKind::Ident(n) = self.peek().clone() {
+                if matches!(self.peek_at(1), TokKind::Eq) {
+                    name = Some(n);
+                    break;
+                }
+            }
+            self.bump();
+        }
+        // Walk to the semicolon - the value was already folded during pre-scan
+        // and lives in `self.constexprs`.
         while !matches!(self.peek(), TokKind::Semicolon | TokKind::Eof) { self.bump(); }
         self.expect(&TokKind::Semicolon, "`;`")?;
-        Ok(())
+        if let Some(n) = name {
+            if let Some(&v) = self.constexprs.get(&n) {
+                return Ok(Some(ConstexprDecl { name: n, value: v, is_pub, span: kw_span }));
+            }
+        }
+        Ok(None)
     }
 
     // Try to fold a constexpr-int expression starting at self.pos: literals, idents (looked up
@@ -1408,9 +1434,28 @@ impl Parser {
                 self.bump();
                 let mut elems = Vec::new();
                 if !self.at(&TokKind::RBracket) {
-                    loop {
+                    let first = self.parse_expr()?;
+                    // `[expr; N]` fill-literal: parse the count and replicate
+                    // the first element N times.  Count must be a compile-time
+                    // integer (literal or constexpr).
+                    if self.eat(&TokKind::Semicolon) {
+                        let count_span = self.peek_span();
+                        let count = self.try_fold_int().ok_or_else(|| ParseError {
+                            msg: "expected a constant integer length after `;` in fill-literal".into(),
+                            span: count_span,
+                        })?;
+                        self.expect(&TokKind::RBracket, "`]`")?;
+                        if count < 0 {
+                            return Err(ParseError { msg: "array fill-length must be non-negative".into(), span: count_span });
+                        }
+                        let mut filled = Vec::with_capacity(count as usize);
+                        for _ in 0..count { filled.push(first.clone()); }
+                        return Ok(Expr::ArrayLit { elems: filled, span });
+                    }
+                    elems.push(first);
+                    while self.eat(&TokKind::Comma) {
+                        if self.at(&TokKind::RBracket) { break; }
                         elems.push(self.parse_expr()?);
-                        if !self.eat(&TokKind::Comma) { break; }
                     }
                 }
                 self.expect(&TokKind::RBracket, "`]`")?;
@@ -1421,6 +1466,12 @@ impl Parser {
                 let (scrut, arms) = self.parse_match_after_kw()?;
                 Ok(Expr::Match { scrutinee: Box::new(scrut), arms, span })
             }
+            // `if (cond) { ... } else { ... }` as a value-yielding expression.
+            // Desugars to `match (cond) { true { ... }, else { ... } }` so all
+            // the existing match-arm typeck + codegen plumbing applies.  Arms
+            // produce values via `yield` exactly like a match.  `else if` chains
+            // are accepted by recursively parsing the right-hand side.
+            TokKind::If => Ok(self.parse_if_expr()?),
             TokKind::LBrace => {
                 // struct literal with inferred type (e.g. in `Slot s = { id = 1 };`)
                 Ok(self.parse_struct_lit(None, span)?)
@@ -1516,35 +1567,53 @@ impl Parser {
                     enum_name = Some(name);
                     variant = vn;
                 }
+                // Disambiguate `Variant{field, ...}` (destructure pattern) from
+                // `Variant { stmt; ... }` (block-form match-arm body).  Peek past
+                // the `{` - if it's empty, a stmt-keyword, or `Ident (` / `Ident .`
+                // (call / method), it's a body block; let the match-arm parser
+                // own the `{` and parse the block.  Otherwise it's a destructure.
                 if self.at(&TokKind::LBrace) {
-                    self.bump();
-                    let mut fields = Vec::new();
-                    while !self.at(&TokKind::RBrace) {
-                        let fstart = self.peek_span();
-                        let (fname, _) = self.expect_ident("field name")?;
-                        let mut binding = None;
-                        let mut literal = None;
-                        if self.eat(&TokKind::Eq) {
-                            match self.peek() {
-                                TokKind::Int(n) => { let n = *n; self.bump(); literal = Some(Lit::Int(n)); }
-                                TokKind::True => { self.bump(); literal = Some(Lit::Bool(true)); }
-                                TokKind::False => { self.bump(); literal = Some(Lit::Bool(false)); }
-                                TokKind::Ident(_) => {
-                                    let (rename, _) = self.expect_ident("rename")?;
-                                    binding = Some(rename);
+                    let looks_like_destructure = match (self.peek_at(1), self.peek_at(2)) {
+                        (TokKind::RBrace, _) => false,
+                        (TokKind::If, _) | (TokKind::While, _) | (TokKind::For, _)
+                        | (TokKind::Return, _) | (TokKind::Mut, _)
+                        | (TokKind::Unsafe, _) | (TokKind::Match, _) | (TokKind::Break, _)
+                        | (TokKind::Continue, _) | (TokKind::Yield, _) | (TokKind::Propagate, _)
+                        | (TokKind::Underscore, _) => false,
+                        (TokKind::Ident(_), TokKind::LParen) => false,
+                        (TokKind::Ident(_), TokKind::Dot)    => false,
+                        _ => true,
+                    };
+                    if looks_like_destructure {
+                        self.bump();
+                        let mut fields = Vec::new();
+                        while !self.at(&TokKind::RBrace) {
+                            let fstart = self.peek_span();
+                            let (fname, _) = self.expect_ident("field name")?;
+                            let mut binding = None;
+                            let mut literal = None;
+                            if self.eat(&TokKind::Eq) {
+                                match self.peek() {
+                                    TokKind::Int(n) => { let n = *n; self.bump(); literal = Some(Lit::Int(n)); }
+                                    TokKind::True => { self.bump(); literal = Some(Lit::Bool(true)); }
+                                    TokKind::False => { self.bump(); literal = Some(Lit::Bool(false)); }
+                                    TokKind::Ident(_) => {
+                                        let (rename, _) = self.expect_ident("rename")?;
+                                        binding = Some(rename);
+                                    }
+                                    other => return Err(ParseError {
+                                        msg: format!("expected rename or literal, got {:?}", other),
+                                        span: self.peek_span(),
+                                    }),
                                 }
-                                other => return Err(ParseError {
-                                    msg: format!("expected rename or literal, got {:?}", other),
-                                    span: self.peek_span(),
-                                }),
                             }
+                            fields.push(PatField { field: fname, binding, literal, span: fstart });
+                            if !self.eat(&TokKind::Comma) { break; }
+                            if self.at(&TokKind::RBrace) { break; }
                         }
-                        fields.push(PatField { field: fname, binding, literal, span: fstart });
-                        if !self.eat(&TokKind::Comma) { break; }
-                        if self.at(&TokKind::RBrace) { break; }
+                        self.expect(&TokKind::RBrace, "`}`")?;
+                        return Ok(Pattern::VariantDestructure { enum_name, variant, fields, span: start });
                     }
-                    self.expect(&TokKind::RBrace, "`}`")?;
-                    return Ok(Pattern::VariantDestructure { enum_name, variant, fields, span: start });
                 }
                 if enum_name.is_some() {
                     Ok(Pattern::Variant { enum_name, variant, span: start })
@@ -1563,6 +1632,45 @@ impl Parser {
 
     /// Speculatively parse a lambda expression starting at the current position.
     /// Returns `Ok(Some(lambda))` if a lambda was parsed, `Ok(None)` to indicate no lambda here.
+    /// Parse an `if (cond) { ... } else { ... }` expression and desugar it
+    /// into a bool-match.  Else is required for expression-form ifs.
+    fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
+        let start = self.peek_span();
+        self.expect(&TokKind::If, "`if`")?;
+        self.expect(&TokKind::LParen, "`(`")?;
+        let cond = self.parse_expr()?;
+        self.expect(&TokKind::RParen, "`)`")?;
+        let then_blk = self.parse_block()?;
+        self.expect(&TokKind::Else, "`else` (if-expression requires an else branch)")?;
+        let else_body = if self.at(&TokKind::If) {
+            let nested = self.parse_if_expr()?;
+            ArmBody::Block(Block {
+                stmts: vec![Stmt::Yield(nested, start)],
+                span: start,
+            })
+        } else {
+            ArmBody::Block(self.parse_block()?)
+        };
+        Ok(Expr::Match {
+            scrutinee: Box::new(cond),
+            arms: vec![
+                MatchArm {
+                    pattern: Pattern::Lit(Lit::Bool(true), start),
+                    guard: None,
+                    body: ArmBody::Block(then_blk),
+                    span: start,
+                },
+                MatchArm {
+                    pattern: Pattern::Else(start),
+                    guard: None,
+                    body: else_body,
+                    span: start,
+                },
+            ],
+            span: start,
+        })
+    }
+
     fn try_parse_lambda(&mut self) -> Result<Option<Expr>, ParseError> {
         let save = self.pos;
         let start = self.peek_span();

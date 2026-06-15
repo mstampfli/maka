@@ -1,0 +1,11 @@
+// `pub constexpr` is importable from another module and substitutes as a
+// literal int at the use site.
+import config.{MAX_HP, START_ROOM};
+
+int min_hp() { return MAX_HP - 5; }
+
+unit main() {
+    log(MAX_HP);          // 100
+    log(START_ROOM);      // 3
+    log(min_hp());        // 95
+}

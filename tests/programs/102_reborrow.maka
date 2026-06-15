@@ -1,0 +1,19 @@
+// Implicit reborrow: passing `&mut g` where `g` is already `&mut T` no
+// longer constructs `&mut &mut T`; the extra layer is peeled at the call
+// site so helper-to-helper chains can write either `g` or `&mut g`.
+data Counter { mut int n; }
+
+unit bump(&mut Counter c) {
+    c.n = c.n + 1;
+}
+
+unit bump_twice(&mut Counter c) {
+    bump(&mut c);     // would have been an error before
+    bump(c);          // also works (already a borrow)
+}
+
+unit main() {
+    mut Counter c = { n = 0 };
+    bump_twice(&mut c);
+    log(c.n);       // 2
+}

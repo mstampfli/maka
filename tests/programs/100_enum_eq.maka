@@ -1,0 +1,10 @@
+// Direct `==` / `!=` on enum values of the same type.  No more
+// `(a as int) == (Mode.X as int)`.
+enum Mode { Explore, Dialogue, Combat, GameOver }
+
+unit main() {
+    Mode m = Mode.Combat;
+    if (m == Mode.Combat) { log(1); } else { log(0); }
+    if (m == Mode.Explore) { log(1); } else { log(0); }
+    if (m != Mode.Explore) { log(1); } else { log(0); }
+}

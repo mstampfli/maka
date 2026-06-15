@@ -1,0 +1,13 @@
+// `[expr; N]` fill literal: replicate `expr` N times.  N must be a
+// compile-time integer (literal or in-file constexpr).
+constexpr int N = 5;
+
+unit main() {
+    [N]int zeros = [0; N];
+    log(zeros[0]);     // 0
+    log(zeros[4]);     // 0
+
+    [6]int sevens = [7; 6];
+    log(sevens[0]);    // 7
+    log(sevens[5]);    // 7
+}

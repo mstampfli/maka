@@ -619,8 +619,31 @@ impl<'a> TypeChecker<'a> {
             };
             return HExpr { kind: HExprKind::FnRef(fid), ty, span: sp };
         }
+        // Constexpr lookup: a name in any module that defines `pub constexpr int N = ...;`
+        // and is imported (or in the same module) becomes a literal int at this site.
+        // In-file constexprs were already inlined as int literals by the parser's
+        // fold-map, so they never reach this code path - but they show up here when
+        // referenced cross-module.
+        if let Some(ce) = self.find_constexpr(n) {
+            return HExpr { kind: HExprKind::LitInt(ce.value), ty: HType::Int, span: sp };
+        }
         self.err(format!("unknown identifier `{}`", n), sp);
         HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp }
+    }
+
+    /// Find a `pub constexpr` named `n` visible from the current module: either
+    /// declared here (regardless of pub) or in another module and explicitly
+    /// imported via `import path.Name;`.
+    fn find_constexpr(&self, n: &str) -> Option<&ConstexprInfo> {
+        // Same-module: any visibility.
+        if let Some(ce) = self.sym.constexprs.iter().find(|c| c.name == n && c.module_path == self.cur_module) {
+            return Some(ce);
+        }
+        // Cross-module: must be pub AND imported.
+        self.sym.constexprs.iter().find(|c| {
+            c.name == n && c.is_pub
+                && self.cur_imports.iter().any(|(p, name)| p == &c.module_path && name == n)
+        })
     }
 
     fn check_bin(&mut self, op: ast::BinOp, lhs: &ast::Expr, rhs: &ast::Expr, sp: Span) -> HExpr {
@@ -694,7 +717,14 @@ impl<'a> TypeChecker<'a> {
                 let l_is_null = matches!(l.ty, HType::NullT);
                 let l_is_prim = self.is_primitive(&l.ty);
                 let r_is_prim = self.is_primitive(&r.ty);
-                if !l_is_prim && !r_is_null && !l_is_ptr {
+                // Enum-to-enum comparison: two values of the same enum type can
+                // be compared directly.  For simple (payload-less) enums this
+                // is just an integer tag compare; for tagged enums the codegen
+                // peels off `.tag` on both sides.
+                let l_is_enum = matches!(l.ty, HType::Enum(_));
+                let r_is_enum = matches!(r.ty, HType::Enum(_));
+                let same_enum = l_is_enum && r_is_enum && type_eq(&l.ty, &r.ty);
+                if !l_is_prim && !r_is_null && !l_is_ptr && !same_enum {
                     if let Some(hir) = self.try_op_overload(op, &l, &r, sp) {
                         return hir;
                     }
@@ -1589,6 +1619,10 @@ impl<'a> TypeChecker<'a> {
             }
         }
 
+        // Snapshot pre-filter candidates so we can produce a useful error if
+        // overload resolution ends up empty.
+        let pre_filter: Vec<(FuncId, FuncSig)> = candidates.clone();
+
         // Step 3: filter by arity + parameter compatibility (allow exact or via unify for generics).
         // Variadic externs (e.g. `printf`) only require their fixed-arity prefix to match; any
         // extra args after that are passed through to the C variadic ABI.
@@ -1683,7 +1717,31 @@ impl<'a> TypeChecker<'a> {
         let tied: Vec<_> = candidates.iter().take_while(|(_, s)| (if s.type_params.is_empty() { 0 } else { 1 }) == top_rank).cloned().collect();
 
         if tied.is_empty() {
-            self.err(format!("no matching overload for `{}`", name), sp);
+            // Build a diagnostic that names the candidates considered and the
+            // call-site argument shape, so the user can see at a glance which
+            // arg failed which signature.
+            let arg_shape: String = probed.iter()
+                .map(|h| type_str(&h.ty))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut msg = format!(
+                "no matching overload for `{}` called with ({})",
+                name, arg_shape,
+            );
+            if pre_filter.is_empty() {
+                msg.push_str(" - no function by that name found in scope");
+            } else {
+                msg.push_str("; candidates were:");
+                for (_, sig) in pre_filter.iter().take(8) {
+                    let params: Vec<String> = sig.param_tys.iter().map(type_str).collect();
+                    msg.push_str(&format!("\n    {}({}) -> {}",
+                        sig.name, params.join(", "), type_str(&sig.ret)));
+                }
+                if pre_filter.len() > 8 {
+                    msg.push_str(&format!("\n    ... and {} more", pre_filter.len() - 8));
+                }
+            }
+            self.err(msg, sp);
             return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
         }
         // Bound-aware narrowing: when ambiguous, look at the current function's
@@ -2595,6 +2653,25 @@ impl<'a> TypeChecker<'a> {
     fn coerce(&mut self, e: HExpr, target: &HType) -> HExpr {
         if type_eq(&e.ty, target) { return e; }
 
+        // Implicit reborrow: `&mut &mut T` → `&mut T` (and `&&T` → `&T`).  This
+        // is what makes `func(&mut g)` work when `g` is already `&mut T` inside
+        // a helper - users write the borrow naturally and the compiler peels
+        // the redundant layer.
+        if let (HType::Ref { mutable: pm, inner: pi }, HType::Ref { mutable: am, inner: ai }) = (target, &e.ty) {
+            if pm == am {
+                if let HType::Ref { mutable: imut, inner: iinner } = ai.as_ref() {
+                    if pm == imut && type_eq(pi, iinner) {
+                        if let HExprKind::AddrOfRef { place, .. } = &e.kind {
+                            // Peel `&mut <place>` where place is already `&mut T`
+                            // - the inner place IS the borrow we want to pass.
+                            return (**place).clone();
+                        }
+                        return HExpr { ty: target.clone(), ..e };
+                    }
+                }
+            }
+        }
+
         // Auto-deref &T -> T when target is the referent type.
         if let HType::Ref { inner, .. } = &e.ty {
             if type_eq(inner, target) {
@@ -2990,6 +3067,16 @@ pub fn param_compatible(param: &HType, actual: &HType, type_params: &[String]) -
     if type_eq(param, actual) { return true; }
     // Allow null → ptr.
     if matches!(actual, HType::NullT) && matches!(param, HType::Ptr { .. }) { return true; }
+    // Implicit reborrow: writing `&mut g` where `g` is already `&mut T` produces
+    // `&mut &mut T`; at the call site, strip the outer borrow so callers don't
+    // have to remember whether to pass `g` or `&mut g`.  Same for `&T`.
+    if let (HType::Ref { mutable: pm, inner: pi }, HType::Ref { mutable: am, inner: ai }) = (param, actual) {
+        if pm == am {
+            if let HType::Ref { mutable: imut, inner: iinner } = ai.as_ref() {
+                if pm == imut && type_eq(pi, iinner) { return true; }
+            }
+        }
+    }
     // Allow `own *char` → `string` (heap-allocated NUL-terminated buffer
     // produced by string concat / read_line, viewed read-only).
     if matches!(param, HType::Str)
