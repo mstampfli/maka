@@ -1,0 +1,19 @@
+// Three-tier concurrency surface: `thread`, `spawn`, `job`.  All three
+// take a `unit()` closure, return a `*Thread` handle, and are joined via
+// `join(h)`.  See CONCURRENCY.md for the full design.
+//
+// MVP: all three are pthread-backed.  The real fiber and job runtimes
+// arrive later without changing the surface.
+
+unit main() {
+    *Thread t1 = thread(unit() { log(1); });
+    join(t1);
+
+    *Thread t2 = spawn(unit() { log(2); });
+    join(t2);
+
+    *Thread t3 = job(unit() { log(3); });
+    join(t3);
+
+    log(0);
+}

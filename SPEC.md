@@ -487,21 +487,38 @@ Recognized Shareable types by name: `Mutex`, `RwLock`, `Spinlock`, `Channel`,
 
 Calls to non-`gate` functions reject `transfer`/`share` annotations.
 
-### 7.2 `spawn` and `join` - built-in thread API
+### 7.2 Three-tier spawn API
 
-`spawn(closure) -> *Thread` runs a `unit()` closure on a fresh pthread and
-returns a handle. The closure may be bare (no captures) or `alloc`-wrapped
-(heap env). `join(*Thread)` blocks until the thread completes and reclaims the
-handle.
+Maka exposes three concurrency tiers with the same surface shape, picked
+by which keyword you use to spawn.  All three take a `unit()` closure and
+return a `*Thread` handle; `join(*Thread)` blocks until the work finishes.
 
 ```maka
-unit main() {
-    *Thread t1 = spawn(unit() { log(100); });
-    *Thread t2 = spawn(unit() { log(200); });
-    join(t1);
-    join(t2);
-}
+*Thread t1 = thread(unit() { log(1); });    // OS thread — blocking-safe
+*Thread t2 = spawn(unit()  { log(2); });    // fiber — concurrent IO
+*Thread t3 = job(unit()    { log(3); });    // work item — parallel compute
+join(t1);
+join(t2);
+join(t3);
 ```
+
+`thread` is the kernel-thread tier (blocking-safe, ~8 MB stack, true
+parallelism).  `spawn` is the fiber tier (ergonomic concurrent IO).
+`job` is the work-stealing pool tier (parallel compute fanout).  See
+`CONCURRENCY.md` for the full design and decision tree.
+
+**Implementation status**: all three are currently `pthread_create`-backed.
+The real fiber runtime (slab pool + scheduler + epoll reactor) and the
+real job runtime (work-stealing pool) replace the backings without
+changing the surface.  User code written today against `thread` /
+`spawn` / `job` will keep working.
+
+Composition helpers documented in `CONCURRENCY.md`:
+  - `join(h1, h2, ..., hN)` → `JoinN<T1, ..., TN>` — wait for all
+  - `select(h1, h2, ..., hN)` → `SelectN<T1, ..., TN>` — wait for first
+  - `par_for` / `par_reduce` / `par_map` — data-parallel over slices
+
+These ship as part of the real runtime; not yet wired in this MVP.
 
 `Thread` is a built-in opaque type (recognized by name; backed by `pthread_t`
 in the generated C). It is Shareable.

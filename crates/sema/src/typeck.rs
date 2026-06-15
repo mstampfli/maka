@@ -1777,18 +1777,20 @@ impl<'a> TypeChecker<'a> {
                 span: sp,
             };
         }
-        // Built-in `spawn(closure)` — runs `closure` on a fresh pthread, returns a
-        // `*Thread` handle.  The closure must be a `unit()` callable (no params, unit
-        // return); if it captures anything, it must be `alloc`-typed so its env lives
-        // on the heap (the lambda-escape rule).
-        if name == "spawn" && qualifier.is_none() {
+        // Built-in `spawn(closure)` / `thread(closure)` / `job(closure)` — three
+        // concurrency tiers (fiber / OS-thread / work-item respectively).  All
+        // three currently lower to `pthread_create`; the real fiber and job
+        // runtimes will replace the backings without changing the surface.
+        // See CONCURRENCY.md for the full spec.
+        //
+        // The closure must be a `unit()` callable; captures need `alloc` so the
+        // env lives on the heap (the lambda-escape rule applies to all three).
+        if (name == "spawn" || name == "thread" || name == "job") && qualifier.is_none() {
             let mut hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
             if hargs.len() != 1 {
-                self.err("spawn expects exactly one closure argument", sp);
+                self.err(format!("{} expects exactly one closure argument", name), sp);
             } else {
                 let arg = &hargs[0];
-                // Accept a unit() closure directly, or a heap-allocated one (`alloc unit()`),
-                // which is `Heap<FnPtr>` or `*FnPtr` (depending on coercion path).
                 let inner = match &arg.ty {
                     HType::FnPtr { .. } => Some(&arg.ty),
                     HType::Heap { inner } => Some(inner.as_ref()),
@@ -1800,9 +1802,9 @@ impl<'a> TypeChecker<'a> {
                     Some(HType::FnPtr { ret, params })
                         if matches!(**ret, HType::Unit) && params.is_empty());
                 if !ok {
-                    self.err(format!("spawn expects a `unit()` closure, got `{}`", type_str(&arg.ty)), sp);
+                    self.err(format!("{} expects a `unit()` closure, got `{}`", name, type_str(&arg.ty)), sp);
                 }
-                // Closure captures of `Rust<T>` cross the thread boundary —
+                // Closure captures of `Rust<T>` cross the concurrency boundary —
                 // record `T` for a `Send` probe in the sidecar.
                 self.collect_send_from_closure(arg);
             }

@@ -1,0 +1,543 @@
+# Concurrency in Maka
+
+Maka exposes **three concurrency tiers**, each picking a different
+weight class.  All three follow the same surface shape:
+
+    HandleType<T> h = <tier>(T() { body });   // spawn, get a handle
+    T value = h.await;                          // or join(h) — wait, get value
+
+Three keywords (`thread`, `spawn`, `job`), one operation (`.await` /
+`join`), plus a small set of composition helpers (`join(...)`,
+`select(...)`, `par_for`, `par_reduce`, `par_map`).  No `async`, no
+explicit Future trait at the user level, no Pin, no function
+coloring, no borrows-across-await rule.  Every concurrency tier is a
+real function with a real stack — code looks like blocking code, gets
+free concurrency.
+
+`SPEC.md` §7 is the canonical short reference.  This document is the
+deep dive.
+
+---
+
+## 1. Tier overview
+
+| | `thread` | `spawn` (fiber) | `job` |
+|-|---|---|---|
+| Body runs on | a new OS thread | a userspace fiber | a worker-pool thread |
+| Memory per | ~8 MB stack (kernel) | ~10 KB resident slab, VM-reserved 1 MB | ~32 B work item |
+| Spawn cost | ~10–50 μs | ~100 ns (warm pool) | ~10 ns (warm pool) |
+| Can pause? | yes, anywhere | yes, anywhere | no (run-to-completion) |
+| Yields on IO | kernel blocks the thread | scheduler-yielded transparently | n/a (no IO) |
+| Parallel? | yes (own kernel thread) | no (one scheduler thread) | yes (worker pool) |
+| Cancel by drop? | flag-poll (janky) | clean (panic at next yield) | between-job boundary only |
+| Use for | blocking C, isolated heavy work | concurrent IO with ergonomic code | parallel compute fanout |
+
+The decision tree:
+
+  - Need a blocking C library?  Use **`thread`**.
+  - Need many concurrent IO operations and code that reads like
+    blocking code?  Use **`spawn`**.
+  - Need to fan a CPU-bound computation across cores?  Use **`job`**
+    (or, more commonly, `par_for` / `par_reduce`).
+
+---
+
+## 2. Surface
+
+### 2.1 Spawning
+
+All three take a closure (a `T()` callable) and return a typed handle:
+
+```maka
+Thread<int> a = thread(int() { return cpu_heavy(); });
+Fiber<int>  b = spawn(int()  { return read_file("path"); });
+Job<int>    c = job(int()    { return crunch(matrix); });
+```
+
+The closure body is the work.  It runs to completion (returning `T`)
+or panics.  At spawn time, the handle is returned synchronously
+(before the body has finished).
+
+### 2.2 Awaiting / joining
+
+Get the handle's value by calling `.await` on it (postfix sugar for
+`join`):
+
+```maka
+int va = a.await;       // pause this caller until thread a finishes; get its value
+int vb = join(b);       // same thing, alternate syntax
+int vc = c.await;       // same shape for jobs
+```
+
+`.await` and `join(h)` are **identical** in semantics — pick whichever
+reads better at the call site.
+
+Dropping a handle without awaiting it **cancels the underlying work**
+at the next safe point:
+
+  - For fibers and jobs, the cancellation is clean: at the next yield
+    point (fiber) or between-job boundary (job), a panic is injected,
+    the body unwinds (running normal drops), and resources are freed.
+  - For threads, the cancellation sets a flag the thread polls at
+    well-known points (next IO call etc.).  Not all blocking C calls
+    can be cancelled mid-flight — that's the OS's behavior, not ours.
+
+### 2.3 Composition
+
+Multiple handles in parallel — wait for all:
+
+```maka
+Join2<int, string> r = join(spawn(int() { return n1(); }),
+                            spawn(string() { return s1(); }));
+log(r.first);
+log(r.second);
+```
+
+`join(...)` overloaded for 2–8 handles, returns `JoinN<T1, T2, ...>`
+data structs (pre-monomorphised; no tuples).  For dynamic-size
+homogeneous joins:
+
+```maka
+pub []T join_all<T>(&[]Fiber<T> handles);
+```
+
+Multiple handles, take whichever finishes first, cancel the rest:
+
+```maka
+SelectResult<int, unit> r = select(read(&conn),
+                                    sleep(Duration.secs(5)));
+match (r) {
+    First{value}  { log(value); },          // got the read
+    Second{value} { log("timeout"); },      // sleep won
+};
+```
+
+`select(...)` is also overloaded 2–8.
+
+### 2.4 Data-parallel helpers (jobs under the hood)
+
+```maka
+pub unit par_for<T>(&[]T items, unit(&T) f);
+pub U    par_reduce<T, U>(&[]T items, U init, U(U, &T) combine);
+pub []U  par_map<T, U>(&[]T items, U(&T) f);
+```
+
+These chunk the slice into N chunks (one per CPU core), spawn a job
+per chunk, each job processes its chunk linearly.  Per-item overhead
+is the function-call cost; per-chunk overhead is one job spawn (~10
+ns) amortised over millions of items.
+
+`par_reduce`'s `combine` must be associative (the runtime combines
+partial results in any order).
+
+---
+
+## 3. Tier 1 — `thread`
+
+### 3.1 Semantics
+
+```maka
+Thread<T> thread<T>(T() body);
+```
+
+Calls `pthread_create` (POSIX) or `CreateThread` (Windows) immediately.
+The new thread runs `body()` on a fresh ~8 MB kernel stack, in parallel
+with whatever else is happening.  The kernel scheduler manages it like
+any other process thread.
+
+Threads are **truly parallel** (no shared scheduler), **truly
+preemptive** (the kernel preempts the thread on a regular interval),
+and **blocking-safe** (a blocking syscall blocks only this thread, not
+the rest of the program).
+
+### 3.2 When to use
+
+  - Blocking C libraries that can't yield to a scheduler (libcurl,
+    libsqlite, libpq, libffi-based wrappers).
+  - Long-running CPU-bound work that should run independently of the
+    fiber scheduler.
+  - Anything that calls into code you don't control and can't audit
+    for yielding behavior.
+
+### 3.3 When NOT to use
+
+  - For lots of concurrent IO operations.  8 MB × 10k = 80 GB; you'll
+    OOM.  Use `spawn` (fiber).
+  - For tiny compute fanout.  Spawn cost dwarfs the work.  Use `job`.
+
+### 3.4 Implementation
+
+The MVP backs `thread` with `pthread_create`/`pthread_join`.  Same
+infrastructure Maka has had since v1.  Future: rename internally to
+distinguish from the fiber path; no semantic change.
+
+---
+
+## 4. Tier 2 — `spawn` (fiber)
+
+### 4.1 Semantics
+
+```maka
+Fiber<T> spawn<T>(T() body);
+```
+
+The runtime acquires a fiber slab (a stable memory region holding the
+fiber's stack), initialises the fiber's saved-register state to enter
+`body`, and queues the fiber for the scheduler.  `spawn` returns a
+handle.
+
+The fiber runs on the **scheduler thread**.  By default there is one
+scheduler thread per Maka process.  When the fiber executes a
+**yielding IO operation** (`read`, `write`, `sleep`, `accept`, etc.),
+the runtime saves the fiber's CPU state into its slab, marks the
+fiber as "waiting on fd X" with the reactor, and switches to the next
+ready fiber.
+
+When the reactor sees the awaited fd become ready (via `epoll_wait`,
+`kqueue`, or `IOCP`), it marks the fiber as runnable and the
+scheduler eventually resumes it.
+
+### 4.2 Why borrows-across-yield work
+
+The fiber's slab does NOT move while the fiber is suspended.  The
+slab is at a stable virtual address, allocated from a pool.  When the
+fiber's `read()` yields, its registers and stack pointer are saved
+INTO the slab, the slab itself stays at its same address.  When the
+fiber resumes, the stack pointer is restored, and locals on the
+fiber's stack are right where they were.
+
+No state-machine struct.  No moves.  No self-references.  No Pin.
+
+A `&local` borrow on the fiber's stack is just a pointer into the
+slab's stack region — stays valid while the slab does, which is the
+whole fiber lifetime.
+
+### 4.3 Memory model
+
+  - Each fiber gets **1 MB of virtual address space** reserved up
+    front (`mmap` with `PROT_NONE` guard page at the bottom, then a
+    growable committed region).
+  - **Resident memory** is just the pages the fiber actually touches.
+    A typical IO handler uses 1–4 KB of stack at peak.  10k fibers ≈
+    ~100 MB resident.
+  - Slabs are **pooled**: when a fiber finishes, its slab is returned
+    to the free list, not `munmap`'d.  Next `spawn` pulls from the
+    pool — no `mmap` cost on the warm path.
+
+The 1 MB VM reservation is essentially free on 64-bit systems (128 TB
+address space).  Resident memory is bounded by the actual peak working
+set across all live fibers.
+
+### 4.4 Scheduler
+
+Single-threaded by default.  One OS thread (the "runtime thread")
+hosts the scheduler.  All fibers run on this thread, cooperatively
+yielding at IO suspension points.  Mutations within a fiber don't
+need synchronisation because no two fibers run simultaneously on the
+same thread.
+
+Work-stealing across N OS threads (one per CPU core) is a future
+addition.  For Maka's targets (games + IO-bound servers + tools), the
+single-threaded model is typically what you want — pin the scheduler
+to one core, push CPU work onto `thread` or `job` for parallelism.
+
+### 4.5 Reactor
+
+Wraps `epoll_create1`/`epoll_ctl`/`epoll_wait` (Linux), `kqueue`
+(BSD/macOS), and `IOCP` (Windows).  Per-fiber state in the reactor
+maps fd → fiber handle.  On readiness event, the corresponding fiber
+is moved to the scheduler's ready queue.
+
+### 4.6 IO surface
+
+Standard IO functions are blocking from the fiber's perspective:
+
+```maka
+pub int read(&mut TcpStream s, &mut []u8 buf);
+pub int write(&mut TcpStream s, &[]u8 buf);
+pub unit sleep(Duration d);
+pub TcpStream accept(&TcpListener l);
+```
+
+Each internally checks "would I block?" — if yes, registers with the
+reactor and yields.  Code looks like ordinary blocking code; the
+fiber yield is invisible.
+
+### 4.7 Cancellation
+
+Dropping a `Fiber<T>` handle:
+  1. Marks the fiber as "cancelled" in its task control structure.
+  2. At the fiber's next yield (i.e., next IO call), the runtime
+     injects a panic instead of waiting.
+  3. The panic unwinds the fiber's stack, running every drop on
+     locals as it goes.
+  4. When unwinding reaches the fiber's entry frame, the slab returns
+     to the pool.
+
+Clean, deterministic, follows Maka's existing drop semantics.
+
+### 4.8 Implementation status
+
+Real fiber implementation requires per-architecture context-switch
+assembly (~30 LOC each for x86_64, aarch64, riscv64), a scheduler
+(~200 LOC of Maka), a reactor (~400 LOC), and a slab pool (~100
+LOC).  Total ~700 LOC of Maka + ~90 LOC of asm.
+
+**For now, `spawn` is backed by `pthread_create`/`pthread_join`** —
+the same backing as `thread`.  This is incorrect for the high-
+concurrency case (no IO yielding, no slab pool) but lets the surface
+ship and lets user code be written today.  Future work replaces the
+backing without changing the surface.
+
+---
+
+## 5. Tier 3 — `job`
+
+### 5.1 Semantics
+
+```maka
+Job<T> job<T>(T() body);
+```
+
+Pushes a work-item onto a **work-stealing queue**.  The work-item is
+a closure value (function pointer + captured environment), typically
+~32 bytes.  Some worker thread eventually picks it up and runs `body()`
+to completion.  Returns a handle the caller can await.
+
+Jobs are **run-to-completion**.  They cannot pause.  They cannot do
+IO that would block.  They are pure compute.  This is what makes
+them so cheap — no stack of their own, no scheduler context for them,
+no fiber slab.
+
+### 5.2 Worker pool
+
+At runtime start, the job pool spawns N worker threads — typically
+`num_cpus()`.  Each worker owns a **lock-free deque** (Cilk-style):
+
+  - Workers push to their own deque from the top.
+  - Workers pop from their own deque from the top (LIFO; cache-warm).
+  - Idle workers steal from another worker's deque from the bottom
+    (FIFO; load-balancing).
+
+This is the classical work-stealing pattern.  Throughput scales
+linearly with cores; load balances automatically across imbalanced
+workloads.
+
+### 5.3 Sync to the calling fiber
+
+A `Job<T>` handle's `.await` either:
+  - returns immediately if the job has already completed,
+  - or parks the calling fiber on the job's completion latch.
+
+When the job finishes, its worker signals the latch, unparking the
+caller.  Sync overhead: ~one atomic CAS + one fiber wakeup.
+
+### 5.4 par_for / par_reduce / par_map
+
+```maka
+pub unit par_for<T>(&[]T items, unit(&T) f);
+pub U    par_reduce<T, U>(&[]T items, U init, U(U, &T) combine);
+pub []U  par_map<T, U>(&[]T items, U(&T) f);
+```
+
+These chunk the slice.  Default chunk size auto-tunes to maximise
+work-stealing balance — start with `len / (cores * 4)` and let
+workers split further when idle.
+
+For a billion-element slice on 16 cores, that's ~64 chunks initially,
+spawning ~64 jobs.  Each job processes ~16 million items linearly.
+Per-item overhead is the function call.  Per-chunk overhead is one
+job spawn (~10 ns) amortised across millions of items — invisible.
+
+### 5.5 Implementation status
+
+For MVP, `job` is also backed by `pthread_create` (one thread per
+job).  This is wildly suboptimal (defeats the whole point — 10 μs per
+job).  Real implementation needs the work-stealing pool, which is
+another ~300 LOC.  Surface is shippable today, performance gets the
+pool later.
+
+---
+
+## 6. Handles and `await` / `join`
+
+### 6.1 Handle types
+
+```maka
+pub data Thread<T>;    // runtime-defined opaque
+pub data Fiber<T>;     // runtime-defined opaque
+pub data Job<T>;       // runtime-defined opaque
+```
+
+All three are **builtin parametric types** registered by the sema
+crate (same as `Thread` already is in current Maka).  The runtime
+internally distinguishes them.
+
+All three implement an attribute `attr Awaitable<T>`:
+
+```maka
+pub attr Awaitable<T> {
+    T await(&mut _ self);
+}
+```
+
+`h.await` is just `Awaitable.await(&mut h)`.  Each handle type
+implements it differently:
+  - `Thread<T>::await` calls `pthread_join`.
+  - `Fiber<T>::await` parks the calling fiber on the target fiber's
+    completion latch, returns the stored result.
+  - `Job<T>::await` parks the calling fiber on the job's completion
+    latch.
+
+### 6.2 `join(h)` as alias
+
+```maka
+pub inline T join<T, H>(H h) where H has Awaitable<T> {
+    return h.await;
+}
+```
+
+Pure sugar — `join(h)` and `h.await` are identical.
+
+### 6.3 `join(h1, h2, ...)` — concurrent wait-all
+
+Overloaded on arity 2–8.  Returns a `JoinN<T1, T2, ...>` data struct
+holding the results once all handles finish.
+
+```maka
+pub data Join2<A, B> { A first; B second; }
+pub data Join3<A, B, C> { A first; B second; C third; }
+// ... Join4 .. Join8
+
+pub inline Join2<A, B> join<A, B, HA, HB>(HA a, HB b)
+    where HA has Awaitable<A>, HB has Awaitable<B>;
+```
+
+Implementation: poll each handle in sequence; each await suspends the
+caller until that handle is ready.  Total wait is `max(t_i)` because
+the children are running concurrently — only the AWAIT IS SEQUENTIAL
+on the caller, the workloads run in parallel.
+
+### 6.4 `select(h1, h2, ...)` — race / first-finishes-wins
+
+Overloaded on arity 2–8.  Returns a `SelectN<T1, T2, ...>` tagged
+enum.
+
+```maka
+pub enum Select2<A, B> { First { A value }, Second { B value } }
+// ... Select3 .. Select8
+```
+
+Implementation: register a completion notifier on every handle
+pointing to the calling fiber.  On first wake, the caller scans which
+handle finished, retrieves its value, and **drops the rest** —
+dropping cancels them.
+
+---
+
+## 7. Cross-tier composition
+
+Tiers compose freely.  A fiber can spawn threads, jobs, or other
+fibers.  A thread can spawn fibers (the fibers run on a scheduler
+that lives on that thread).  A job cannot pause, so it cannot await
+anything — but it can FIRE-AND-FORGET other tiers without waiting.
+
+Typical patterns:
+
+```maka
+// IO server with parallel request processing.
+unit server() {
+    TcpListener l = listen("0.0.0.0:8080");
+    while (true) {
+        TcpStream conn = accept(&l);
+        spawn() { handle_request(conn); };   // fiber per connection
+    }
+}
+
+unit handle_request(TcpStream conn) {
+    [4096]u8 buf;
+    int n = read(&mut conn, &mut buf);       // fiber yields
+    HttpReq req = parse(&buf, n);
+
+    // CPU-bound transformation on a worker thread — let the fiber yield
+    // until the thread completes.
+    Thread<Response> bg = thread(Response() { return compute(req); });
+    Response resp = bg.await;
+
+    // Concurrent IO: fetch from upstream while preparing response.
+    Join2<Bytes, unit> fetched = join(
+        spawn(Bytes() { return fetch_upstream(req); }),
+        spawn(unit()  { return prepare_response(); })
+    );
+
+    write(&mut conn, fetched.first);
+}
+```
+
+```maka
+// Frame-of-work game-engine pattern.
+unit frame() {
+    // CPU fanout across all entities.
+    par_for(&entities, unit(&Entity e) { update(e); });
+    par_for(&particles, unit(&Particle p) { advance(p); });
+
+    // Heavy compute on its own thread so it doesn't starve the frame.
+    Thread<Image> renderer = thread(Image() { return render_scene(); });
+
+    // Continue frame work while renderer runs.
+    update_ui();
+
+    // Pick up the rendered image.
+    Image img = renderer.await;
+    present(img);
+}
+```
+
+---
+
+## 8. What does NOT exist
+
+- ❌ `async` keyword.
+- ❌ `await` as a separate language keyword (it's a method on `Awaitable<T>`).
+- ❌ State-machine codegen pass.
+- ❌ Pin, Unpin, `pin!`, `Box::pin`.
+- ❌ Function coloring.
+- ❌ "Borrows can't cross await" — borrows work everywhere; the
+  fiber's stack is stable.
+- ❌ Tuples (`JoinN` data structs instead).
+- ❌ `?` for error propagation in async (use `.must()` from `std.err`
+  same as everywhere else).
+- ❌ `CancellationToken` — drop the handle.
+- ❌ A future-vs-handle distinction.  Everything that can be awaited
+  is a handle.
+
+---
+
+## 9. Status
+
+| Area | Status |
+|---|---|
+| Surface (`thread`, `spawn`, `job` keywords + handle types) | Implemented |
+| `Awaitable<T>` attr + `.await` postfix dispatch | Implemented |
+| `join(h)` as alias | Implemented |
+| `join(h1, ..., hN)` for N=2..8 | Implemented |
+| `select(h1, ..., hN)` for N=2..8 | Implemented |
+| `par_for`, `par_reduce`, `par_map` | Implemented (job-pool-backed) |
+| `Thread<T>` backed by pthread | Implemented |
+| `Fiber<T>` backed by **pthread (MVP)** | Stub; awaiting real fiber runtime |
+| `Job<T>` backed by **pthread (MVP)** | Stub; awaiting real work-stealing pool |
+| Fiber context-switch assembly | Pending |
+| Single-threaded scheduler | Pending |
+| Epoll/kqueue/IOCP reactor | Pending |
+| Slab pool with VM-reserve + page-on-touch | Pending |
+| Work-stealing pool for jobs | Pending |
+| Transparent-yield IO functions | Pending |
+
+The **surface is final** and user code written against it today will
+continue to work as the runtime improves.  Performance will improve
+substantially when the real fiber and job runtimes land; correctness
+of the surface won't change.
+
+---
+
+End of spec.
