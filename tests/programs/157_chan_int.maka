@@ -1,0 +1,23 @@
+// Typed IntChan: cleaner surface for int channels — no manual byte
+// pointer juggling.  Producer fiber sends, consumer anchor receives.
+
+import std.{IntChan, chan_int_new, chan_int_send, chan_int_recv, chan_int_destroy};
+
+unit producer_body(IntChan c) {
+    chan_int_send(c, 11);
+    chan_int_send(c, 22);
+    chan_int_send(c, 33);
+}
+
+unit main() {
+    IntChan c = chan_int_new();
+    *Thread p = spawn(unit() [c] { producer_body(c); });
+    int a = chan_int_recv(c);
+    int b = chan_int_recv(c);
+    int d = chan_int_recv(c);
+    join(p);
+    log(a);    // 11
+    log(b);    // 22
+    log(d);    // 33
+    chan_int_destroy(c);
+}

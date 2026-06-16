@@ -259,6 +259,16 @@ pub int   chan_bytes_count  (*unit ch)                   { return __chan_bytes_c
 pub unit  chan_bytes_close  (*unit ch)                   { __chan_bytes_close(ch); }
 pub unit  chan_bytes_destroy(*unit ch)                   { __chan_bytes_destroy(ch); }
 
+// Typed int channel — the common case, no need for users to wrap
+// chan_bytes themselves.  Item size is 8 (one i64).
+pub data IntChan { *unit h; }
+pub IntChan chan_int_new()                    { IntChan c = { h = __chan_bytes_new(8) }; return c; }
+pub unit    chan_int_send  (IntChan c, int v) { mut int x = v; __chan_bytes_send(c.h, &mut x as *mut unit); }
+pub int     chan_int_recv  (IntChan c)        { mut int out = 0; __chan_bytes_recv(c.h, &mut out as *mut unit); return out; }
+pub int     chan_int_count (IntChan c)        { return __chan_bytes_count(c.h); }
+pub unit    chan_int_close (IntChan c)        { __chan_bytes_close(c.h); }
+pub unit    chan_int_destroy(IntChan c)       { __chan_bytes_destroy(c.h); }
+
 pub *unit atomic_new   (int v)                              { return __atomic_new(v); }
 // `atomic_get` / `atomic_set` instead of load/store to avoid clashing with
 // the C11 <stdatomic.h> macros of those names.
