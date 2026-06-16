@@ -265,7 +265,9 @@ impl<'a> Cx<'a> {
         // user's program references `[]int` elsewhere, `emit_slice_typedefs`
         // will skip re-emitting since `out.contains(...)` is true.
         self.w("typedef struct Slice_maka_int { maka_int* ptr; maka_int len; } Slice_maka_int;\n");
+        self.w("typedef struct Slice_maka_float { maka_float* ptr; maka_int len; } Slice_maka_float;\n");
         self.slice_types.insert("maka_int".to_string());
+        self.slice_types.insert("maka_float".to_string());
         // ====================================================================
         // CONCURRENCY RUNTIME
         // ====================================================================
@@ -2019,6 +2021,134 @@ impl<'a> Cx<'a> {
         self.w("    free(hs); free(chs); free(tmp);\n");
         self.w("    Slice_maka_int res = { .ptr = out, .len = total };\n");
         self.w("    return res;\n");
+        self.w("}\n");
+
+        // ---- Float-slice parallel ops (symmetric to int versions) ----------
+        self.w("typedef struct {\n");
+        self.w("    int64_t i_start, i_end;\n");
+        self.w("    double* in_ptr; double* out_ptr;\n");
+        self.w("    void* env;\n");
+        self.w("    Thread* completion;\n");
+        self.w("    union { void (*body)(void*, double);\n");
+        self.w("            double (*fn)(void*, double);\n");
+        self.w("            double (*combine)(void*, double, double); } code;\n");
+        self.w("    double init;\n");
+        self.w("    double out_acc;\n");
+        self.w("} __maka_fslice_chunk_t;\n");
+
+        self.w("static void* __maka_par_each_f_entry(void* arg) {\n");
+        self.w("    __maka_fslice_chunk_t* c = (__maka_fslice_chunk_t*)arg;\n");
+        self.w("    for (int64_t i = c->i_start; i < c->i_end; i++) c->code.body(c->env, c->in_ptr[i]);\n");
+        self.w("    pthread_mutex_lock(&c->completion->done_mutex);\n");
+        self.w("    c->completion->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&c->completion->done_cond);\n");
+        self.w("    pthread_mutex_unlock(&c->completion->done_mutex);\n");
+        self.w("    free(c); return NULL;\n");
+        self.w("}\n");
+        self.w("void __maka_par_for_each_f64(Slice_maka_float s, void* code, void* env) {\n");
+        self.w("    if (s.len <= 0) return;\n");
+        self.w("    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);\n");
+        self.w("    if (nprocs < 1) nprocs = 1; if (nprocs > 16) nprocs = 16;\n");
+        self.w("    int64_t chunks = (int64_t)nprocs;\n");
+        self.w("    if (chunks > s.len) chunks = s.len;\n");
+        self.w("    int64_t per = (s.len + chunks - 1) / chunks;\n");
+        self.w("    Thread** hs = (Thread**)malloc(sizeof(Thread*) * (size_t)chunks);\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        Thread* th = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("        pthread_mutex_init(&th->done_mutex, NULL); pthread_cond_init(&th->done_cond, NULL);\n");
+        self.w("        __maka_fslice_chunk_t* ch = (__maka_fslice_chunk_t*)calloc(1, sizeof(__maka_fslice_chunk_t));\n");
+        self.w("        ch->i_start = c * per; ch->i_end = ch->i_start + per;\n");
+        self.w("        if (ch->i_end > s.len) ch->i_end = s.len;\n");
+        self.w("        ch->in_ptr = s.ptr; ch->env = env; ch->completion = th;\n");
+        self.w("        ch->code.body = (void(*)(void*, double))code;\n");
+        self.w("        pthread_create(&th->handle, NULL, __maka_par_each_f_entry, ch);\n");
+        self.w("        hs[c] = th;\n");
+        self.w("    }\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) (void)__maka_join_result((maka_unit*)hs[c]);\n");
+        self.w("    free(hs);\n");
+        self.w("}\n");
+
+        self.w("static void* __maka_par_map_f_entry(void* arg) {\n");
+        self.w("    __maka_fslice_chunk_t* c = (__maka_fslice_chunk_t*)arg;\n");
+        self.w("    for (int64_t i = c->i_start; i < c->i_end; i++) c->out_ptr[i] = c->code.fn(c->env, c->in_ptr[i]);\n");
+        self.w("    pthread_mutex_lock(&c->completion->done_mutex);\n");
+        self.w("    c->completion->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&c->completion->done_cond);\n");
+        self.w("    pthread_mutex_unlock(&c->completion->done_mutex);\n");
+        self.w("    free(c); return NULL;\n");
+        self.w("}\n");
+        self.w("Slice_maka_float __maka_par_map_float(Slice_maka_float s, void* code, void* env) {\n");
+        self.w("    Slice_maka_float empty = { .ptr = NULL, .len = 0 };\n");
+        self.w("    if (s.len <= 0) return empty;\n");
+        self.w("    double* out = (double*)malloc(sizeof(double) * (size_t)s.len);\n");
+        self.w("    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);\n");
+        self.w("    if (nprocs < 1) nprocs = 1; if (nprocs > 16) nprocs = 16;\n");
+        self.w("    int64_t chunks = (int64_t)nprocs;\n");
+        self.w("    if (chunks > s.len) chunks = s.len;\n");
+        self.w("    int64_t per = (s.len + chunks - 1) / chunks;\n");
+        self.w("    Thread** hs = (Thread**)malloc(sizeof(Thread*) * (size_t)chunks);\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        Thread* th = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("        pthread_mutex_init(&th->done_mutex, NULL); pthread_cond_init(&th->done_cond, NULL);\n");
+        self.w("        __maka_fslice_chunk_t* ch = (__maka_fslice_chunk_t*)calloc(1, sizeof(__maka_fslice_chunk_t));\n");
+        self.w("        ch->i_start = c * per; ch->i_end = ch->i_start + per;\n");
+        self.w("        if (ch->i_end > s.len) ch->i_end = s.len;\n");
+        self.w("        ch->in_ptr = s.ptr; ch->out_ptr = out; ch->env = env; ch->completion = th;\n");
+        self.w("        ch->code.fn = (double(*)(void*, double))code;\n");
+        self.w("        pthread_create(&th->handle, NULL, __maka_par_map_f_entry, ch);\n");
+        self.w("        hs[c] = th;\n");
+        self.w("    }\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) (void)__maka_join_result((maka_unit*)hs[c]);\n");
+        self.w("    free(hs);\n");
+        self.w("    Slice_maka_float res = { .ptr = out, .len = s.len };\n");
+        self.w("    return res;\n");
+        self.w("}\n");
+
+        self.w("static void* __maka_par_reduce_f_entry(void* arg) {\n");
+        self.w("    __maka_fslice_chunk_t* c = (__maka_fslice_chunk_t*)arg;\n");
+        self.w("    double acc = c->init;\n");
+        self.w("    for (int64_t i = c->i_start; i < c->i_end; i++) acc = c->code.combine(c->env, acc, c->in_ptr[i]);\n");
+        self.w("    c->out_acc = acc;\n");
+        self.w("    pthread_mutex_lock(&c->completion->done_mutex);\n");
+        self.w("    c->completion->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&c->completion->done_cond);\n");
+        self.w("    pthread_mutex_unlock(&c->completion->done_mutex);\n");
+        self.w("    return NULL;\n");
+        self.w("}\n");
+        self.w("double __maka_par_reduce_float(Slice_maka_float s, double init, void* code, void* env) {\n");
+        self.w("    if (s.len <= 0) return init;\n");
+        self.w("    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);\n");
+        self.w("    if (nprocs < 1) nprocs = 1; if (nprocs > 16) nprocs = 16;\n");
+        self.w("    int64_t chunks = (int64_t)nprocs;\n");
+        self.w("    if (chunks > s.len) chunks = s.len;\n");
+        self.w("    int64_t per = (s.len + chunks - 1) / chunks;\n");
+        self.w("    Thread** hs = (Thread**)malloc(sizeof(Thread*) * (size_t)chunks);\n");
+        self.w("    __maka_fslice_chunk_t** chs = (__maka_fslice_chunk_t**)malloc(sizeof(void*) * (size_t)chunks);\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        Thread* th = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("        pthread_mutex_init(&th->done_mutex, NULL); pthread_cond_init(&th->done_cond, NULL);\n");
+        self.w("        __maka_fslice_chunk_t* ch = (__maka_fslice_chunk_t*)calloc(1, sizeof(__maka_fslice_chunk_t));\n");
+        self.w("        ch->i_start = c * per; ch->i_end = ch->i_start + per;\n");
+        self.w("        if (ch->i_end > s.len) ch->i_end = s.len;\n");
+        self.w("        ch->in_ptr = s.ptr; ch->env = env; ch->completion = th; ch->init = init;\n");
+        self.w("        ch->code.combine = (double(*)(void*, double, double))code;\n");
+        self.w("        chs[c] = ch;\n");
+        self.w("        pthread_create(&th->handle, NULL, __maka_par_reduce_f_entry, ch);\n");
+        self.w("        hs[c] = th;\n");
+        self.w("    }\n");
+        self.w("    double acc = init;\n");
+        self.w("    double (*combine)(void*, double, double) = (double(*)(void*, double, double))code;\n");
+        self.w("    int merged_first = 0;\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        pthread_join(hs[c]->handle, NULL);\n");
+        self.w("        if (!merged_first) { acc = chs[c]->out_acc; merged_first = 1; }\n");
+        self.w("        else { acc = combine(env, acc, chs[c]->out_acc); }\n");
+        self.w("        pthread_mutex_destroy(&hs[c]->done_mutex);\n");
+        self.w("        pthread_cond_destroy(&hs[c]->done_cond);\n");
+        self.w("        free(hs[c]); free(chs[c]);\n");
+        self.w("    }\n");
+        self.w("    free(hs); free(chs);\n");
+        self.w("    return acc;\n");
         self.w("}\n");
 
         // par_scan_int: 2-pass parallel inclusive scan with associative combine.
@@ -3776,6 +3906,43 @@ impl<'a> Cx<'a> {
                         );
                     }
                     return "MAKA_UNIT".into();
+                }
+                // par_for_each_float(slice, body)
+                if callee.0 == u32::MAX - 34 {
+                    if args.len() == 2 {
+                        let s = self.emit_expr(f, &args[0]);
+                        let b = self.emit_expr(f, &args[1]);
+                        return format!(
+                            "(__extension__ ({{ Callable_unit_float_ __cb = ({1}); (__maka_par_for_each_f64(({0}), __cb.code, __cb.env), MAKA_UNIT); }}))",
+                            s, b
+                        );
+                    }
+                    return "MAKA_UNIT".into();
+                }
+                // par_map_float(slice, fn)
+                if callee.0 == u32::MAX - 35 {
+                    if args.len() == 2 {
+                        let s = self.emit_expr(f, &args[0]);
+                        let b = self.emit_expr(f, &args[1]);
+                        return format!(
+                            "(__extension__ ({{ Callable_float_float_ __cb = ({1}); __maka_par_map_float(({0}), __cb.code, __cb.env); }}))",
+                            s, b
+                        );
+                    }
+                    return "(Slice_maka_float){0}".into();
+                }
+                // par_reduce_float(slice, init, combine)
+                if callee.0 == u32::MAX - 36 {
+                    if args.len() == 3 {
+                        let s = self.emit_expr(f, &args[0]);
+                        let init = self.emit_expr(f, &args[1]);
+                        let b = self.emit_expr(f, &args[2]);
+                        return format!(
+                            "(__extension__ ({{ Callable_float_float_float_ __cb = ({2}); __maka_par_reduce_float(({0}), (double)({1}), __cb.code, __cb.env); }}))",
+                            s, init, b
+                        );
+                    }
+                    return "0.0".into();
                 }
                 // par_for_each(slice, body)
                 if callee.0 == u32::MAX - 27 {

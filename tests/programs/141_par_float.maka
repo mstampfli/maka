@@ -1,0 +1,12 @@
+// par_map_float / par_reduce_float over a float slice.
+unit main() {
+    [4]float input = [1.0, 2.0, 3.0, 4.0];
+    []float s = input;
+
+    []float doubled = par_map_float(s, float(float x) { return x * 2.0; });
+    log(doubled[0]);     // 2
+    log(doubled[3]);     // 8
+
+    float sum = par_reduce_float(s, 0.0, float(float a, float b) { return a + b; });
+    log(sum);            // 10
+}

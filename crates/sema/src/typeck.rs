@@ -2113,6 +2113,99 @@ impl<'a> TypeChecker<'a> {
                 span: sp,
             };
         }
+        // par_for_each_float(slice, body) — float-slice iteration; body is `unit(float)`.
+        if name == "par_for_each_float" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 2 {
+                self.err("par_for_each_float expects ([]float slice, unit(float) body)", sp);
+            } else {
+                let is_slice = matches!(&hargs[0].ty,
+                    HType::Slice { elem, .. } if matches!(**elem, HType::Float)) ||
+                    matches!(&hargs[0].ty, HType::Ref { inner, .. } if matches!(inner.as_ref(),
+                        HType::Slice { elem, .. } if matches!(**elem, HType::Float)));
+                let body = &hargs[1];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Unit) && params.len() == 1 && matches!(params[0], HType::Float));
+                if !is_slice { self.err(format!("par_for_each_float: first arg must be `[]float`, got `{}`", type_str(&hargs[0].ty)), sp); }
+                if !ok_body { self.err(format!("par_for_each_float body must be `unit(float)`, got `{}`", type_str(&body.ty)), sp); }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 34), args: hargs },
+                ty: HType::Unit,
+                span: sp,
+            };
+        }
+        // par_map_float(slice, fn) — float slice in/out; fn is `float(float)`.
+        if name == "par_map_float" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 2 {
+                self.err("par_map_float expects ([]float slice, float(float) f)", sp);
+            } else {
+                let is_slice = matches!(&hargs[0].ty,
+                    HType::Slice { elem, .. } if matches!(**elem, HType::Float)) ||
+                    matches!(&hargs[0].ty, HType::Ref { inner, .. } if matches!(inner.as_ref(),
+                        HType::Slice { elem, .. } if matches!(**elem, HType::Float)));
+                let body = &hargs[1];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Float) && params.len() == 1 && matches!(params[0], HType::Float));
+                if !is_slice { self.err(format!("par_map_float: first arg must be `[]float`, got `{}`", type_str(&hargs[0].ty)), sp); }
+                if !ok_body { self.err(format!("par_map_float body must be `float(float)`, got `{}`", type_str(&body.ty)), sp); }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 35), args: hargs },
+                ty: HType::Slice { mutable: false, elem: Box::new(HType::Float) },
+                span: sp,
+            };
+        }
+        // par_reduce_float(slice, init, combine) — fold over float slice.
+        if name == "par_reduce_float" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 3 {
+                self.err("par_reduce_float expects ([]float slice, float init, float(float, float) combine)", sp);
+            } else {
+                let is_slice = matches!(&hargs[0].ty,
+                    HType::Slice { elem, .. } if matches!(**elem, HType::Float)) ||
+                    matches!(&hargs[0].ty, HType::Ref { inner, .. } if matches!(inner.as_ref(),
+                        HType::Slice { elem, .. } if matches!(**elem, HType::Float)));
+                let body = &hargs[2];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_init = matches!(&hargs[1].ty, HType::Float);
+                let ok_body = matches!(body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Float) && params.len() == 2 &&
+                            matches!(params[0], HType::Float) && matches!(params[1], HType::Float));
+                if !is_slice { self.err(format!("par_reduce_float: first arg must be `[]float`, got `{}`", type_str(&hargs[0].ty)), sp); }
+                if !ok_init { self.err("par_reduce_float: init must be `float`", sp); }
+                if !ok_body { self.err(format!("par_reduce_float combine must be `float(float, float)`, got `{}`", type_str(&body.ty)), sp); }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 36), args: hargs },
+                ty: HType::Float,
+                span: sp,
+            };
+        }
         // par_for_each(slice, body) — runs body(elem) for every elem; chunked.
         if name == "par_for_each" && qualifier.is_none() {
             let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
