@@ -216,6 +216,7 @@ impl<'a> Cx<'a> {
         self.w("void maka_fence(maka_int ord) { (void)ord; __atomic_thread_fence(__ATOMIC_SEQ_CST); }\n");
         // Mutex via pthread: opaque pointer-sized handle, exposed via maka_unit* to match Maka's `*unit`.
         self.w("#include <pthread.h>\n");
+        self.w("#include <stdatomic.h>\n");
         self.w("maka_unit* maka_mutex_new(void) { pthread_mutex_t* m = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t)); pthread_mutex_init(m, NULL); return (maka_unit*)m; }\n");
         self.w("void maka_mutex_lock(maka_unit* m) { pthread_mutex_lock((pthread_mutex_t*)m); }\n");
         self.w("void maka_mutex_unlock(maka_unit* m) { pthread_mutex_unlock((pthread_mutex_t*)m); }\n");
@@ -238,6 +239,23 @@ impl<'a> Cx<'a> {
         self.w("void maka_channel_send(maka_unit* p, maka_int v) { maka_channel_t* ch = (maka_channel_t*)p; maka_chan_node_t* n = (maka_chan_node_t*)malloc(sizeof(maka_chan_node_t)); n->v = v; n->next = NULL; pthread_mutex_lock(&ch->m); if (ch->tail) ch->tail->next = n; else ch->head = n; ch->tail = n; ch->count++; pthread_cond_signal(&ch->c); pthread_mutex_unlock(&ch->m); }\n");
         self.w("maka_int maka_channel_recv(maka_unit* p) { maka_channel_t* ch = (maka_channel_t*)p; pthread_mutex_lock(&ch->m); while (!ch->head) pthread_cond_wait(&ch->c, &ch->m); maka_chan_node_t* n = ch->head; ch->head = n->next; if (!ch->head) ch->tail = NULL; ch->count--; pthread_mutex_unlock(&ch->m); maka_int v = n->v; free(n); return v; }\n");
         self.w("void maka_channel_destroy(maka_unit* p) { maka_channel_t* ch = (maka_channel_t*)p; while (ch->head) { maka_chan_node_t* n = ch->head; ch->head = n->next; free(n); } pthread_mutex_destroy(&ch->m); pthread_cond_destroy(&ch->c); free(ch); }\n");
+        // Atomic<i64> — the only sync primitive whose body has no scheduler
+        // dependency, so it lives here.  The fiber-aware Mutex / WaitGroup /
+        // Once primitives are emitted after the scheduler is defined (they
+        // need maka_fiber_t and __maka_ready_enqueue in scope).
+        self.w("maka_unit* maka_atomic_i64_new(int64_t v) {\n");
+        self.w("    _Atomic int64_t* a = (_Atomic int64_t*)malloc(sizeof(_Atomic int64_t));\n");
+        self.w("    atomic_init(a, v);\n");
+        self.w("    return (maka_unit*)a;\n");
+        self.w("}\n");
+        self.w("int64_t maka_atomic_i64_load(maka_unit* a) { return atomic_load((_Atomic int64_t*)a); }\n");
+        self.w("void maka_atomic_i64_store(maka_unit* a, int64_t v) { atomic_store((_Atomic int64_t*)a, v); }\n");
+        self.w("int64_t maka_atomic_i64_add(maka_unit* a, int64_t d) { return atomic_fetch_add((_Atomic int64_t*)a, d); }\n");
+        self.w("int64_t maka_atomic_i64_cas(maka_unit* a, int64_t expected, int64_t desired) {\n");
+        self.w("    int64_t e = expected;\n");
+        self.w("    return atomic_compare_exchange_strong((_Atomic int64_t*)a, &e, desired) ? 1 : 0;\n");
+        self.w("}\n");
+        self.w("void maka_atomic_i64_destroy(maka_unit* a) { free(a); }\n");
         // Forward-declare the int slice type used by par_map_int.  If the
         // user's program references `[]int` elsewhere, `emit_slice_typedefs`
         // will skip re-emitting since `out.contains(...)` is true.
@@ -1494,6 +1512,150 @@ impl<'a> Cx<'a> {
         self.w("        (void)__maka_join_result((maka_unit*)handles[c]);\n");
         self.w("    }\n");
         self.w("    free(handles);\n");
+        self.w("}\n");
+        // ====================================================================
+        // Fiber-aware sync primitives (Mutex, WaitGroup, Once).
+        // Emitted AFTER the fiber/scheduler infrastructure because these need
+        // maka_fiber_t fields and __maka_ready_enqueue in scope.
+        // ====================================================================
+        // Fiber-aware mutex.
+        self.w("typedef struct {\n");
+        self.w("    _Atomic int locked;\n");
+        self.w("    pthread_mutex_t kw_mu;\n");
+        self.w("    pthread_cond_t  kw_cv;\n");
+        self.w("    maka_fiber_t*   fiber_waiters;\n");
+        self.w("} maka_fmutex_t;\n");
+        self.w("maka_unit* maka_fmutex_new(void) {\n");
+        self.w("    maka_fmutex_t* m = (maka_fmutex_t*)calloc(1, sizeof(maka_fmutex_t));\n");
+        self.w("    atomic_init(&m->locked, 0);\n");
+        self.w("    pthread_mutex_init(&m->kw_mu, NULL);\n");
+        self.w("    pthread_cond_init(&m->kw_cv, NULL);\n");
+        self.w("    return (maka_unit*)m;\n");
+        self.w("}\n");
+        self.w("void maka_fmutex_lock(maka_unit* p) {\n");
+        self.w("    maka_fmutex_t* m = (maka_fmutex_t*)p;\n");
+        self.w("    while (1) {\n");
+        self.w("        int expected = 0;\n");
+        self.w("        if (atomic_compare_exchange_strong(&m->locked, &expected, 1)) return;\n");
+        self.w("        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
+        self.w("            maka_fiber_t* me = maka_current_fiber;\n");
+        self.w("            me->next_waiter = m->fiber_waiters;\n");
+        self.w("            m->fiber_waiters = me;\n");
+        self.w("            me->state = 2;\n");
+        self.w("            swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("        } else {\n");
+        self.w("            pthread_mutex_lock(&m->kw_mu);\n");
+        self.w("            while (atomic_load(&m->locked) != 0) pthread_cond_wait(&m->kw_cv, &m->kw_mu);\n");
+        self.w("            pthread_mutex_unlock(&m->kw_mu);\n");
+        self.w("        }\n");
+        self.w("    }\n");
+        self.w("}\n");
+        self.w("void maka_fmutex_unlock(maka_unit* p) {\n");
+        self.w("    maka_fmutex_t* m = (maka_fmutex_t*)p;\n");
+        self.w("    atomic_store(&m->locked, 0);\n");
+        self.w("    if (m->fiber_waiters) {\n");
+        self.w("        maka_fiber_t* w = m->fiber_waiters; m->fiber_waiters = w->next_waiter; w->next_waiter = NULL;\n");
+        self.w("        __maka_ready_enqueue(w);\n");
+        self.w("    }\n");
+        self.w("    pthread_mutex_lock(&m->kw_mu);\n");
+        self.w("    pthread_cond_signal(&m->kw_cv);\n");
+        self.w("    pthread_mutex_unlock(&m->kw_mu);\n");
+        self.w("}\n");
+        self.w("void maka_fmutex_destroy(maka_unit* p) {\n");
+        self.w("    maka_fmutex_t* m = (maka_fmutex_t*)p;\n");
+        self.w("    pthread_mutex_destroy(&m->kw_mu); pthread_cond_destroy(&m->kw_cv);\n");
+        self.w("    free(m);\n");
+        self.w("}\n");
+        // WaitGroup.
+        self.w("typedef struct {\n");
+        self.w("    _Atomic int64_t count;\n");
+        self.w("    pthread_mutex_t kw_mu;\n");
+        self.w("    pthread_cond_t  kw_cv;\n");
+        self.w("    maka_fiber_t*   fiber_waiters;\n");
+        self.w("} maka_wg_t;\n");
+        self.w("maka_unit* maka_wg_new(void) {\n");
+        self.w("    maka_wg_t* w = (maka_wg_t*)calloc(1, sizeof(maka_wg_t));\n");
+        self.w("    atomic_init(&w->count, 0);\n");
+        self.w("    pthread_mutex_init(&w->kw_mu, NULL);\n");
+        self.w("    pthread_cond_init(&w->kw_cv, NULL);\n");
+        self.w("    return (maka_unit*)w;\n");
+        self.w("}\n");
+        self.w("void maka_wg_add(maka_unit* p, int64_t n) {\n");
+        self.w("    atomic_fetch_add(&((maka_wg_t*)p)->count, n);\n");
+        self.w("}\n");
+        self.w("void maka_wg_done(maka_unit* p) {\n");
+        self.w("    maka_wg_t* w = (maka_wg_t*)p;\n");
+        self.w("    int64_t prev = atomic_fetch_sub(&w->count, 1);\n");
+        self.w("    if (prev <= 1) {\n");
+        self.w("        while (w->fiber_waiters) {\n");
+        self.w("            maka_fiber_t* f = w->fiber_waiters; w->fiber_waiters = f->next_waiter; f->next_waiter = NULL;\n");
+        self.w("            __maka_ready_enqueue(f);\n");
+        self.w("        }\n");
+        self.w("        pthread_mutex_lock(&w->kw_mu);\n");
+        self.w("        pthread_cond_broadcast(&w->kw_cv);\n");
+        self.w("        pthread_mutex_unlock(&w->kw_mu);\n");
+        self.w("    }\n");
+        self.w("}\n");
+        self.w("void maka_wg_wait(maka_unit* p) {\n");
+        self.w("    maka_wg_t* w = (maka_wg_t*)p;\n");
+        self.w("    while (atomic_load(&w->count) > 0) {\n");
+        self.w("        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
+        self.w("            maka_fiber_t* me = maka_current_fiber;\n");
+        self.w("            me->next_waiter = w->fiber_waiters; w->fiber_waiters = me;\n");
+        self.w("            me->state = 2;\n");
+        self.w("            swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("            /* On the anchor: drive the scheduler so fibers can complete\n");
+        self.w("               and call wg_done.  pthread_cond_wait would freeze them. */\n");
+        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("        } else {\n");
+        self.w("            pthread_mutex_lock(&w->kw_mu);\n");
+        self.w("            while (atomic_load(&w->count) > 0) pthread_cond_wait(&w->kw_cv, &w->kw_mu);\n");
+        self.w("            pthread_mutex_unlock(&w->kw_mu);\n");
+        self.w("        }\n");
+        self.w("    }\n");
+        self.w("}\n");
+        self.w("void maka_wg_destroy(maka_unit* p) {\n");
+        self.w("    maka_wg_t* w = (maka_wg_t*)p;\n");
+        self.w("    pthread_mutex_destroy(&w->kw_mu); pthread_cond_destroy(&w->kw_cv);\n");
+        self.w("    free(w);\n");
+        self.w("}\n");
+        // Once.
+        self.w("typedef struct {\n");
+        self.w("    _Atomic int state;\n");
+        self.w("    pthread_mutex_t mu;\n");
+        self.w("    pthread_cond_t  cv;\n");
+        self.w("} maka_once_t;\n");
+        self.w("maka_unit* maka_once_new(void) {\n");
+        self.w("    maka_once_t* o = (maka_once_t*)calloc(1, sizeof(maka_once_t));\n");
+        self.w("    atomic_init(&o->state, 0);\n");
+        self.w("    pthread_mutex_init(&o->mu, NULL);\n");
+        self.w("    pthread_cond_init(&o->cv, NULL);\n");
+        self.w("    return (maka_unit*)o;\n");
+        self.w("}\n");
+        self.w("void maka_once_do(maka_unit* p, void* code, void* env) {\n");
+        self.w("    maka_once_t* o = (maka_once_t*)p;\n");
+        self.w("    int expected = 0;\n");
+        self.w("    if (atomic_compare_exchange_strong(&o->state, &expected, 1)) {\n");
+        self.w("        ((void(*)(void*))code)(env);\n");
+        self.w("        pthread_mutex_lock(&o->mu);\n");
+        self.w("        atomic_store(&o->state, 2);\n");
+        self.w("        pthread_cond_broadcast(&o->cv);\n");
+        self.w("        pthread_mutex_unlock(&o->mu);\n");
+        self.w("        return;\n");
+        self.w("    }\n");
+        self.w("    pthread_mutex_lock(&o->mu);\n");
+        self.w("    while (atomic_load(&o->state) != 2) pthread_cond_wait(&o->cv, &o->mu);\n");
+        self.w("    pthread_mutex_unlock(&o->mu);\n");
+        self.w("}\n");
+        self.w("void maka_once_destroy(maka_unit* p) {\n");
+        self.w("    maka_once_t* o = (maka_once_t*)p;\n");
+        self.w("    pthread_mutex_destroy(&o->mu); pthread_cond_destroy(&o->cv);\n");
+        self.w("    free(o);\n");
         self.w("}\n");
         // ====================================================================
         // Slice-based data-parallel primitives (par_for_each / par_filter /
@@ -3348,6 +3510,18 @@ impl<'a> Cx<'a> {
                         );
                     }
                     return "0".into();
+                }
+                // once_do(o, init) builtin: split Callable to (code, env).
+                if callee.0 == u32::MAX - 32 {
+                    if args.len() == 2 {
+                        let o = self.emit_expr(f, &args[0]);
+                        let cb = self.emit_expr(f, &args[1]);
+                        return format!(
+                            "(maka_once_do((maka_unit*)({0}), (void*)(({1}).code), (void*)(({1}).env)), MAKA_UNIT)",
+                            o, cb
+                        );
+                    }
+                    return "MAKA_UNIT".into();
                 }
                 // par_for_each(slice, body)
                 if callee.0 == u32::MAX - 27 {

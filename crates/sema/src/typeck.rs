@@ -2061,6 +2061,36 @@ impl<'a> TypeChecker<'a> {
                 span: sp,
             };
         }
+        // once_do(*unit o, unit() init) — call init() once across all callers.
+        // Builtin so codegen can split the Callable's code/env at the call site
+        // (the runtime entry takes raw void pointers, avoiding a C type mismatch
+        // with the synthesized Callable_unit_ struct).
+        if name == "once_do" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 2 {
+                self.err("once_do expects (`*unit o`, `unit() init`)", sp);
+            } else {
+                let body = &hargs[1];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Unit) && params.is_empty());
+                if !ok_body {
+                    self.err(format!("once_do init must be `unit()`, got `{}`", type_str(&body.ty)), sp);
+                }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 32), args: hargs },
+                ty: HType::Unit,
+                span: sp,
+            };
+        }
         // par_for_each(slice, body) — runs body(elem) for every elem; chunked.
         if name == "par_for_each" && qualifier.is_none() {
             let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();

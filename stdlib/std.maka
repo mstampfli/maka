@@ -70,6 +70,60 @@ pub int  set_nonblock   (int fd)                           { return __set_nonblo
 pub int  read_async     (int fd, *mut unit buf, int cap)   { return __read_async(fd, buf, cap); }
 pub int  write_async    (int fd, *mut unit buf, int len)   { return __write_async(fd, buf, len); }
 
+// ---- fiber-aware sync primitives ----------------------------------------
+//
+// All four park the caller via the scheduler when contended so a fiber
+// waiting on a mutex / wait-group doesn't freeze the whole worker.
+// Outside a fiber they fall back to pthread-style blocking, so the same
+// calls work from any tier.
+
+extern "maka_fmutex_new"     *unit __fmutex_new();
+extern "maka_fmutex_lock"    unit  __fmutex_lock(*unit m);
+extern "maka_fmutex_unlock"  unit  __fmutex_unlock(*unit m);
+extern "maka_fmutex_destroy" unit  __fmutex_destroy(*unit m);
+
+pub *unit mutex_new()                      { return __fmutex_new(); }
+pub unit  mutex_lock   (*unit m)           { __fmutex_lock(m); }
+pub unit  mutex_unlock (*unit m)           { __fmutex_unlock(m); }
+pub unit  mutex_destroy(*unit m)           { __fmutex_destroy(m); }
+
+extern "maka_wg_new"     *unit __wg_new();
+extern "maka_wg_add"     unit  __wg_add(*unit w, int n);
+extern "maka_wg_done"    unit  __wg_done(*unit w);
+extern "maka_wg_wait"    unit  __wg_wait(*unit w);
+extern "maka_wg_destroy" unit  __wg_destroy(*unit w);
+
+pub *unit wg_new()                          { return __wg_new(); }
+pub unit  wg_add    (*unit w, int n)        { __wg_add(w, n); }
+pub unit  wg_done   (*unit w)               { __wg_done(w); }
+pub unit  wg_wait   (*unit w)               { __wg_wait(w); }
+pub unit  wg_destroy(*unit w)               { __wg_destroy(w); }
+
+extern "maka_once_new"     *unit __once_new();
+extern "maka_once_destroy" unit  __once_destroy(*unit o);
+
+pub *unit once_new()                            { return __once_new(); }
+pub unit  once_destroy(*unit o)                 { __once_destroy(o); }
+// `once_do(o, init)` is a compiler builtin — it splits the `unit()` Callable
+// into code+env at the call site so the runtime entry can take two plain
+// pointers (avoids a C type-mismatch with the synthesized Callable_unit_).
+
+extern "maka_atomic_i64_new"     *unit __atomic_new(int v);
+extern "maka_atomic_i64_load"    int   __atomic_load(*unit a);
+extern "maka_atomic_i64_store"   unit  __atomic_store(*unit a, int v);
+extern "maka_atomic_i64_add"     int   __atomic_add(*unit a, int delta);
+extern "maka_atomic_i64_cas"     int   __atomic_cas(*unit a, int expected, int desired);
+extern "maka_atomic_i64_destroy" unit  __atomic_destroy(*unit a);
+
+pub *unit atomic_new   (int v)                              { return __atomic_new(v); }
+// `atomic_get` / `atomic_set` instead of load/store to avoid clashing with
+// the C11 <stdatomic.h> macros of those names.
+pub int   atomic_get   (*unit a)                            { return __atomic_load(a); }
+pub unit  atomic_set   (*unit a, int v)                     { __atomic_store(a, v); }
+pub int   atomic_add   (*unit a, int delta)                 { return __atomic_add(a, delta); }
+pub bool  atomic_cas   (*unit a, int expected, int desired) { return __atomic_cas(a, expected, desired) != 0; }
+pub unit  atomic_destroy(*unit a)                           { __atomic_destroy(a); }
+
 // par_for_range and par_reduce_int are compiler builtins (like `spawn`):
 //   par_for_range(start, end, body)
 //     runs `body(i)` for every i in [start, end), chunked across the job
