@@ -292,6 +292,7 @@ impl<'a> Cx<'a> {
         self.w("    int64_t         result;          /* type-erased return value */\n");
         self.w("    int             is_job;          /* 1 for job-pool work item */\n");
         self.w("    int             is_fiber;        /* 1 for cooperative fiber */\n");
+        self.w("    _Atomic int     detached;        /* 1 if user opted out of join */\n");
         self.w("} Thread;\n");
         self.w("typedef struct { void* code; void* env; } __maka_closure_fat;\n");
         self.w("typedef struct __maka_handle_args_s { void* code; void* env; Thread* h; } __maka_handle_args_t;\n");
@@ -304,6 +305,7 @@ impl<'a> Cx<'a> {
         self.w("    a->h->done_flag = 1;\n");
         self.w("    pthread_cond_broadcast(&a->h->done_cond);\n");
         self.w("    pthread_mutex_unlock(&a->h->done_mutex);\n");
+        self.w("    free(a->env);\n");
         self.w("    free(a);\n");
         self.w("    return NULL;\n");
         self.w("}\n");
@@ -502,16 +504,23 @@ impl<'a> Cx<'a> {
         self.w("            maka_current_fiber = NULL;\n");
         self.w("            if (f->state == 4) {\n");
         self.w("                /* Fiber finished: mark completion + wake waiters. */\n");
-        self.w("                pthread_mutex_lock(&f->completion->done_mutex);\n");
-        self.w("                f->completion->done_flag = 1;\n");
-        self.w("                pthread_cond_broadcast(&f->completion->done_cond);\n");
-        self.w("                pthread_mutex_unlock(&f->completion->done_mutex);\n");
+        self.w("                Thread* fcompl = f->completion;\n");
+        self.w("                pthread_mutex_lock(&fcompl->done_mutex);\n");
+        self.w("                fcompl->done_flag = 1;\n");
+        self.w("                pthread_cond_broadcast(&fcompl->done_cond);\n");
+        self.w("                pthread_mutex_unlock(&fcompl->done_mutex);\n");
         self.w("                while (f->waiters) {\n");
         self.w("                    maka_fiber_t* w = f->waiters;\n");
         self.w("                    f->waiters = w->next_waiter; w->next_waiter = NULL;\n");
         self.w("                    __maka_ready_enqueue(w);\n");
         self.w("                }\n");
-        self.w("                if (f != maka_anchor_fiber) { __maka_slab_free(f->slab); free(f); }\n");
+        self.w("                if (f != maka_anchor_fiber) { free(f->entry_env); __maka_slab_free(f->slab); free(f); }\n");
+        self.w("                /* If the Thread handle was detached, reap it now — no joiner will. */\n");
+        self.w("                if (atomic_load(&fcompl->detached)) {\n");
+        self.w("                    pthread_mutex_destroy(&fcompl->done_mutex);\n");
+        self.w("                    pthread_cond_destroy(&fcompl->done_cond);\n");
+        self.w("                    free(fcompl);\n");
+        self.w("                }\n");
         self.w("                /* If anchor is parked in a select loop, return so it can re-poll. */\n");
         self.w("                if (maka_anchor_wake_on_finish) {\n");
         self.w("                    maka_current_fiber = maka_anchor_fiber;\n");
@@ -895,6 +904,7 @@ impl<'a> Cx<'a> {
         self.w("    item->h->done_flag = 1;\n");
         self.w("    pthread_cond_broadcast(&item->h->done_cond);\n");
         self.w("    pthread_mutex_unlock(&item->h->done_mutex);\n");
+        self.w("    free(item->env);\n");
         self.w("}\n");
         self.w("static void* __maka_ws_worker(void* arg) {\n");
         self.w("    int id = (int)(intptr_t)arg;\n");
@@ -1053,6 +1063,26 @@ impl<'a> Cx<'a> {
         self.w("    return r;\n");
         self.w("}\n");
         self.w("void __maka_join(maka_unit* h) { (void)__maka_join_result(h); }\n");
+        // detach(*Thread) — caller opts out of join.  If the fiber/thread has
+        // already finished, reap now; otherwise mark detached so scheduler
+        // auto-reaps on natural completion.  Calling join on a detached
+        // handle is undefined behavior (handle may already be freed).
+        self.w("void __maka_detach(maka_unit* h) {\n");
+        self.w("    Thread* t = (Thread*)h;\n");
+        self.w("    pthread_mutex_lock(&t->done_mutex);\n");
+        self.w("    int done = t->done_flag;\n");
+        self.w("    pthread_mutex_unlock(&t->done_mutex);\n");
+        self.w("    if (done) {\n");
+        self.w("        if (!t->is_job && !t->is_fiber) { pthread_join(t->handle, NULL); }\n");
+        self.w("        pthread_mutex_destroy(&t->done_mutex);\n");
+        self.w("        pthread_cond_destroy(&t->done_cond);\n");
+        self.w("        free(t);\n");
+        self.w("        return;\n");
+        self.w("    }\n");
+        self.w("    atomic_store(&t->detached, 1);\n");
+        // For thread tier, also pthread_detach so the OS thread reaps itself.
+        self.w("    if (!t->is_job && !t->is_fiber) pthread_detach(t->handle);\n");
+        self.w("}\n");
         // ====================================================================
         // try_join(h, &out) -> 1 if done (and writes result), 0 if still running.
         // Never blocks, never reaps a non-done handle.  When done, reclaims
@@ -1157,7 +1187,7 @@ impl<'a> Cx<'a> {
         self.w("                prev = &(*prev)->next;\n");
         self.w("            }\n");
         self.w("        }\n");
-        self.w("        if (found) { __maka_slab_free(found->slab); free(found); }\n");
+        self.w("        if (found) { free(found->entry_env); __maka_slab_free(found->slab); free(found); }\n");
         self.w("        if (cancelled_fd >= 0) __maka_fd_recompute(cancelled_fd);\n");
         self.w("    } else if (!t->is_job) {\n");
         self.w("        pthread_cancel(t->handle);\n");
@@ -3519,11 +3549,13 @@ impl<'a> Cx<'a> {
                     }
                     return "MAKA_UNIT".into();
                 }
-                // Built-in `spawn(closure)` — fiber tier.
+                // Built-in `spawn(closure)` — fiber tier.  Compound-stmt expr
+                // wraps the closure once so its env malloc happens exactly once
+                // (emitting `(s).code, (s).env` would expand and re-allocate).
                 if callee.0 == u32::MAX - 3 {
                     if let Some(a) = args.first() {
                         let s = self.emit_expr(f, a);
-                        return format!("(Thread*)__maka_spawn_fiber(({}).code, ({}).env)", s, s);
+                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_fiber(__cb.code, __cb.env); }}))", s);
                     }
                     return "NULL".into();
                 }
@@ -3531,7 +3563,7 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 15 {
                     if let Some(a) = args.first() {
                         let s = self.emit_expr(f, a);
-                        return format!("(Thread*)__maka_spawn_thread(({}).code, ({}).env)", s, s);
+                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_thread(__cb.code, __cb.env); }}))", s);
                     }
                     return "NULL".into();
                 }
@@ -3539,7 +3571,7 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 16 {
                     if let Some(a) = args.first() {
                         let s = self.emit_expr(f, a);
-                        return format!("(Thread*)__maka_spawn_job(({}).code, ({}).env)", s, s);
+                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_job(__cb.code, __cb.env); }}))", s);
                     }
                     return "NULL".into();
                 }
@@ -3576,6 +3608,14 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 20 {
                     return "(__maka_yield_now(), MAKA_UNIT)".into();
                 }
+                // Built-in `detach(*Thread)`.
+                if callee.0 == u32::MAX - 33 {
+                    if let Some(a) = args.first() {
+                        let s = self.emit_expr(f, a);
+                        return format!("(__maka_detach((maka_unit*)({})), MAKA_UNIT)", s);
+                    }
+                    return "MAKA_UNIT".into();
+                }
                 // Built-in `cancel(*Thread)`.
                 if callee.0 == u32::MAX - 23 {
                     if let Some(a) = args.first() {
@@ -3610,7 +3650,7 @@ impl<'a> Cx<'a> {
                         let o = self.emit_expr(f, &args[0]);
                         let cb = self.emit_expr(f, &args[1]);
                         return format!(
-                            "(maka_once_do((maka_unit*)({0}), (void*)(({1}).code), (void*)(({1}).env)), MAKA_UNIT)",
+                            "(__extension__ ({{ Callable_unit_ __cb = ({1}); (maka_once_do((maka_unit*)({0}), (void*)__cb.code, (void*)__cb.env), MAKA_UNIT); }}))",
                             o, cb
                         );
                     }
@@ -3622,7 +3662,7 @@ impl<'a> Cx<'a> {
                         let s = self.emit_expr(f, &args[0]);
                         let b = self.emit_expr(f, &args[1]);
                         return format!(
-                            "(__maka_par_for_each_i64(({0}), (({1}).code), (({1}).env)), MAKA_UNIT)",
+                            "(__extension__ ({{ Callable_unit_ __cb = ({1}); (__maka_par_for_each_i64(({0}), __cb.code, __cb.env), MAKA_UNIT); }}))",
                             s, b
                         );
                     }
@@ -3634,7 +3674,7 @@ impl<'a> Cx<'a> {
                         let s = self.emit_expr(f, &args[0]);
                         let b = self.emit_expr(f, &args[1]);
                         return format!(
-                            "__maka_par_map_int_slice(({0}), (({1}).code), (({1}).env))",
+                            "(__extension__ ({{ Callable_int_int_ __cb = ({1}); __maka_par_map_int_slice(({0}), __cb.code, __cb.env); }}))",
                             s, b
                         );
                     }
@@ -3647,7 +3687,7 @@ impl<'a> Cx<'a> {
                         let init = self.emit_expr(f, &args[1]);
                         let b = self.emit_expr(f, &args[2]);
                         return format!(
-                            "__maka_par_reduce_int_slice(({0}), (int64_t)({1}), (({2}).code), (({2}).env))",
+                            "(__extension__ ({{ Callable_int_int_int_ __cb = ({2}); __maka_par_reduce_int_slice(({0}), (int64_t)({1}), __cb.code, __cb.env); }}))",
                             s, init, b
                         );
                     }
@@ -3659,7 +3699,7 @@ impl<'a> Cx<'a> {
                         let s = self.emit_expr(f, &args[0]);
                         let b = self.emit_expr(f, &args[1]);
                         return format!(
-                            "__maka_par_filter_int(({0}), (({1}).code), (({1}).env))",
+                            "(__extension__ ({{ Callable_bool_int_ __cb = ({1}); __maka_par_filter_int(({0}), __cb.code, __cb.env); }}))",
                             s, b
                         );
                     }
@@ -3671,7 +3711,7 @@ impl<'a> Cx<'a> {
                         let s = self.emit_expr(f, &args[0]);
                         let b = self.emit_expr(f, &args[1]);
                         return format!(
-                            "__maka_par_scan_int(({0}), (({1}).code), (({1}).env))",
+                            "(__extension__ ({{ Callable_int_int_int_ __cb = ({1}); __maka_par_scan_int(({0}), __cb.code, __cb.env); }}))",
                             s, b
                         );
                     }
@@ -3698,8 +3738,8 @@ impl<'a> Cx<'a> {
                         let b = self.emit_expr(f, &args[1]);
                         let body = self.emit_expr(f, &args[2]);
                         return format!(
-                            "__maka_par_map_int((int64_t)({}), (int64_t)({}), (({}).code), (({}).env))",
-                            a, b, body, body
+                            "(__extension__ ({{ Callable_int_int_ __cb = ({2}); __maka_par_map_int((int64_t)({0}), (int64_t)({1}), __cb.code, __cb.env); }}))",
+                            a, b, body
                         );
                     }
                     return "((Slice_maka_int){ .ptr = NULL, .len = 0 })".into();
@@ -3712,8 +3752,8 @@ impl<'a> Cx<'a> {
                         let init = self.emit_expr(f, &args[2]);
                         let body = self.emit_expr(f, &args[3]);
                         return format!(
-                            "__maka_par_reduce_int((int64_t)({}), (int64_t)({}), (int64_t)({}), (({}).code), (({}).env))",
-                            a, b, init, body, body
+                            "(__extension__ ({{ Callable_int_int_int_ __cb = ({3}); __maka_par_reduce_int((int64_t)({0}), (int64_t)({1}), (int64_t)({2}), __cb.code, __cb.env); }}))",
+                            a, b, init, body
                         );
                     }
                     return "0".into();
@@ -3726,8 +3766,8 @@ impl<'a> Cx<'a> {
                         let b = self.emit_expr(f, &args[1]);
                         let body = self.emit_expr(f, &args[2]);
                         return format!(
-                            "(__maka_par_for_range((int64_t)({}), (int64_t)({}), (({}).code), (({}).env)), MAKA_UNIT)",
-                            a, b, body, body
+                            "(__extension__ ({{ Callable_unit_int_ __cb = ({2}); (__maka_par_for_range((int64_t)({0}), (int64_t)({1}), __cb.code, __cb.env), MAKA_UNIT); }}))",
+                            a, b, body
                         );
                     }
                     return "MAKA_UNIT".into();

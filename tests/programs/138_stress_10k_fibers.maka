@@ -1,0 +1,28 @@
+// Stress test: spawn 10 000 fibers, each does an atomic increment + a
+// brief sleep, then signals a wait group.  Exercises the slab pool's
+// reuse path, scheduler queue churn, and atomic_add hot path.
+
+import std.{
+    atomic_new, atomic_get, atomic_add, atomic_destroy,
+    wg_new, wg_add, wg_done, wg_wait, wg_destroy,
+    sleep_us,
+};
+
+unit main() {
+    *unit a  = atomic_new(0);
+    *unit wg = wg_new();
+    int N = 10000;
+    wg_add(wg, N);
+    for (int i in 0..N) {
+        *Thread t = spawn(unit() [a, wg] {
+            _ = atomic_add(a, 1);
+            sleep_us(1);
+            wg_done(wg);
+        });
+        detach(t);   // fire-and-forget — runtime reaps the handle when done
+    }
+    wg_wait(wg);
+    log(atomic_get(a));    // 10000
+    atomic_destroy(a);
+    wg_destroy(wg);
+}

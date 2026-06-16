@@ -1894,6 +1894,28 @@ impl<'a> TypeChecker<'a> {
             );
             return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
         }
+        // Built-in `detach(*Thread)` — caller opts out of join; runtime auto-
+        // reaps the handle when the fiber/thread/job completes.
+        if name == "detach" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 1 {
+                self.err("detach expects exactly one `*Thread` argument", sp);
+            } else {
+                let is_thread_ptr = matches!(&hargs[0].ty,
+                    HType::Ptr { inner, .. } if matches!(**inner, HType::Struct(id) if {
+                        let info = self.sym.struct_info(id);
+                        info.name == "Thread"
+                    }));
+                if !is_thread_ptr {
+                    self.err(format!("detach: expected `*Thread`, got `{}`", type_str(&hargs[0].ty)), sp);
+                }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 33), args: hargs },
+                ty: HType::Unit,
+                span: sp,
+            };
+        }
         // Built-in `cancel(*Thread)` — user-callable cancellation.  No-op for
         // jobs (run to completion); pthread_cancel for threads; queue-walk
         // removal for fibers.  Frees the handle.
