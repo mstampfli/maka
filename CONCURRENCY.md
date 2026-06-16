@@ -585,9 +585,9 @@ unit frame() {
 | `Atomic<i64>` — load/store/add/cas wrapper over `_Atomic int64_t` | **Implemented** |
 | TCP helpers: `tcp_listen`, `tcp_accept_async`, `tcp_connect_v4`, `close_fd` | **Implemented** (Linux) |
 | Closure env auto-freed on fiber/thread/job completion (no leak per spawn) | **Implemented** |
-| kqueue backend (macOS/BSD) | Pending |
-| IOCP backend (Windows) | Pending |
-| `poll()` fallback reactor for non-epoll kernels | Pending |
+| kqueue backend (macOS/BSD) | **Implemented** — translates epoll API → kevent / EVFILT_READ/WRITE |
+| `poll()` fallback reactor for non-epoll kernels | **Implemented** — rebuilds pollfd[] from maka_fd_regs per tick |
+| IOCP backend (Windows) | Pending — different completion-model; not yet ported |
 | Cross-thread fiber migration (load-balance fibers across worker schedulers) | Pending — job pool covers parallelism today |
 | Generic `par_map<T, U>` / `par_reduce<T>` for non-int element types | Pending |
 

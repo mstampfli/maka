@@ -413,16 +413,80 @@ impl<'a> Cx<'a> {
         self.w("static __thread int maka_anchor_wake_on_finish = 0;\n");
         self.w("static __thread int maka_epoll_fd = -1;\n");
         self.w("static __thread int64_t maka_anchor_deadline_ns = 0; /* 0 = none; otherwise scheduler caps its timeout so anchor wakes by this */\n");
-        // Reactor backend selection.  On Linux, epoll() is used directly.
-        // On other POSIX systems we emulate the epoll API via poll() — the
-        // shim's __maka_epoll_wait_poll rebuilds a pollfd[] from maka_fd_regs
-        // each call.  The rest of the reactor code is backend-agnostic.
+        // Reactor backend selection.  Three backends:
+        //   * Linux         — epoll(7) used directly.
+        //   * macOS / *BSD  — kqueue(2), via a shim exposing the epoll API.
+        //   * Any other POSIX — poll(2) fallback (slower; rebuilds pollfd[]
+        //                       from maka_fd_regs each scheduler tick).
+        // Whichever backend is selected, the rest of the reactor code is
+        // backend-agnostic: it speaks the epoll API and the shim translates.
         self.w("#include <poll.h>\n");
         self.w("#ifdef __linux__\n");
         self.w("#include <sys/epoll.h>\n");
         self.w("#define MAKA_USE_EPOLL 1\n");
+        self.w("#define MAKA_USE_KQUEUE 0\n");
+        self.w("#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)\n");
+        self.w("#include <sys/event.h>\n");
+        self.w("#include <sys/time.h>\n");
+        self.w("#define MAKA_USE_EPOLL 0\n");
+        self.w("#define MAKA_USE_KQUEUE 1\n");
+        self.w("#define EPOLLIN  0x001\n");
+        self.w("#define EPOLLOUT 0x004\n");
+        self.w("#define EPOLLERR 0x008\n");
+        self.w("#define EPOLLHUP 0x010\n");
+        self.w("#define EPOLLONESHOT 0\n");
+        self.w("#define EPOLL_CTL_ADD 1\n");
+        self.w("#define EPOLL_CTL_MOD 2\n");
+        self.w("#define EPOLL_CTL_DEL 3\n");
+        self.w("#define EPOLL_CLOEXEC 0\n");
+        self.w("typedef struct { int events; union { int fd; void* ptr; } data; } maka_epoll_event_t;\n");
+        self.w("#define epoll_event maka_epoll_event_t\n");
+        // kqueue: we open the kq fd lazily and translate epoll_ctl into
+        // kevent ADD/DELETE filters.  EVFILT_READ and EVFILT_WRITE are added
+        // independently per fd; EPOLL_CTL_DEL removes both.
+        self.w("static int __maka_kq_fd = -1;\n");
+        self.w("static inline int epoll_create1(int flags) {\n");
+        self.w("    (void)flags;\n");
+        self.w("    if (__maka_kq_fd < 0) __maka_kq_fd = kqueue();\n");
+        self.w("    return __maka_kq_fd;\n");
+        self.w("}\n");
+        self.w("static inline int epoll_ctl(int ep, int op, int fd, struct epoll_event* e) {\n");
+        self.w("    (void)ep;\n");
+        self.w("    if (__maka_kq_fd < 0) __maka_kq_fd = kqueue();\n");
+        self.w("    struct kevent changes[2]; int n = 0;\n");
+        self.w("    int flags = (op == EPOLL_CTL_DEL) ? EV_DELETE : EV_ADD;\n");
+        self.w("    int want_in  = e && (e->events & EPOLLIN);\n");
+        self.w("    int want_out = e && (e->events & EPOLLOUT);\n");
+        self.w("    if (op == EPOLL_CTL_DEL || want_in) {\n");
+        self.w("        EV_SET(&changes[n], fd, EVFILT_READ, flags, 0, 0, NULL); n++;\n");
+        self.w("    }\n");
+        self.w("    if (op == EPOLL_CTL_DEL || want_out) {\n");
+        self.w("        EV_SET(&changes[n], fd, EVFILT_WRITE, flags, 0, 0, NULL); n++;\n");
+        self.w("    }\n");
+        self.w("    return kevent(__maka_kq_fd, changes, n, NULL, 0, NULL);\n");
+        self.w("}\n");
+        self.w("static inline int __maka_epoll_wait_kq(struct epoll_event* evs, int max, int timeout_ms) {\n");
+        self.w("    if (__maka_kq_fd < 0) __maka_kq_fd = kqueue();\n");
+        self.w("    struct kevent kevs[32]; if (max > 32) max = 32;\n");
+        self.w("    struct timespec ts; struct timespec* pts = NULL;\n");
+        self.w("    if (timeout_ms >= 0) { ts.tv_sec = timeout_ms/1000; ts.tv_nsec = (timeout_ms%1000)*1000000; pts = &ts; }\n");
+        self.w("    int n = kevent(__maka_kq_fd, NULL, 0, kevs, max, pts);\n");
+        self.w("    int out = 0;\n");
+        self.w("    for (int i = 0; i < n; i++) {\n");
+        self.w("        evs[out].events = 0;\n");
+        self.w("        if (kevs[i].filter == EVFILT_READ)  evs[out].events |= EPOLLIN;\n");
+        self.w("        if (kevs[i].filter == EVFILT_WRITE) evs[out].events |= EPOLLOUT;\n");
+        self.w("        if (kevs[i].flags & EV_EOF)         evs[out].events |= EPOLLHUP;\n");
+        self.w("        if (kevs[i].flags & EV_ERROR)       evs[out].events |= EPOLLERR;\n");
+        self.w("        evs[out].data.fd = (int)kevs[i].ident;\n");
+        self.w("        out++;\n");
+        self.w("    }\n");
+        self.w("    return out;\n");
+        self.w("}\n");
+        self.w("#define epoll_wait(ep, evs, max, t) __maka_epoll_wait_kq((evs), (max), (t))\n");
         self.w("#else\n");
         self.w("#define MAKA_USE_EPOLL 0\n");
+        self.w("#define MAKA_USE_KQUEUE 0\n");
         self.w("#define EPOLLIN  POLLIN\n");
         self.w("#define EPOLLOUT POLLOUT\n");
         self.w("#define EPOLLERR POLLERR\n");
