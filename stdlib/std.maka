@@ -269,6 +269,15 @@ pub int     chan_int_count (IntChan c)        { return __chan_bytes_count(c.h); 
 pub unit    chan_int_close (IntChan c)        { __chan_bytes_close(c.h); }
 pub unit    chan_int_destroy(IntChan c)       { __chan_bytes_destroy(c.h); }
 
+// Typed float channel (8-byte f64 items).
+pub data FloatChan { *unit h; }
+pub FloatChan chan_float_new()                      { FloatChan c = { h = __chan_bytes_new(8) }; return c; }
+pub unit      chan_float_send  (FloatChan c, float v) { mut float x = v; __chan_bytes_send(c.h, &mut x as *mut unit); }
+pub float     chan_float_recv  (FloatChan c)         { mut float out = 0.0; __chan_bytes_recv(c.h, &mut out as *mut unit); return out; }
+pub int       chan_float_count (FloatChan c)         { return __chan_bytes_count(c.h); }
+pub unit      chan_float_close (FloatChan c)         { __chan_bytes_close(c.h); }
+pub unit      chan_float_destroy(FloatChan c)        { __chan_bytes_destroy(c.h); }
+
 pub *unit atomic_new   (int v)                              { return __atomic_new(v); }
 // `atomic_get` / `atomic_set` instead of load/store to avoid clashing with
 // the C11 <stdatomic.h> macros of those names.
