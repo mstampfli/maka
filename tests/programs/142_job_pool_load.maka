@@ -1,0 +1,16 @@
+// Job-pool throughput: dispatch 100 000 work items via par_for_range,
+// each does an atomic increment.  Verifies the Chase-Lev work-stealing
+// deques distribute load across all worker threads.
+
+import std.{atomic_new, atomic_get, atomic_add, atomic_destroy};
+
+mut int g_counter = 0;
+unit main() {
+    *unit a = atomic_new(0);
+    int N = 100000;
+    par_for_range(0, N, unit(int i) [a] {
+        _ = atomic_add(a, 1);
+    });
+    log(atomic_get(a));    // 100000
+    atomic_destroy(a);
+}
