@@ -1,0 +1,38 @@
+// pipe_create: opens a non-blocking pipe.  A writer fiber pushes 3 bytes,
+// a reader fiber waits via the reactor and consumes them.  No cblock
+// helpers needed; the stdlib gives both ends.
+import std.{pipe_create, pipe_write_fd, read_async, write_async, close_fd};
+
+cblock "
+    static maka_unit* __mk_buf(void)     { static unsigned char b[8]; return (maka_unit*)b; }
+    static maka_unit* __mk_msg(void)     { static unsigned char m[3] = {'A','B','C'}; return (maka_unit*)m; }
+    static int        __mk_buf_at(int i) { return (int)((unsigned char*)__mk_buf())[i]; }
+";
+extern *unit __mk_buf();
+extern *unit __mk_msg();
+extern i32   __mk_buf_at(i32 i);
+
+mut int g_rfd = 0;
+mut int g_wfd = 0;
+
+unit reader_body() {
+    int n = read_async(g_rfd, __mk_buf() as *mut unit, 8);
+    log(n);                              // 3
+    log(__mk_buf_at(0 as i32) as int);   // 65 'A'
+    log(__mk_buf_at(2 as i32) as int);   // 67 'C'
+}
+
+unit writer_body() {
+    _ = write_async(g_wfd, __mk_msg() as *mut unit, 3);
+}
+
+unit main() {
+    g_rfd = pipe_create();
+    g_wfd = pipe_write_fd();
+    *Thread r = spawn(unit() { reader_body(); });
+    *Thread w = spawn(unit() { writer_body(); });
+    join(w);
+    join(r);
+    _ = close_fd(g_rfd);
+    _ = close_fd(g_wfd);
+}

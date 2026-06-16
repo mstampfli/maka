@@ -1171,6 +1171,8 @@ impl<'a> Cx<'a> {
         self.w("static inline int64_t __maka_file_write_async(int64_t fd, maka_unit* buf, int64_t len, int64_t offset);\n");
         self.w("static inline int64_t __maka_unix_listen(const char* path, int64_t backlog);\n");
         self.w("static inline int64_t __maka_unix_connect(const char* path);\n");
+        self.w("static inline int64_t __maka_pipe_create(void);\n");
+        self.w("static inline int64_t __maka_pipe_write_fd(void);\n");
         self.w("int64_t __maka_set_nonblock(int64_t fd) {\n");
         self.w("    int flags = fcntl((int)fd, F_GETFL, 0);\n");
         self.w("    if (flags < 0) return -1;\n");
@@ -3115,6 +3117,21 @@ impl<'a> Cx<'a> {
         self.w("    close(s); return -1;\n");
         self.w("}\n");
         self.w("static inline int64_t __maka_close_fd(int64_t fd) { return close((int)fd); }\n");
+        // pipe_create: opens a non-blocking pipe pair and returns the read
+        // fd; the write fd is stashed and retrievable via pipe_write_fd.
+        // Per-thread stash — keeps the simple "make a pipe, send it through
+        // to a fiber" pattern from needing a cblock helper.
+        self.w("extern int pipe(int*);\n");
+        self.w("static __thread int __maka_last_pipe_wfd = -1;\n");
+        self.w("static inline int64_t __maka_pipe_create(void) {\n");
+        self.w("    int fds[2];\n");
+        self.w("    if (pipe(fds) != 0) return -1;\n");
+        self.w("    int f0 = fcntl(fds[0], F_GETFL, 0); fcntl(fds[0], F_SETFL, f0 | O_NONBLOCK);\n");
+        self.w("    int f1 = fcntl(fds[1], F_GETFL, 0); fcntl(fds[1], F_SETFL, f1 | O_NONBLOCK);\n");
+        self.w("    __maka_last_pipe_wfd = fds[1];\n");
+        self.w("    return fds[0];\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_pipe_write_fd(void) { return __maka_last_pipe_wfd; }\n");
         // Unix domain sockets — bind/connect by path.  Use the same socket
         // forward decls + syscall machinery as the TCP helpers; AF_UNIX = 1.
         self.w("struct __maka_sockaddr_un { unsigned short sun_family; char sun_path[108]; };\n");

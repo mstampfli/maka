@@ -69,6 +69,16 @@ extern "__maka_close_fd"         int  __close_fd(int fd);
 extern "__maka_dns_resolve_v4"   int  __dns_resolve_v4(string host);
 extern "__maka_unix_listen"      int  __unix_listen(string path, int backlog);
 extern "__maka_unix_connect"     int  __unix_connect(string path);
+extern "__maka_pipe_create"      int  __pipe_create();
+extern "__maka_pipe_write_fd"    int  __pipe_write_fd();
+
+// Non-blocking pipe pair.  Returns the read fd; immediately after, call
+// `pipe_write_fd()` to grab the matching write fd.  Both fds are O_NONBLOCK
+// so read_async / write_async work directly.  pipe_write_fd is stored in a
+// per-thread stash, so consume it before another pipe_create call on the
+// same thread.
+pub int pipe_create  () { return __pipe_create(); }
+pub int pipe_write_fd() { return __pipe_write_fd(); }
 
 // Unix domain sockets — pathname-based IPC.  Same stream semantics as TCP,
 // so accept_async / read_async / write_async / close_fd work on the
