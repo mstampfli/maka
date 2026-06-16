@@ -1,0 +1,10 @@
+// Capturing `&mut T` into thread() / job() / spawn_pool() must error —
+// the borrow is tied to the spawning thread's scope and can't cross
+// safely.  `spawn()` (cooperative fiber, same thread) is fine.
+unit main() {
+    mut int counter = 0;
+    *Thread t = thread(unit() [&mut counter] {
+        counter = counter + 1;
+    });
+    join(t);
+}

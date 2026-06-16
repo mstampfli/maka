@@ -94,6 +94,36 @@ impl<'a> TypeChecker<'a> {
         Self::new_with_logic(sym, None)
     }
 
+    /// Reject captures that can't safely cross a thread boundary when used
+    /// with `thread()` / `job()` / `spawn_pool()`.  v1: borrowed references
+    /// (`&T`, `&mut T`) are tied to a scope on the spawning thread; the
+    /// captured ref could outlive its source when the closure resumes on
+    /// another thread.  Other types are conservatively allowed — users own
+    /// the safety of `*T` to thread-local data.
+    fn check_cross_thread_captures(&mut self, tier: &str, arg: &HExpr, sp: Span) {
+        let mut cur = arg;
+        let env_values = loop {
+            match &cur.kind {
+                HExprKind::Closure { env_values, .. } => break env_values.as_slice(),
+                HExprKind::HeapAlloc(inner) | HExprKind::DropWrite(inner)
+                | HExprKind::DerefRef(inner) | HExprKind::Transfer(inner) => cur = inner,
+                _ => return,
+            }
+        };
+        for v in env_values {
+            if matches!(&v.ty, HType::Ref { .. }) {
+                self.err(
+                    format!(
+                        "`{}` captures a borrowed reference (`{}`), which can't cross a thread boundary safely. \
+                         Capture by value (drop the `&`), `transfer` ownership across a `gate`, or use a `*Thread`-safe handle.",
+                        tier, type_str(&v.ty)
+                    ),
+                    sp,
+                );
+            }
+        }
+    }
+
     /// Walk a spawn'd closure (possibly wrapped in `alloc` / `heap`) and
     /// record a `Send` probe for every captured `Rust<T>` value.  The
     /// captures live in `HExprKind::Closure { env_values }`; we scan
@@ -1807,6 +1837,14 @@ impl<'a> TypeChecker<'a> {
                 // Closure captures of `Rust<T>` cross the concurrency boundary —
                 // record `T` for a `Send` probe in the sidecar.
                 self.collect_send_from_closure(arg);
+                // For cross-thread tiers, reject captures whose type can't
+                // safely cross threads — borrowed references are tied to a
+                // scope on the spawning thread.  Fiber-tier `spawn` runs on
+                // the same thread, so refs are fine there.
+                let cross_thread = matches!(name.as_str(), "thread" | "job" | "spawn_pool");
+                if cross_thread {
+                    self.check_cross_thread_captures(name.as_str(), arg, sp);
+                }
             }
             // Thread handle type: *Thread (lookup the builtin struct).
             let thread_id = self.sym.struct_by_name("Thread").map(|(id, _)| id).expect("Thread struct registered");

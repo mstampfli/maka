@@ -593,7 +593,7 @@ unit frame() {
 | `TcpListener` / `TcpStream` typed wrappers + tcp_listener_open/accept/close, tcp_dial_v4, tcp_stream_read/write/close | **Implemented** |
 | Generic `par_map<T, U>` / `par_reduce<T>` for arbitrary element types | Pending — requires monomorphization-aware codegen |
 | Cross-thread fiber pool (`spawn_pool`) — fibers fan out across worker threads | **Implemented** — global MPMC queue + N background workers, each runs its own scheduler |
-| transfer/share enforcement on spawn captures (Send-probe at boundary) | Partial — Rust<T> captures probed; raw Maka captures not yet verified |
+| transfer/share enforcement on spawn captures (Send-probe at boundary) | **Implemented** — `&T`/`&mut T` captures rejected on `thread`/`job`/`spawn_pool` (cross-thread tiers); `spawn` (same-thread fiber) allows them.  Rust<T> probes flow to the sidecar as before |
 | IOCP backend (Windows) | Pending — different completion model |
 | Blocking-syscall watchdog warning | Pending — runtime detection of fibers that don't yield |
 
