@@ -67,6 +67,22 @@ extern "__maka_tcp_accept_async" int  __tcp_accept(int listen_fd);
 extern "__maka_tcp_connect_v4"   int  __tcp_connect_v4(int a, int b, int c, int d, int port);
 extern "__maka_close_fd"         int  __close_fd(int fd);
 extern "__maka_dns_resolve_v4"   int  __dns_resolve_v4(string host);
+extern "__maka_file_open"        int  __file_open(string path, int flags, int mode);
+extern "__maka_file_read_async"  int  __file_read_async(int fd, *mut unit buf, int cap, int offset);
+extern "__maka_file_write_async" int  __file_write_async(int fd, *mut unit buf, int len, int offset);
+
+// File async IO via an offload thread per request.  open() is synchronous
+// (regular file opens are quick); read/write yield via an eventfd that a
+// dedicated worker pthread signals after pread/pwrite returns.
+//
+// Flag bit values (from <fcntl.h>):
+//   0 = O_RDONLY, 1 = O_WRONLY, 2 = O_RDWR
+//   64 = O_CREAT, 512 = O_TRUNC
+// `mode` is the file mode (e.g. 0o644 = 420) when O_CREAT is set; pass 0
+// otherwise.
+pub int file_open       (string path, int flags, int mode)                 { return __file_open(path, flags, mode); }
+pub int file_read_async (int fd, *mut unit buf, int cap, int offset)        { return __file_read_async(fd, buf, cap, offset); }
+pub int file_write_async(int fd, *mut unit buf, int len, int offset)        { return __file_write_async(fd, buf, len, offset); }
 
 // Resolve a hostname to its first IPv4 address.  Returns the packed
 // 32-bit address (e.g. 192.168.1.1 → 0xC0A80101) or -1 on failure.

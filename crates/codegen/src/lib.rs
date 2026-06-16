@@ -1096,6 +1096,9 @@ impl<'a> Cx<'a> {
         self.w("static inline int64_t __maka_tcp_connect_v4(int64_t a, int64_t b, int64_t c, int64_t d, int64_t port);\n");
         self.w("static inline int64_t __maka_close_fd(int64_t fd);\n");
         self.w("static inline int64_t __maka_dns_resolve_v4(const char* host);\n");
+        self.w("static inline int64_t __maka_file_open(const char* path, int64_t flags, int64_t mode);\n");
+        self.w("static inline int64_t __maka_file_read_async(int64_t fd, maka_unit* buf, int64_t cap, int64_t offset);\n");
+        self.w("static inline int64_t __maka_file_write_async(int64_t fd, maka_unit* buf, int64_t len, int64_t offset);\n");
         self.w("int64_t __maka_set_nonblock(int64_t fd) {\n");
         self.w("    int flags = fcntl((int)fd, F_GETFL, 0);\n");
         self.w("    if (flags < 0) return -1;\n");
@@ -3040,6 +3043,61 @@ impl<'a> Cx<'a> {
         self.w("    close(s); return -1;\n");
         self.w("}\n");
         self.w("static inline int64_t __maka_close_fd(int64_t fd) { return close((int)fd); }\n");
+        // File async IO via offload thread.  Each call spawns a one-shot
+        // pthread that does the blocking pread/pwrite, then signals an
+        // eventfd the calling fiber waits on.  Heavy per call (pthread
+        // creation) but correct without an io_uring/AIO dependency.
+        self.w("typedef struct {\n");
+        self.w("    int fd;\n");
+        self.w("    void* buf;\n");
+        self.w("    int64_t len;\n");
+        self.w("    int64_t offset;\n");
+        self.w("    int64_t result;\n");
+        self.w("    int efd;\n");
+        self.w("    int is_write;\n");
+        self.w("} __maka_aio_t;\n");
+        self.w("extern long pread(int, void*, unsigned long, long);\n");
+        self.w("extern long pwrite(int, const void*, unsigned long, long);\n");
+        self.w("static void* __maka_aio_worker(void* arg) {\n");
+        self.w("    __maka_aio_t* j = (__maka_aio_t*)arg;\n");
+        self.w("    if (j->is_write) j->result = (int64_t)pwrite(j->fd, j->buf, (unsigned long)j->len, (long)j->offset);\n");
+        self.w("    else             j->result = (int64_t)pread (j->fd, j->buf, (unsigned long)j->len, (long)j->offset);\n");
+        self.w("    uint64_t v = 1; ssize_t w = write(j->efd, &v, sizeof(v)); (void)w;\n");
+        self.w("    return NULL;\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_file_read_async(int64_t fd, maka_unit* buf, int64_t cap, int64_t offset) {\n");
+        self.w("    int efd = __maka_eventfd_create(0);\n");
+        self.w("    if (efd < 0) return -1;\n");
+        self.w("    __maka_aio_t* j = (__maka_aio_t*)calloc(1, sizeof(__maka_aio_t));\n");
+        self.w("    j->fd = (int)fd; j->buf = (void*)buf; j->len = cap; j->offset = offset; j->efd = efd; j->is_write = 0;\n");
+        self.w("    pthread_t t; pthread_create(&t, NULL, __maka_aio_worker, j); pthread_detach(t);\n");
+        self.w("    (void)__maka_eventfd_recv(efd);\n");
+        self.w("    int64_t r = j->result;\n");
+        self.w("    free(j);\n");
+        self.w("    close(efd);\n");
+        self.w("    return r;\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_file_write_async(int64_t fd, maka_unit* buf, int64_t len, int64_t offset) {\n");
+        self.w("    int efd = __maka_eventfd_create(0);\n");
+        self.w("    if (efd < 0) return -1;\n");
+        self.w("    __maka_aio_t* j = (__maka_aio_t*)calloc(1, sizeof(__maka_aio_t));\n");
+        self.w("    j->fd = (int)fd; j->buf = (void*)buf; j->len = len; j->offset = offset; j->efd = efd; j->is_write = 1;\n");
+        self.w("    pthread_t t; pthread_create(&t, NULL, __maka_aio_worker, j); pthread_detach(t);\n");
+        self.w("    (void)__maka_eventfd_recv(efd);\n");
+        self.w("    int64_t r = j->result;\n");
+        self.w("    free(j);\n");
+        self.w("    close(efd);\n");
+        self.w("    return r;\n");
+        self.w("}\n");
+        self.w("extern int open(const char*, int, ...);\n");
+        self.w("#define __MAKA_O_RDONLY 0\n");
+        self.w("#define __MAKA_O_WRONLY 1\n");
+        self.w("#define __MAKA_O_RDWR   2\n");
+        self.w("#define __MAKA_O_CREAT  64\n");
+        self.w("#define __MAKA_O_TRUNC  512\n");
+        self.w("static inline int64_t __maka_file_open(const char* path, int64_t flags, int64_t mode) {\n");
+        self.w("    return (int64_t)open(path, (int)flags, (int)mode);\n");
+        self.w("}\n");
         // DNS resolution via gethostbyname (legacy but doesn't require
         // pulling in netdb.h's struct addrinfo, which transitively brings
         // in sys/socket.h and conflicts with our forward decls).

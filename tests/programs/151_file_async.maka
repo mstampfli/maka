@@ -1,0 +1,27 @@
+// File async IO: write 6 bytes to a temp file from one fiber, read them
+// back from another, all yielding via the offload-worker eventfd dance.
+import std.{file_open, file_read_async, file_write_async, close_fd};
+
+cblock "
+    static maka_unit* __mk_payload(void) { static unsigned char p[6] = {'H','E','L','L','O','!'}; return (maka_unit*)p; }
+    static maka_unit* __mk_buf(void)     { static unsigned char b[16]; return (maka_unit*)b; }
+    static int        __mk_buf_at(int i) { return (int)((unsigned char*)__mk_buf())[i]; }
+";
+extern *unit __mk_payload();
+extern *unit __mk_buf();
+extern i32   __mk_buf_at(i32 i);
+
+unit main() {
+    // O_WRONLY | O_CREAT | O_TRUNC = 1 | 64 | 512 = 577; mode = 420 (0o644)
+    int wfd = file_open("/tmp/maka_file_async_test", 577, 420);
+    int n_written = file_write_async(wfd, __mk_payload() as *mut unit, 6, 0);
+    log(n_written);   // 6
+    _ = close_fd(wfd);
+
+    int rfd = file_open("/tmp/maka_file_async_test", 0, 0);
+    int n_read = file_read_async(rfd, __mk_buf() as *mut unit, 6, 0);
+    log(n_read);                         // 6
+    log(__mk_buf_at(0 as i32) as int);   // 72  'H'
+    log(__mk_buf_at(5 as i32) as int);   // 33  '!'
+    _ = close_fd(rfd);
+}
