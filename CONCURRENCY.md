@@ -597,6 +597,13 @@ unit frame() {
 | IOCP backend (Windows) | Pending — different completion model |
 | Blocking-syscall watchdog warning | **Implemented** — opt-in via `MAKA_WATCHDOG_MS=<ms>`; a global thread checks every scheduler's tick and warns on stderr when a scheduler has work but hasn't yielded past the threshold |
 | UDP datagram helpers (`udp_open`, `udp_send_v4`, `udp_recv_async`) | **Implemented** — reactor-aware (yields via wait_fd on EAGAIN) |
+| AF_UNIX stream socket helpers (`unix_listen`, `unix_connect`) | **Implemented** — bind/connect by filesystem path; same accept/read/write as TCP |
+| DNS resolution (`dns_resolve_v4`) | **Implemented** — synchronous via gethostbyname; wrap in `spawn_pool()` to keep fibers running |
+| signalfd-based async signal handling | **Implemented** — Linux; stubs to -1 on other platforms |
+| timerfd periodic timers | **Implemented** — Linux; CLOCK_MONOTONIC |
+| eventfd kernel counter for fiber/thread signaling | **Implemented** — Linux |
+| inotify file-watch | **Implemented** — Linux; `inotify_open` / `inotify_add_path` / `inotify_recv_async` |
+| Async file IO (`file_open`, `file_read_async`, `file_write_async`) | **Implemented** — offload thread per request + eventfd completion; future: route through io_uring on recent kernels |
 
 The **surface is final** and user code written against it today will
 continue to work as the runtime improves.  Performance will improve
