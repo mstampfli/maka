@@ -1,0 +1,32 @@
+// spawn_pool() — fibers run on a background worker pool, so spawning
+// from main distributes work across multiple OS threads.  Demonstrates
+// cross-thread fiber execution via atomic accumulation under
+// contention from the pool workers.
+//
+// Verifies the global pool queue + worker drain loop + per-worker
+// scheduler initialization.
+
+import std.{
+    atomic_new, atomic_get, atomic_add, atomic_destroy,
+    wg_new, wg_add, wg_done, wg_wait, wg_destroy,
+    sleep_us,
+};
+
+unit main() {
+    *unit a  = atomic_new(0);
+    *unit wg = wg_new();
+    int N = 200;
+    wg_add(wg, N);
+    for (int i in 0..N) {
+        *Thread t = spawn_pool(unit() [a, wg] {
+            _ = atomic_add(a, 1);
+            sleep_us(1);
+            wg_done(wg);
+        });
+        detach(t);
+    }
+    wg_wait(wg);
+    log(atomic_get(a));   // 200
+    atomic_destroy(a);
+    wg_destroy(wg);
+}

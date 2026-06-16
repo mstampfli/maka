@@ -592,7 +592,7 @@ unit frame() {
 | `par_map_float` / `par_reduce_float` / `par_for_each_float` (float slices) | **Implemented** |
 | `TcpListener` / `TcpStream` typed wrappers + tcp_listener_open/accept/close, tcp_dial_v4, tcp_stream_read/write/close | **Implemented** |
 | Generic `par_map<T, U>` / `par_reduce<T>` for arbitrary element types | Pending — requires monomorphization-aware codegen |
-| Cross-thread fiber migration / shared MPMC ready queue | Pending — fibers are per-scheduler; job pool covers cross-thread parallelism |
+| Cross-thread fiber pool (`spawn_pool`) — fibers fan out across worker threads | **Implemented** — global MPMC queue + N background workers, each runs its own scheduler |
 | transfer/share enforcement on spawn captures (Send-probe at boundary) | Partial — Rust<T> captures probed; raw Maka captures not yet verified |
 | IOCP backend (Windows) | Pending — different completion model |
 | Blocking-syscall watchdog warning | Pending — runtime detection of fibers that don't yield |

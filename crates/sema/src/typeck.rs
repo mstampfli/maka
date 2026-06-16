@@ -1785,7 +1785,7 @@ impl<'a> TypeChecker<'a> {
         //
         // The closure must be a `unit()` callable; captures need `alloc` so the
         // env lives on the heap (the lambda-escape rule applies to all three).
-        if (name == "spawn" || name == "thread" || name == "job") && qualifier.is_none() {
+        if (name == "spawn" || name == "thread" || name == "job" || name == "spawn_pool") && qualifier.is_none() {
             let mut hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
             if hargs.len() != 1 {
                 self.err(format!("{} expects exactly one closure argument", name), sp);
@@ -1814,9 +1814,10 @@ impl<'a> TypeChecker<'a> {
             // Pick the right runtime entry by tier — codegen recognizes the
             // FuncIds and emits __maka_spawn_thread / _fiber / _job.
             let fid = match name.as_str() {
-                "thread" => FuncId(u32::MAX - 15),
-                "job"    => FuncId(u32::MAX - 16),
-                _        => FuncId(u32::MAX - 3),    // spawn (fiber) — keeps legacy id
+                "thread"     => FuncId(u32::MAX - 15),
+                "job"        => FuncId(u32::MAX - 16),
+                "spawn_pool" => FuncId(u32::MAX - 37),
+                _            => FuncId(u32::MAX - 3),    // spawn (fiber) — keeps legacy id
             };
             return HExpr {
                 kind: HExprKind::Call { callee: fid, args: hargs },

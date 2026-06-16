@@ -573,7 +573,7 @@ impl<'a> Cx<'a> {
         self.w("static __thread maka_fiber_t* maka_fd_waiters = NULL;\n");
         self.w("#define MAKA_EV_READ  1\n");
         self.w("#define MAKA_EV_WRITE 2\n");
-        self.w("static char maka_sched_stack[64 * 1024];\n");
+        self.w("static __thread char maka_sched_stack[256 * 1024];\n");
         self.w("static void __maka_ready_enqueue(maka_fiber_t* f) {\n");
         self.w("    f->state = 0; f->next = NULL;\n");
         self.w("    if (maka_ready_tail) { maka_ready_tail->next = f; maka_ready_tail = f; }\n");
@@ -801,6 +801,104 @@ impl<'a> Cx<'a> {
         self.w("    f->ctx.uc_link = &maka_sched_ctx;\n");
         self.w("    makecontext(&f->ctx, __maka_fiber_entry, 0);\n");
         self.w("    __maka_ready_enqueue(f);\n");
+        self.w("    return (maka_unit*)t;\n");
+        self.w("}\n");
+        // ====================================================================
+        // Cross-thread fiber pool — `spawn_pool(closure)` pushes the fiber
+        // onto a global MPMC queue; N background worker threads drain it.
+        // Each worker runs its own per-thread fiber scheduler, so spawned
+        // fibers fan out across CPU cores without changing `spawn()`'s
+        // single-threaded semantics.
+        // ====================================================================
+        self.w("typedef struct {\n");
+        self.w("    maka_fiber_t* head; maka_fiber_t* tail;\n");
+        self.w("    pthread_mutex_t lock; pthread_cond_t cond;\n");
+        self.w("    int closed;\n");
+        self.w("} maka_pool_q_t;\n");
+        self.w("static maka_pool_q_t __maka_pool_q;\n");
+        self.w("static _Atomic int __maka_pool_inited = 0;\n");
+        self.w("static int __maka_pool_n_workers = 0;\n");
+        self.w("static void __maka_pool_q_push(maka_fiber_t* f) {\n");
+        self.w("    pthread_mutex_lock(&__maka_pool_q.lock);\n");
+        self.w("    f->next = NULL;\n");
+        self.w("    if (__maka_pool_q.tail) __maka_pool_q.tail->next = f;\n");
+        self.w("    else __maka_pool_q.head = f;\n");
+        self.w("    __maka_pool_q.tail = f;\n");
+        self.w("    pthread_cond_signal(&__maka_pool_q.cond);\n");
+        self.w("    pthread_mutex_unlock(&__maka_pool_q.lock);\n");
+        self.w("}\n");
+        self.w("static maka_fiber_t* __maka_pool_q_pop_timed(int ms) {\n");
+        self.w("    pthread_mutex_lock(&__maka_pool_q.lock);\n");
+        self.w("    while (!__maka_pool_q.head && !__maka_pool_q.closed) {\n");
+        self.w("        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);\n");
+        self.w("        ts.tv_sec += ms / 1000;\n");
+        self.w("        ts.tv_nsec += (ms % 1000) * 1000000L;\n");
+        self.w("        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }\n");
+        self.w("        int r = pthread_cond_timedwait(&__maka_pool_q.cond, &__maka_pool_q.lock, &ts);\n");
+        self.w("        if (r != 0) break;\n");
+        self.w("    }\n");
+        self.w("    maka_fiber_t* f = __maka_pool_q.head;\n");
+        self.w("    if (f) {\n");
+        self.w("        __maka_pool_q.head = f->next;\n");
+        self.w("        if (!__maka_pool_q.head) __maka_pool_q.tail = NULL;\n");
+        self.w("        f->next = NULL;\n");
+        self.w("    }\n");
+        self.w("    pthread_mutex_unlock(&__maka_pool_q.lock);\n");
+        self.w("    return f;\n");
+        self.w("}\n");
+        self.w("static void* __maka_pool_worker(void* arg) {\n");
+        self.w("    (void)arg;\n");
+        self.w("    __maka_sched_init();\n");
+        self.w("    while (1) {\n");
+        self.w("        maka_fiber_t* f = __maka_pool_q_pop_timed(500);\n");
+        self.w("        if (!f) {\n");
+        self.w("            pthread_mutex_lock(&__maka_pool_q.lock);\n");
+        self.w("            int closed = __maka_pool_q.closed;\n");
+        self.w("            pthread_mutex_unlock(&__maka_pool_q.lock);\n");
+        self.w("            if (closed) break;\n");
+        self.w("            continue;\n");
+        self.w("        }\n");
+        self.w("        __maka_ready_enqueue(f);\n");
+        self.w("        /* Drive scheduler until our local queue is empty + nothing waiting. */\n");
+        self.w("        swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("        maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("    }\n");
+        self.w("    return NULL;\n");
+        self.w("}\n");
+        self.w("static void __maka_pool_init(void) {\n");
+        self.w("    int expected = 0;\n");
+        self.w("    if (!atomic_compare_exchange_strong(&__maka_pool_inited, &expected, 1)) return;\n");
+        self.w("    pthread_mutex_init(&__maka_pool_q.lock, NULL);\n");
+        self.w("    pthread_cond_init(&__maka_pool_q.cond, NULL);\n");
+        self.w("    long n = sysconf(_SC_NPROCESSORS_ONLN);\n");
+        self.w("    if (n < 2) n = 2;\n");
+        self.w("    if (n > 16) n = 16;\n");
+        self.w("    __maka_pool_n_workers = (int)n;\n");
+        self.w("    for (int i = 0; i < __maka_pool_n_workers; i++) {\n");
+        self.w("        pthread_t w; pthread_create(&w, NULL, __maka_pool_worker, NULL); pthread_detach(w);\n");
+        self.w("    }\n");
+        self.w("}\n");
+        // spawn_pool(): spawn a fiber that runs on the background pool.
+        self.w("maka_unit* __maka_spawn_pool(void* code, void* env) {\n");
+        self.w("    __maka_pool_init();\n");
+        self.w("    Thread* t = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("    t->is_fiber = 1;\n");
+        self.w("    pthread_mutex_init(&t->done_mutex, NULL);\n");
+        self.w("    pthread_cond_init(&t->done_cond, NULL);\n");
+        self.w("    maka_fiber_t* f = (maka_fiber_t*)calloc(1, sizeof(maka_fiber_t));\n");
+        self.w("    f->slab = __maka_slab_alloc();\n");
+        self.w("    f->entry_code = (void(*)(void*))code;\n");
+        self.w("    f->entry_env = env;\n");
+        self.w("    f->completion = t;\n");
+        self.w("    f->state = 0;\n");
+        self.w("    f->waiting_fd = -1; f->waiting_events = 0;\n");
+        self.w("    f->wait_deadline_ns = 0; f->wait_timed_out = 0;\n");
+        self.w("    getcontext(&f->ctx);\n");
+        self.w("    f->ctx.uc_stack.ss_sp = f->slab->stack_top;\n");
+        self.w("    f->ctx.uc_stack.ss_size = MAKA_FIBER_STACK_SIZE;\n");
+        self.w("    f->ctx.uc_link = NULL;\n");
+        self.w("    makecontext(&f->ctx, __maka_fiber_entry, 0);\n");
+        self.w("    __maka_pool_q_push(f);\n");
         self.w("    return (maka_unit*)t;\n");
         self.w("}\n");
         // Cooperative sleep / yield primitives.
@@ -3823,6 +3921,14 @@ impl<'a> Cx<'a> {
                     if let Some(a) = args.first() {
                         let s = self.emit_expr(f, a);
                         return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_job(__cb.code, __cb.env); }}))", s);
+                    }
+                    return "NULL".into();
+                }
+                // Built-in `spawn_pool(closure)` — fiber on background pool.
+                if callee.0 == u32::MAX - 37 {
+                    if let Some(a) = args.first() {
+                        let s = self.emit_expr(f, a);
+                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_pool(__cb.code, __cb.env); }}))", s);
                     }
                     return "NULL".into();
                 }
