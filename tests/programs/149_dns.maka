@@ -1,0 +1,14 @@
+// DNS resolution: looking up "localhost" should always yield 127.0.0.1.
+import std.dns_resolve_v4;
+
+unit main() {
+    int addr = dns_resolve_v4("localhost");
+    // 127.0.0.1 packed big-endian = 0x7F000001 = 2130706433
+    log(addr);
+    int a = (addr >> 24) & 255;
+    int b = (addr >> 16) & 255;
+    int c = (addr >>  8) & 255;
+    int d =  addr        & 255;
+    log(a);   // 127
+    log(d);   // 1
+}

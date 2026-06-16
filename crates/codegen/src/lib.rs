@@ -1092,6 +1092,7 @@ impl<'a> Cx<'a> {
         self.w("static inline int64_t __maka_tcp_accept_async(int64_t listen_fd);\n");
         self.w("static inline int64_t __maka_tcp_connect_v4(int64_t a, int64_t b, int64_t c, int64_t d, int64_t port);\n");
         self.w("static inline int64_t __maka_close_fd(int64_t fd);\n");
+        self.w("static inline int64_t __maka_dns_resolve_v4(const char* host);\n");
         self.w("int64_t __maka_set_nonblock(int64_t fd) {\n");
         self.w("    int flags = fcntl((int)fd, F_GETFL, 0);\n");
         self.w("    if (flags < 0) return -1;\n");
@@ -2959,14 +2960,21 @@ impl<'a> Cx<'a> {
         // nor a clash with a user function named `accept` blows up the build.
         self.w("/* ---- TCP socket runtime ---- */\n");
         self.w("#include <sys/syscall.h>\n");
+        // Manual forward decls avoid pulling sys/socket.h's declaration of
+        // `accept` into scope (which would conflict with user-defined funcs
+        // named `accept`, see test 114).  All socket calls go through these
+        // shims; `accept` is invoked via syscall(2) inside the helper below.
         self.w("typedef unsigned int __maka_socklen_t;\n");
-        self.w("struct __maka_sockaddr_in { unsigned short sin_family; unsigned short sin_port; struct { unsigned int s_addr; } sin_addr; unsigned char sin_zero[8]; };\n");
+        self.w("struct sockaddr_in { unsigned short sin_family; unsigned short sin_port; struct { unsigned int s_addr; } sin_addr; unsigned char sin_zero[8]; };\n");
+        self.w("struct sockaddr { unsigned short sa_family; char sa_data[14]; };\n");
         self.w("extern int socket(int, int, int);\n");
-        self.w("extern int bind  (int, const void*, __maka_socklen_t);\n");
+        self.w("extern int bind  (int, const struct sockaddr*, __maka_socklen_t);\n");
         self.w("extern int listen(int, int);\n");
-        self.w("extern int connect(int, const void*, __maka_socklen_t);\n");
+        self.w("extern int connect(int, const struct sockaddr*, __maka_socklen_t);\n");
         self.w("extern int setsockopt(int, int, int, const void*, __maka_socklen_t);\n");
         self.w("extern int getsockopt(int, int, int, void*, __maka_socklen_t*);\n");
+        self.w("extern long sendto(int, const void*, unsigned long, int, const struct sockaddr*, __maka_socklen_t);\n");
+        self.w("extern long recvfrom(int, void*, unsigned long, int, struct sockaddr*, __maka_socklen_t*);\n");
         self.w("extern unsigned short htons(unsigned short);\n");
         self.w("extern unsigned int   htonl(unsigned int);\n");
         self.w("#define __MAKA_AF_INET     2\n");
@@ -2980,11 +2988,11 @@ impl<'a> Cx<'a> {
         self.w("    if (s < 0) return -1;\n");
         self.w("    int one = 1;\n");
         self.w("    setsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_REUSEADDR, &one, sizeof(one));\n");
-        self.w("    struct __maka_sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n");
+        self.w("    struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n");
         self.w("    sa.sin_family = __MAKA_AF_INET;\n");
         self.w("    sa.sin_addr.s_addr = htonl(__MAKA_INADDR_ANY);\n");
         self.w("    sa.sin_port = htons((unsigned short)port);\n");
-        self.w("    if (bind(s, &sa, sizeof(sa)) != 0) { close(s); return -1; }\n");
+        self.w("    if (bind(s, (struct sockaddr*)&sa, sizeof(sa)) != 0) { close(s); return -1; }\n");
         self.w("    if (listen(s, (int)backlog) != 0) { close(s); return -1; }\n");
         self.w("    int flags = fcntl(s, F_GETFL, 0);\n");
         self.w("    fcntl(s, F_SETFL, flags | O_NONBLOCK);\n");
@@ -3012,12 +3020,12 @@ impl<'a> Cx<'a> {
         self.w("    if (s < 0) return -1;\n");
         self.w("    int flags = fcntl(s, F_GETFL, 0);\n");
         self.w("    fcntl(s, F_SETFL, flags | O_NONBLOCK);\n");
-        self.w("    struct __maka_sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n");
+        self.w("    struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n");
         self.w("    sa.sin_family = __MAKA_AF_INET;\n");
         self.w("    sa.sin_port = htons((unsigned short)port);\n");
         self.w("    unsigned char octets[4] = {(unsigned char)a, (unsigned char)b, (unsigned char)c, (unsigned char)d};\n");
         self.w("    memcpy(&sa.sin_addr.s_addr, octets, 4);\n");
-        self.w("    int r = connect(s, &sa, sizeof(sa));\n");
+        self.w("    int r = connect(s, (struct sockaddr*)&sa, sizeof(sa));\n");
         self.w("    if (r == 0) return s;\n");
         self.w("    if (errno == EINPROGRESS) {\n");
         self.w("        __maka_wait_fd(s, MAKA_EV_WRITE);\n");
@@ -3029,28 +3037,38 @@ impl<'a> Cx<'a> {
         self.w("    close(s); return -1;\n");
         self.w("}\n");
         self.w("static inline int64_t __maka_close_fd(int64_t fd) { return close((int)fd); }\n");
+        // DNS resolution via gethostbyname (legacy but doesn't require
+        // pulling in netdb.h's struct addrinfo, which transitively brings
+        // in sys/socket.h and conflicts with our forward decls).
+        self.w("struct __maka_hostent { char* h_name; char** h_aliases; int h_addrtype; int h_length; char** h_addr_list; };\n");
+        self.w("extern struct __maka_hostent* gethostbyname(const char*);\n");
+        self.w("static inline int64_t __maka_dns_resolve_v4(const char* host) {\n");
+        self.w("    struct __maka_hostent* he = gethostbyname(host);\n");
+        self.w("    if (!he || !he->h_addr_list || !he->h_addr_list[0]) return -1;\n");
+        self.w("    unsigned char* p = (unsigned char*)he->h_addr_list[0];\n");
+        self.w("    return ((int64_t)p[0] << 24) | ((int64_t)p[1] << 16) | ((int64_t)p[2] << 8) | (int64_t)p[3];\n");
+        self.w("}\n");
         // UDP helpers — bind a datagram socket, send/recv from a peer.
         self.w("static inline int64_t __maka_udp_open(int64_t port) {\n");
         self.w("    int s = socket(__MAKA_AF_INET, 2 /*SOCK_DGRAM*/, 0);\n");
         self.w("    if (s < 0) return -1;\n");
-        self.w("    struct __maka_sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n");
+        self.w("    struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n");
         self.w("    sa.sin_family = __MAKA_AF_INET;\n");
         self.w("    sa.sin_addr.s_addr = htonl(__MAKA_INADDR_ANY);\n");
         self.w("    sa.sin_port = htons((unsigned short)port);\n");
-        self.w("    if (port > 0 && bind(s, &sa, sizeof(sa)) != 0) { close(s); return -1; }\n");
+        self.w("    if (port > 0 && bind(s, (struct sockaddr*)&sa, sizeof(sa)) != 0) { close(s); return -1; }\n");
         self.w("    int flags = fcntl(s, F_GETFL, 0);\n");
         self.w("    fcntl(s, F_SETFL, flags | O_NONBLOCK);\n");
         self.w("    return s;\n");
         self.w("}\n");
         self.w("static inline int64_t __maka_udp_send_v4(int64_t fd, int64_t a, int64_t b, int64_t c, int64_t d, int64_t port, maka_unit* buf, int64_t len) {\n");
-        self.w("    struct __maka_sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n");
+        self.w("    struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n");
         self.w("    sa.sin_family = __MAKA_AF_INET;\n");
         self.w("    sa.sin_port = htons((unsigned short)port);\n");
         self.w("    unsigned char oct[4] = {(unsigned char)a, (unsigned char)b, (unsigned char)c, (unsigned char)d};\n");
         self.w("    memcpy(&sa.sin_addr.s_addr, oct, 4);\n");
-        self.w("    extern ssize_t sendto(int, const void*, size_t, int, const void*, __maka_socklen_t);\n");
         self.w("    while (1) {\n");
-        self.w("        ssize_t n = sendto((int)fd, (void*)buf, (size_t)len, 0, &sa, sizeof(sa));\n");
+        self.w("        long n = sendto((int)fd, (void*)buf, (unsigned long)len, 0, (struct sockaddr*)&sa, sizeof(sa));\n");
         self.w("        if (n >= 0) return (int64_t)n;\n");
         self.w("        if (errno == EAGAIN || errno == EWOULDBLOCK) { __maka_wait_fd(fd, MAKA_EV_WRITE); continue; }\n");
         self.w("        if (errno == EINTR) continue;\n");
@@ -3126,9 +3144,8 @@ impl<'a> Cx<'a> {
         self.w("static inline int64_t __maka_eventfd_recv(int64_t fd) { (void)fd; return -1; }\n");
         self.w("#endif\n");
         self.w("static inline int64_t __maka_udp_recv_async(int64_t fd, maka_unit* buf, int64_t cap) {\n");
-        self.w("    extern ssize_t recvfrom(int, void*, size_t, int, void*, __maka_socklen_t*);\n");
         self.w("    while (1) {\n");
-        self.w("        ssize_t n = recvfrom((int)fd, (void*)buf, (size_t)cap, 0, NULL, NULL);\n");
+        self.w("        long n = recvfrom((int)fd, (void*)buf, (unsigned long)cap, 0, NULL, NULL);\n");
         self.w("        if (n >= 0) return (int64_t)n;\n");
         self.w("        if (errno == EAGAIN || errno == EWOULDBLOCK) { __maka_wait_fd(fd, MAKA_EV_READ); continue; }\n");
         self.w("        if (errno == EINTR) continue;\n");
