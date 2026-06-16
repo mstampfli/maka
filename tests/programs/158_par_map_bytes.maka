@@ -5,17 +5,17 @@
 import std.par_map_bytes;
 
 cblock "
-    struct Pair { long a; long b; };
+    struct Pair { int64_t a; int64_t b; };
     static maka_unit* __mk_input(void) {
         static struct Pair items[4] = { {1,2}, {3,4}, {5,6}, {7,8} };
         return (maka_unit*)items;
     }
     static int __mk_pair_size(void) { return sizeof(struct Pair); }
-    static int __mk_int_size (void) { return sizeof(long); }
-    static long __mk_out_at(maka_unit* p, int i) { return ((long*)p)[i]; }
+    static int __mk_int_size (void) { return sizeof(int64_t); }
+    static int64_t __mk_out_at(maka_unit* p, int i) { return ((int64_t*)p)[i]; }
     static void __mk_pair_sum(maka_unit* in_item, maka_unit* out_item) {
-        long* p = (long*)in_item;
-        *(long*)out_item = p[0] + p[1];
+        int64_t* p = (int64_t*)in_item;
+        *(int64_t*)out_item = p[0] + p[1];
     }
 ";
 extern *unit __mk_input();
