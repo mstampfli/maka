@@ -413,6 +413,34 @@ impl<'a> Cx<'a> {
         self.w("static __thread int maka_anchor_wake_on_finish = 0;\n");
         self.w("static __thread int maka_epoll_fd = -1;\n");
         self.w("static __thread int64_t maka_anchor_deadline_ns = 0; /* 0 = none; otherwise scheduler caps its timeout so anchor wakes by this */\n");
+        // Reactor backend selection.  On Linux, epoll() is used directly.
+        // On other POSIX systems we emulate the epoll API via poll() — the
+        // shim's __maka_epoll_wait_poll rebuilds a pollfd[] from maka_fd_regs
+        // each call.  The rest of the reactor code is backend-agnostic.
+        self.w("#include <poll.h>\n");
+        self.w("#ifdef __linux__\n");
+        self.w("#include <sys/epoll.h>\n");
+        self.w("#define MAKA_USE_EPOLL 1\n");
+        self.w("#else\n");
+        self.w("#define MAKA_USE_EPOLL 0\n");
+        self.w("#define EPOLLIN  POLLIN\n");
+        self.w("#define EPOLLOUT POLLOUT\n");
+        self.w("#define EPOLLERR POLLERR\n");
+        self.w("#define EPOLLHUP POLLHUP\n");
+        self.w("#define EPOLLONESHOT 0\n");
+        self.w("#define EPOLL_CTL_ADD 1\n");
+        self.w("#define EPOLL_CTL_MOD 2\n");
+        self.w("#define EPOLL_CTL_DEL 3\n");
+        self.w("#define EPOLL_CLOEXEC 0\n");
+        self.w("typedef struct { int events; union { int fd; void* ptr; } data; } maka_epoll_event_t;\n");
+        self.w("#define epoll_event maka_epoll_event_t\n");
+        self.w("static inline int epoll_create1(int flags) { (void)flags; return 0; }\n");
+        self.w("static inline int epoll_ctl(int ep, int op, int fd, struct epoll_event* e) {\n");
+        self.w("    (void)ep; (void)op; (void)fd; (void)e; return 0;\n");
+        self.w("}\n");
+        self.w("static int __maka_epoll_wait_poll(struct epoll_event* evs, int max, int timeout_ms);\n");
+        self.w("#define epoll_wait(ep, evs, max, t) __maka_epoll_wait_poll((evs), (max), (t))\n");
+        self.w("#endif\n");
         // Per-fd reactor registration so that multiple fibers can wait on the
         // same fd without overwriting each other's epoll entry.  Each fd
         // tracks its currently-armed event mask; the scheduler re-computes
@@ -436,6 +464,37 @@ impl<'a> Cx<'a> {
         self.w("}\n");
         self.w("static void __maka_fd_recompute(int fd);     /* fwd decl */\n");
         self.w("static void __maka_fd_arm(int fd, int events_mask);  /* fwd decl */\n");
+        // poll()-backend epoll_wait shim: walks maka_fd_regs to build the
+        // pollfd[] each call, then maps revents back into epoll-style events.
+        self.w("#if !MAKA_USE_EPOLL\n");
+        self.w("static int __maka_epoll_wait_poll(struct epoll_event* evs, int max, int timeout_ms) {\n");
+        self.w("    /* Count registered fds. */\n");
+        self.w("    int n = 0;\n");
+        self.w("    for (maka_fd_reg_t* r = maka_fd_regs; r; r = r->next) n++;\n");
+        self.w("    if (n == 0) { if (timeout_ms > 0) { struct timespec ts = { timeout_ms/1000, (timeout_ms%1000)*1000000 }; nanosleep(&ts, NULL); } return 0; }\n");
+        self.w("    struct pollfd* pfds = (struct pollfd*)calloc((size_t)n, sizeof(struct pollfd));\n");
+        self.w("    int* fds = (int*)calloc((size_t)n, sizeof(int));\n");
+        self.w("    int i = 0;\n");
+        self.w("    for (maka_fd_reg_t* r = maka_fd_regs; r; r = r->next, i++) {\n");
+        self.w("        pfds[i].fd = r->fd;\n");
+        self.w("        pfds[i].events = (short)(r->events_mask & (POLLIN | POLLOUT));\n");
+        self.w("        fds[i] = r->fd;\n");
+        self.w("    }\n");
+        self.w("    int rv = poll(pfds, (nfds_t)n, timeout_ms);\n");
+        self.w("    int out = 0;\n");
+        self.w("    if (rv > 0) {\n");
+        self.w("        for (int j = 0; j < n && out < max; j++) {\n");
+        self.w("            if (pfds[j].revents) {\n");
+        self.w("                evs[out].events = pfds[j].revents;\n");
+        self.w("                evs[out].data.fd = fds[j];\n");
+        self.w("                out++;\n");
+        self.w("            }\n");
+        self.w("        }\n");
+        self.w("    }\n");
+        self.w("    free(pfds); free(fds);\n");
+        self.w("    return out;\n");
+        self.w("}\n");
+        self.w("#endif\n");
         self.w("static void __maka_fd_reg_drop(int fd) {\n");
         self.w("    maka_fd_reg_t** prev = &maka_fd_regs;\n");
         self.w("    while (*prev) {\n");
@@ -446,8 +505,6 @@ impl<'a> Cx<'a> {
         self.w("    }\n");
         self.w("}\n");
         self.w("static __thread maka_fiber_t* maka_fd_waiters = NULL;\n");
-        self.w("#include <sys/epoll.h>\n");
-        self.w("#include <poll.h>\n");
         self.w("#define MAKA_EV_READ  1\n");
         self.w("#define MAKA_EV_WRITE 2\n");
         self.w("static char maka_sched_stack[64 * 1024];\n");

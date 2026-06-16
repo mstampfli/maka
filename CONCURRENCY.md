@@ -569,6 +569,27 @@ unit frame() {
 | Work-stealing per-worker deques for the job pool | **Implemented** — Chase-Lev lock-free deques per worker |
 | Slab pool with VM-reserve + page-on-touch for fibers | **Implemented** — `mmap PROT_NONE 1 MB` + `mprotect 64 KB` top page |
 | `par_map_int` and reductions over typed slices | **Implemented** — `par_map_int` returns a fresh `[]int`; `par_reduce_int` folds |
+| `par_for_each(slice, body)` — chunked iteration over a `[]int` | **Implemented** |
+| `par_filter_int(slice, pred)` — parallel keep-where, returns filtered `[]int` | **Implemented** |
+| `par_scan_int(slice, combine)` — two-pass associative prefix scan | **Implemented** |
+| `par_map_int(slice, fn)` / `par_reduce_int(slice, init, combine)` — slice overloads | **Implemented** |
+| `cancel(*Thread)` — user-callable cancellation across all three tiers | **Implemented** |
+| `try_join(*Thread) -> bool` — non-blocking poll | **Implemented** |
+| `join_timeout(*Thread, ms) -> bool` — bounded join | **Implemented** |
+| `select_timeout(slice, ms) -> int` — race with deadline | **Implemented** |
+| `wait_fd_timeout(fd, events, ms) -> bool` — bounded IO wait inside a fiber | **Implemented** |
+| `detach(*Thread)` — opts out of join; runtime auto-reaps the handle | **Implemented** |
+| Multi-fiber `wait_fd` on the same fd — per-fd registration table | **Implemented** |
+| `EPOLLERR` / `EPOLLHUP` wake the waiter regardless of registered interest | **Implemented** |
+| Fiber-aware `Mutex`/`WaitGroup`/`Once` — park via swapcontext, never block the worker | **Implemented** |
+| `Atomic<i64>` — load/store/add/cas wrapper over `_Atomic int64_t` | **Implemented** |
+| TCP helpers: `tcp_listen`, `tcp_accept_async`, `tcp_connect_v4`, `close_fd` | **Implemented** (Linux) |
+| Closure env auto-freed on fiber/thread/job completion (no leak per spawn) | **Implemented** |
+| kqueue backend (macOS/BSD) | Pending |
+| IOCP backend (Windows) | Pending |
+| `poll()` fallback reactor for non-epoll kernels | Pending |
+| Cross-thread fiber migration (load-balance fibers across worker schedulers) | Pending — job pool covers parallelism today |
+| Generic `par_map<T, U>` / `par_reduce<T>` for non-int element types | Pending |
 
 The **surface is final** and user code written against it today will
 continue to work as the runtime improves.  Performance will improve
