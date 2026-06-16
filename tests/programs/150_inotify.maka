@@ -1,0 +1,37 @@
+// inotify: watch a file for modifications.  A waiter fiber parks on
+// the inotify fd; main mutates the watched file; the wd is returned.
+import std.{inotify_open, inotify_add_path, inotify_recv_async, close_fd, sleep_ms};
+
+cblock "
+    #include <stdio.h>
+    static int __mk_touch_file(const char* p) {
+        FILE* f = fopen(p, \"w\");
+        if (!f) return -1;
+        fputs(\"hello\\n\", f);
+        fclose(f);
+        return 0;
+    }
+    static const char* __mk_path(void) { return \"/tmp/maka_inotify_target\"; }
+";
+extern i32 __mk_touch_file(string p);
+extern string __mk_path();
+
+mut int g_fd = 0;
+
+unit waiter_body() {
+    int wd = inotify_recv_async(g_fd);
+    log(wd > 0 as int);    // 1 (event received)
+}
+
+unit main() {
+    _ = __mk_touch_file(__mk_path());   // ensure file exists
+    g_fd = inotify_open();
+    // 2 = IN_MODIFY
+    int wd = inotify_add_path(g_fd, __mk_path(), 2);
+    log(wd > 0 as int);    // 1 (watch added)
+    *Thread w = spawn(unit() { waiter_body(); });
+    sleep_ms(20);
+    _ = __mk_touch_file(__mk_path());   // trigger IN_MODIFY
+    join(w);
+    _ = close_fd(g_fd);
+}

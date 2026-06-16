@@ -83,6 +83,19 @@ extern "__maka_timerfd_recv"     int  __timerfd_recv(int fd);
 extern "__maka_eventfd_create"   int  __eventfd_create(int initial);
 extern "__maka_eventfd_signal"   int  __eventfd_signal(int fd, int n);
 extern "__maka_eventfd_recv"     int  __eventfd_recv(int fd);
+extern "__maka_inotify_open"     int  __inotify_open();
+extern "__maka_inotify_add"      int  __inotify_add(int fd, string path, int mask);
+extern "__maka_inotify_recv"     int  __inotify_recv(int fd);
+
+// File-watch via inotify (Linux).  Common masks:
+//   1     = IN_ACCESS   (file was accessed)
+//   2     = IN_MODIFY   (file was modified)
+//   8     = IN_CLOSE_WRITE
+//   256   = IN_CREATE
+//   512   = IN_DELETE
+pub int inotify_open    ()                                   { return __inotify_open(); }
+pub int inotify_add_path(int fd, string path, int mask)      { return __inotify_add(fd, path, mask); }
+pub int inotify_recv_async(int fd)                            { return __inotify_recv(fd); }
 
 // eventfd: a kernel counter useful as a wake-up signal between fibers and
 // threads.  event_fd_signal(fd, n) adds n to the counter and wakes any

@@ -1089,6 +1089,9 @@ impl<'a> Cx<'a> {
         self.w("static inline int64_t __maka_eventfd_create(int64_t initial);\n");
         self.w("static inline int64_t __maka_eventfd_signal(int64_t fd, int64_t n);\n");
         self.w("static inline int64_t __maka_eventfd_recv(int64_t fd);\n");
+        self.w("static inline int64_t __maka_inotify_open(void);\n");
+        self.w("static inline int64_t __maka_inotify_add(int64_t fd, const char* path, int64_t mask);\n");
+        self.w("static inline int64_t __maka_inotify_recv(int64_t fd);\n");
         self.w("static inline int64_t __maka_tcp_accept_async(int64_t listen_fd);\n");
         self.w("static inline int64_t __maka_tcp_connect_v4(int64_t a, int64_t b, int64_t c, int64_t d, int64_t port);\n");
         self.w("static inline int64_t __maka_close_fd(int64_t fd);\n");
@@ -3096,6 +3099,27 @@ impl<'a> Cx<'a> {
         self.w("}\n");
         self.w("#include <sys/timerfd.h>\n");
         self.w("#include <sys/eventfd.h>\n");
+        self.w("#include <sys/inotify.h>\n");
+        // inotify: kernel file-watch via reactor.  inotify_open creates an
+        // inotify fd; inotify_add_path registers a path to watch.
+        // inotify_recv_async yields until any event arrives, then returns
+        // the first event's watch-descriptor (wd) or -1.
+        self.w("static inline int64_t __maka_inotify_open(void) {\n");
+        self.w("    return inotify_init1(IN_NONBLOCK | IN_CLOEXEC);\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_inotify_add(int64_t fd, const char* path, int64_t mask) {\n");
+        self.w("    return inotify_add_watch((int)fd, path, (uint32_t)mask);\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_inotify_recv(int64_t fd) {\n");
+        self.w("    char buf[sizeof(struct inotify_event) + 256] __attribute__((aligned(8)));\n");
+        self.w("    while (1) {\n");
+        self.w("        ssize_t n = read((int)fd, buf, sizeof(buf));\n");
+        self.w("        if (n > 0) { struct inotify_event* e = (struct inotify_event*)buf; return (int64_t)e->wd; }\n");
+        self.w("        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { __maka_wait_fd(fd, MAKA_EV_READ); continue; }\n");
+        self.w("        if (errno == EINTR) continue;\n");
+        self.w("        return -1;\n");
+        self.w("    }\n");
+        self.w("}\n");
         // eventfd: kernel counter with read/write wakeups, useful for fiber
         // and thread coordination without a full socket pair.
         self.w("static inline int64_t __maka_eventfd_create(int64_t initial) {\n");
@@ -3142,6 +3166,9 @@ impl<'a> Cx<'a> {
         self.w("static inline int64_t __maka_eventfd_create(int64_t initial) { (void)initial; return -1; }\n");
         self.w("static inline int64_t __maka_eventfd_signal(int64_t fd, int64_t n) { (void)fd; (void)n; return -1; }\n");
         self.w("static inline int64_t __maka_eventfd_recv(int64_t fd) { (void)fd; return -1; }\n");
+        self.w("static inline int64_t __maka_inotify_open(void) { return -1; }\n");
+        self.w("static inline int64_t __maka_inotify_add(int64_t fd, const char* p, int64_t m) { (void)fd; (void)p; (void)m; return -1; }\n");
+        self.w("static inline int64_t __maka_inotify_recv(int64_t fd) { (void)fd; return -1; }\n");
         self.w("#endif\n");
         self.w("static inline int64_t __maka_udp_recv_async(int64_t fd, maka_unit* buf, int64_t cap) {\n");
         self.w("    while (1) {\n");
