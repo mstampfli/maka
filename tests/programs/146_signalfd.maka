@@ -1,0 +1,27 @@
+// signalfd: a fiber waits asynchronously for SIGUSR1; main raises the
+// signal after a short delay.  Verifies that signalfd reads yield via
+// the reactor like any other fd.
+import std.{signal_fd_open, signal_recv_async, sleep_ms};
+
+cblock "
+    #include <signal.h>
+    #include <sys/types.h>
+    static int __mk_raise_usr1(void) { return raise(SIGUSR1); }
+    static int __mk_sigusr1(void)    { return SIGUSR1; }
+";
+extern i32 __mk_raise_usr1();
+extern i32 __mk_sigusr1();
+
+mut int g_fd = 0;
+unit waiter_body() {
+    int signo = signal_recv_async(g_fd);
+    log(signo);     // 10 (SIGUSR1 on Linux)
+}
+
+unit main() {
+    g_fd = signal_fd_open(__mk_sigusr1() as int);
+    *Thread w = spawn(unit() { waiter_body(); });
+    sleep_ms(20);          // let waiter park in wait_fd
+    _ = __mk_raise_usr1();  // deliver signal
+    join(w);
+}

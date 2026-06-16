@@ -1082,6 +1082,8 @@ impl<'a> Cx<'a> {
         self.w("static inline int64_t __maka_udp_open(int64_t port);\n");
         self.w("static inline int64_t __maka_udp_send_v4(int64_t fd, int64_t a, int64_t b, int64_t c, int64_t d, int64_t port, maka_unit* buf, int64_t len);\n");
         self.w("static inline int64_t __maka_udp_recv_async(int64_t fd, maka_unit* buf, int64_t cap);\n");
+        self.w("static inline int64_t __maka_signalfd_open(int64_t signum);\n");
+        self.w("static inline int64_t __maka_signalfd_recv(int64_t fd);\n");
         self.w("static inline int64_t __maka_tcp_accept_async(int64_t listen_fd);\n");
         self.w("static inline int64_t __maka_tcp_connect_v4(int64_t a, int64_t b, int64_t c, int64_t d, int64_t port);\n");
         self.w("static inline int64_t __maka_close_fd(int64_t fd);\n");
@@ -3050,6 +3052,29 @@ impl<'a> Cx<'a> {
         self.w("        return -1;\n");
         self.w("    }\n");
         self.w("}\n");
+        // signalfd helpers (Linux-specific; non-Linux returns -1 from open).
+        self.w("#ifdef __linux__\n");
+        self.w("#include <sys/signalfd.h>\n");
+        self.w("static inline int64_t __maka_signalfd_open(int64_t signum) {\n");
+        self.w("    sigset_t mask; sigemptyset(&mask); sigaddset(&mask, (int)signum);\n");
+        self.w("    pthread_sigmask(SIG_BLOCK, &mask, NULL);\n");
+        self.w("    int fd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);\n");
+        self.w("    return fd;\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_signalfd_recv(int64_t fd) {\n");
+        self.w("    struct signalfd_siginfo si;\n");
+        self.w("    while (1) {\n");
+        self.w("        ssize_t n = read((int)fd, &si, sizeof(si));\n");
+        self.w("        if (n == (ssize_t)sizeof(si)) return (int64_t)si.ssi_signo;\n");
+        self.w("        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { __maka_wait_fd(fd, MAKA_EV_READ); continue; }\n");
+        self.w("        if (errno == EINTR) continue;\n");
+        self.w("        return -1;\n");
+        self.w("    }\n");
+        self.w("}\n");
+        self.w("#else\n");
+        self.w("static inline int64_t __maka_signalfd_open(int64_t signum) { (void)signum; return -1; }\n");
+        self.w("static inline int64_t __maka_signalfd_recv(int64_t fd) { (void)fd; return -1; }\n");
+        self.w("#endif\n");
         self.w("static inline int64_t __maka_udp_recv_async(int64_t fd, maka_unit* buf, int64_t cap) {\n");
         self.w("    extern ssize_t recvfrom(int, void*, size_t, int, void*, __maka_socklen_t*);\n");
         self.w("    while (1) {\n");

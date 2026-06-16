@@ -69,6 +69,15 @@ extern "__maka_close_fd"         int  __close_fd(int fd);
 extern "__maka_udp_open"         int  __udp_open(int port);
 extern "__maka_udp_send_v4"      int  __udp_send_v4(int fd, int a, int b, int c, int d, int port, *mut unit buf, int len);
 extern "__maka_udp_recv_async"   int  __udp_recv_async(int fd, *mut unit buf, int cap);
+extern "__maka_signalfd_open"    int  __signalfd_open(int signum);
+extern "__maka_signalfd_recv"    int  __signalfd_recv(int fd);
+
+// Signal handling via signalfd (Linux).  signal_fd_open(signum) returns
+// an fd that becomes readable when the signal is delivered; the signal
+// is blocked from default-handling.  signal_recv_async(fd) yields until
+// the signal arrives and returns the signal number.
+pub int signal_fd_open    (int signum) { return __signalfd_open(signum); }
+pub int signal_recv_async (int fd)     { return __signalfd_recv(fd); }
 
 // UDP datagram helpers.  Port 0 picks an ephemeral local port.
 pub int udp_open      (int port)                                       { return __udp_open(port); }
