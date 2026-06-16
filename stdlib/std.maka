@@ -74,6 +74,27 @@ pub int tcp_accept_async(int listen_fd)                  { return __tcp_accept(l
 pub int tcp_connect_v4  (int a, int b, int c, int d, int port) { return __tcp_connect_v4(a, b, c, d, port); }
 pub int close_fd        (int fd)                         { return __close_fd(fd); }
 
+pub data TcpListener { int fd; }
+pub data TcpStream   { int fd; }
+
+pub TcpListener tcp_listener_open(int port, int backlog) {
+    TcpListener l = { fd = tcp_listen(port, backlog) };
+    return l;
+}
+pub TcpStream tcp_listener_accept(TcpListener l) {
+    TcpStream s = { fd = tcp_accept_async(l.fd) };
+    return s;
+}
+pub unit tcp_listener_close(TcpListener l) { _ = close_fd(l.fd); }
+
+pub TcpStream tcp_dial_v4(int a, int b, int c, int d, int port) {
+    TcpStream s = { fd = tcp_connect_v4(a, b, c, d, port) };
+    return s;
+}
+pub int  tcp_stream_read (TcpStream s, *mut unit buf, int cap) { return read_async(s.fd, buf, cap); }
+pub int  tcp_stream_write(TcpStream s, *mut unit buf, int len) { return write_async(s.fd, buf, len); }
+pub unit tcp_stream_close(TcpStream s) { _ = close_fd(s.fd); }
+
 pub unit wait_fd        (int fd, int events)              { __wait_fd(fd, events); }
 // Returns true if the fd became ready within `ms`, false on timeout.
 pub bool wait_fd_timeout(int fd, int events, int ms)      { return __wait_fd_timeout(fd, events, ms) != 0; }

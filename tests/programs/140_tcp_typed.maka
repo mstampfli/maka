@@ -1,0 +1,51 @@
+// Typed TCP wrappers: TcpListener + TcpStream replace the bare-int fd
+// surface.  Same one-byte echo as test 137, but using the typed API.
+
+import std.TcpListener;
+import std.TcpStream;
+import std.{
+    tcp_listener_open, tcp_listener_accept, tcp_listener_close,
+    tcp_dial_v4,
+    tcp_stream_read, tcp_stream_write, tcp_stream_close,
+};
+
+cblock "
+    static maka_unit* __mk_buf(void) { static unsigned char b[16]; return (maka_unit*)b; }
+    static maka_unit* __mk_msg(void) { static unsigned char m[4] = {'O','K','!','!'}; return (maka_unit*)m; }
+    static int        __mk_buf_at(int i) { unsigned char* b = (unsigned char*)__mk_buf(); return (int)b[i]; }
+";
+extern *unit __mk_buf();
+extern *unit __mk_msg();
+extern i32   __mk_buf_at(i32 i);
+
+mut int g_listen_fd = 0;
+mut int g_port = 0;
+
+unit server_body() {
+    TcpListener listener = { fd = g_listen_fd };
+    TcpStream s = tcp_listener_accept(listener);
+    int n = tcp_stream_read(s, __mk_buf() as *mut unit, 16);
+    _ = tcp_stream_write(s, __mk_buf() as *mut unit, n);
+    tcp_stream_close(s);
+}
+
+unit client_body() {
+    TcpStream s = tcp_dial_v4(127, 0, 0, 1, g_port);
+    _ = tcp_stream_write(s, __mk_msg() as *mut unit, 4);
+    int n = tcp_stream_read(s, __mk_buf() as *mut unit, 4);
+    log(n);                              // 4
+    log(__mk_buf_at(0 as i32) as int);   // 79 'O'
+    log(__mk_buf_at(2 as i32) as int);   // 33 '!'
+    tcp_stream_close(s);
+}
+
+unit main() {
+    g_port = 39555;
+    TcpListener l = tcp_listener_open(g_port, 4);
+    g_listen_fd = l.fd;
+    *Thread srv = spawn(unit() { server_body(); });
+    *Thread cli = spawn(unit() { client_body(); });
+    join(srv);
+    join(cli);
+    tcp_listener_close(l);
+}
