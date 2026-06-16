@@ -1,0 +1,65 @@
+// Cooperative IO over a pipe.  Reader fiber waits on the read end via
+// wait_fd, then read_async consumes the bytes that writer fiber pushed
+// with write_async.  Both run on the cooperative scheduler — if wait_fd
+// weren't reactor-backed the reader would block the loop and the writer
+// would never run.
+
+import std.{wait_fd, read_async, write_async, set_nonblock, EV_READ};
+
+cblock "
+    #include <unistd.h>
+    static int __mk_rfd = -1, __mk_wfd = -1;
+    static int  __mk_open_pipe(void) {
+        int fds[2];
+        if (pipe(fds) != 0) return -1;
+        __mk_rfd = fds[0]; __mk_wfd = fds[1];
+        return 0;
+    }
+    static int  __mk_rfd_get(void) { return __mk_rfd; }
+    static int  __mk_wfd_get(void) { return __mk_wfd; }
+    static maka_unit* __mk_buf4(void) { static unsigned char buf[4] = {0,0,0,0}; return (maka_unit*)buf; }
+    static int  __mk_buf4_at(int i) {
+        unsigned char* b = (unsigned char*)__mk_buf4();
+        return (int)b[i];
+    }
+    static maka_unit* __mk_msgABCD(void) {
+        static unsigned char msg[4] = {65,66,67,68};
+        return (maka_unit*)msg;
+    }
+";
+
+extern i32   __mk_open_pipe();
+extern i32   __mk_rfd_get();
+extern i32   __mk_wfd_get();
+extern *unit __mk_buf4();
+extern i32   __mk_buf4_at(i32 i);
+extern *unit __mk_msgABCD();
+
+unit reader_body() {
+    int rfd = __mk_rfd_get() as int;
+    wait_fd(rfd, EV_READ);
+    *mut unit buf = __mk_buf4() as *mut unit;
+    int n = read_async(rfd, buf, 4);
+    log(n);
+    log(__mk_buf4_at(0 as i32) as int);
+    log(__mk_buf4_at(3 as i32) as int);
+}
+
+unit writer_body() {
+    int wfd = __mk_wfd_get() as int;
+    *mut unit msg = __mk_msgABCD() as *mut unit;
+    int n = write_async(wfd, msg, 4);
+    log(n);
+}
+
+unit main() {
+    _ = __mk_open_pipe();
+    _ = set_nonblock(__mk_rfd_get() as int);
+    _ = set_nonblock(__mk_wfd_get() as int);
+
+    *Thread reader = spawn(unit() { reader_body(); });
+    *Thread writer = spawn(unit() { writer_body(); });
+
+    join(reader);
+    join(writer);
+}

@@ -51,6 +51,22 @@ pub unit sleep_us(int us) {
     __sleep_ns(us * 1000);
 }
 
+// IO event flags for wait_fd.
+pub constexpr int EV_READ  = 1;
+pub constexpr int EV_WRITE = 2;
+
+// IO primitives.  See CONCURRENCY.md.  Inside a fiber these yield to the
+// scheduler; outside they fall back to poll() / blocking read/write.
+extern "__maka_wait_fd"      unit __wait_fd(int fd, int events);
+extern "__maka_set_nonblock" int  __set_nonblock(int fd);
+extern "__maka_read_async"   int  __read_async(int fd, *mut unit buf, int cap);
+extern "__maka_write_async"  int  __write_async(int fd, *mut unit buf, int len);
+
+pub unit wait_fd     (int fd, int events)              { __wait_fd(fd, events); }
+pub int  set_nonblock(int fd)                           { return __set_nonblock(fd); }
+pub int  read_async  (int fd, *mut unit buf, int cap)   { return __read_async(fd, buf, cap); }
+pub int  write_async (int fd, *mut unit buf, int len)   { return __write_async(fd, buf, len); }
+
 // par_for_range and par_reduce_int are compiler builtins (like `spawn`):
 //   par_for_range(start, end, body)
 //     runs `body(i)` for every i in [start, end), chunked across the job

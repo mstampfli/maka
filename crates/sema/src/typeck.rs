@@ -1894,6 +1894,38 @@ impl<'a> TypeChecker<'a> {
             );
             return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
         }
+        // Built-in `par_map_int(start, end, fn)` — produce a freshly-allocated
+        // `[]int` slice of length (end - start) where result[i - start] =
+        // fn(i).  Chunks are distributed across the job pool.
+        if name == "par_map_int" && qualifier.is_none() {
+            let mut hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 3 {
+                self.err("par_map_int expects (int start, int end, int(int) f)", sp);
+            } else {
+                let ok_int = matches!(&hargs[0].ty, HType::Int) && matches!(&hargs[1].ty, HType::Int);
+                let body = &hargs[2];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(
+                    body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Int) && params.len() == 1 && matches!(params[0], HType::Int)
+                );
+                if !ok_int { self.err("par_map_int: start/end must be `int`", sp); }
+                if !ok_body { self.err(format!("par_map_int body must be `int(int)`, got `{}`", type_str(&body.ty)), sp); }
+            }
+            // Result type: []int slice.
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 22), args: hargs },
+                ty: HType::Slice { mutable: false, elem: Box::new(HType::Int) },
+                span: sp,
+            };
+        }
         // Built-in `yield_now()` — cooperative yield from a fiber back to
         // the scheduler.  No-op outside a fiber context.
         if name == "yield_now" && qualifier.is_none() {

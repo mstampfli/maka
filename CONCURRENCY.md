@@ -560,15 +560,15 @@ unit frame() {
 | `yield_now()` — cooperative yield from a fiber | **Implemented** |
 | `thread()` — pthread with default ~8 MB stack | **Implemented** |
 | `spawn()` — real cooperative fiber (ucontext + scheduler) | **Implemented** |
-| `job()` — N-worker pthread pool with shared MPMC queue | **Implemented** |
+| `job()` — N-worker pthread pool with Chase-Lev work-stealing deques | **Implemented** |
 | Cooperative scheduler with ready queue + sleep wheel | **Implemented** |
 | Fiber-aware `sleep_ms`: yields instead of blocking when in a fiber | **Implemented** |
 | Fiber-aware `join`: drives scheduler so other fibers progress | **Implemented** |
 | Fiber-aware `select`: cancels losers by walking ready/sleep queues | **Implemented** |
-| Epoll/kqueue/IOCP reactor with transparent-yield IO | Pending — needed for sub-ms IO concurrency |
-| Work-stealing per-worker deques for the job pool | Pending — current pool is one shared MPMC queue |
-| Slab pool with VM-reserve + page-on-touch for fibers | Pending — current fibers malloc a 64 KB stack each |
-| `par_map_int` and reductions over typed slices | Pending — par_reduce_int covers fold; par_map_int next |
+| Epoll reactor + `wait_fd` / `read_async` / `write_async` | **Implemented** (Linux; kqueue/IOCP ports pending) |
+| Work-stealing per-worker deques for the job pool | **Implemented** — Chase-Lev lock-free deques per worker |
+| Slab pool with VM-reserve + page-on-touch for fibers | **Implemented** — `mmap PROT_NONE 1 MB` + `mprotect 64 KB` top page |
+| `par_map_int` and reductions over typed slices | **Implemented** — `par_map_int` returns a fresh `[]int`; `par_reduce_int` folds |
 
 The **surface is final** and user code written against it today will
 continue to work as the runtime improves.  Performance will improve
