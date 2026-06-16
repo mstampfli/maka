@@ -1,0 +1,133 @@
+// Tiny HTTP/1.0 server: server fiber accepts in a loop, spawns a
+// connection-fiber per request which reads the request bytes until
+// "\r\n\r\n", writes back "HTTP/1.0 200 OK\r\n...\r\nHi", closes.
+// Client fiber fires N requests through tcp_connect_v4 + write_async +
+// read_async; we assert every response contains the body.
+//
+// Integration test for spawn + accept + read/write + WaitGroup +
+// Atomic + detach + cooperative scheduler under TCP load.
+
+import std.{
+    tcp_listen, tcp_accept_async, tcp_connect_v4, close_fd,
+    read_async, write_async,
+    atomic_new, atomic_get, atomic_add, atomic_destroy,
+    wg_new, wg_add, wg_done, wg_wait, wg_destroy,
+};
+
+cblock "
+    #include <string.h>
+    static maka_unit* __mk_alloc_buf(void) { return (maka_unit*)calloc(1, 512); }
+    static void       __mk_free_buf(maka_unit* p) { free(p); }
+    static int        __mk_contains(maka_unit* hay, int hay_len, const char* needle) {
+        if (!hay) return 0;
+        char* h = (char*)hay;
+        size_t nl = strlen(needle);
+        for (int i = 0; i + (int)nl <= hay_len; i++) {
+            if (memcmp(h + i, needle, nl) == 0) return 1;
+        }
+        return 0;
+    }
+    static maka_unit* __mk_response(int* out_len) {
+        static const char* r =
+            \"HTTP/1.0 200 OK\\r\\n\"
+            \"Content-Length: 2\\r\\n\"
+            \"Connection: close\\r\\n\"
+            \"\\r\\n\"
+            \"Hi\";
+        *out_len = (int)strlen(r);
+        return (maka_unit*)r;
+    }
+    static maka_unit* __mk_request(int* out_len) {
+        static const char* r = \"GET / HTTP/1.0\\r\\nHost: x\\r\\n\\r\\n\";
+        *out_len = (int)strlen(r);
+        return (maka_unit*)r;
+    }
+";
+extern *unit __mk_alloc_buf();
+extern unit  __mk_free_buf(*unit p);
+extern i32   __mk_contains(*unit hay, i32 hay_len, string needle);
+extern *unit __mk_response(*mut i32 out_len);
+extern *unit __mk_request (*mut i32 out_len);
+
+mut int g_listen_fd = 0;
+mut int g_port      = 0;
+
+unit serve_one(int cfd, *unit ok_count, *unit wg) {
+    *unit buf = __mk_alloc_buf();
+    // Read until "\r\n\r\n" or buffer fills.
+    mut int total = 0;
+    mut bool done = false;
+    while (!done && total < 480) {
+        int n = read_async(cfd, buf, 512 - total);
+        if (n <= 0) { done = true; }
+        else {
+            total = total + n;
+            if (__mk_contains(buf, total as i32, "\r\n\r\n") != 0 as i32) { done = true; }
+        }
+    }
+    mut i32 rlen = 0;
+    *unit resp = __mk_response(&mut rlen as *mut i32);
+    _ = write_async(cfd, resp, rlen as int);
+    _ = atomic_add(ok_count, 1);
+    __mk_free_buf(buf);
+    _ = close_fd(cfd);
+    wg_done(wg);
+}
+
+unit server_body(int n_conns, *unit ok_count, *unit wg) {
+    for (int i in 0..n_conns) {
+        int cfd = tcp_accept_async(g_listen_fd);
+        *Thread t = spawn(unit() [cfd, ok_count, wg] { serve_one(cfd, ok_count, wg); });
+        detach(t);
+    }
+}
+
+unit client_one(*unit ok_count, *unit wg) {
+    int s = tcp_connect_v4(127, 0, 0, 1, g_port);
+    if (s >= 0) {
+        mut i32 qlen = 0;
+        *unit req = __mk_request(&mut qlen as *mut i32);
+        _ = write_async(s, req, qlen as int);
+        *unit buf = __mk_alloc_buf();
+        int n = read_async(s, buf, 512);
+        if (__mk_contains(buf, n as i32, "Hi") != 0 as i32) {
+            _ = atomic_add(ok_count, 1);
+        }
+        __mk_free_buf(buf);
+        _ = close_fd(s);
+    }
+    wg_done(wg);
+}
+
+unit main() {
+    int N = 50;
+    g_port = 39811;
+    g_listen_fd = tcp_listen(g_port, 256);
+
+    *unit srv_ok = atomic_new(0);
+    *unit cli_ok = atomic_new(0);
+    *unit srv_wg = wg_new();
+    *unit cli_wg = wg_new();
+
+    wg_add(srv_wg, N);
+    *Thread srv = spawn(unit() [N, srv_ok, srv_wg] {
+        server_body(N, srv_ok, srv_wg);
+    });
+    detach(srv);
+
+    wg_add(cli_wg, N);
+    for (int i in 0..N) {
+        *Thread c = spawn(unit() [cli_ok, cli_wg] { client_one(cli_ok, cli_wg); });
+        detach(c);
+    }
+
+    wg_wait(srv_wg);
+    wg_wait(cli_wg);
+
+    log(atomic_get(srv_ok));   // 50
+    log(atomic_get(cli_ok));   // 50
+
+    _ = close_fd(g_listen_fd);
+    atomic_destroy(srv_ok); atomic_destroy(cli_ok);
+    wg_destroy(srv_wg); wg_destroy(cli_wg);
+}
