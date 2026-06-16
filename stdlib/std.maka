@@ -62,6 +62,17 @@ extern "__maka_wait_fd_timeout"  int  __wait_fd_timeout(int fd, int events, int 
 extern "__maka_set_nonblock"     int  __set_nonblock(int fd);
 extern "__maka_read_async"       int  __read_async(int fd, *mut unit buf, int cap);
 extern "__maka_write_async"      int  __write_async(int fd, *mut unit buf, int len);
+extern "__maka_tcp_listen"       int  __tcp_listen(int port, int backlog);
+extern "__maka_tcp_accept_async" int  __tcp_accept(int listen_fd);
+extern "__maka_tcp_connect_v4"   int  __tcp_connect_v4(int a, int b, int c, int d, int port);
+extern "__maka_close_fd"         int  __close_fd(int fd);
+
+// TCP helpers.  All sockets are returned in non-blocking mode so the
+// reactor primitives (wait_fd, read_async, write_async) work directly.
+pub int tcp_listen      (int port, int backlog)         { return __tcp_listen(port, backlog); }
+pub int tcp_accept_async(int listen_fd)                  { return __tcp_accept(listen_fd); }
+pub int tcp_connect_v4  (int a, int b, int c, int d, int port) { return __tcp_connect_v4(a, b, c, d, port); }
+pub int close_fd        (int fd)                         { return __close_fd(fd); }
 
 pub unit wait_fd        (int fd, int events)              { __wait_fd(fd, events); }
 // Returns true if the fd became ready within `ms`, false on timeout.

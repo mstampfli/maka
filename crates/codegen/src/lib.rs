@@ -132,6 +132,11 @@ impl<'a> Cx<'a> {
         for f in &funcs {
             self.emit_func(f);
         }
+        // TCP socket helper bodies — emitted last so that the sys/socket.h
+        // include is positioned AFTER all user code.  Otherwise socket.h's
+        // pollution (e.g. the bare `accept` symbol) clobbers user functions
+        // sharing those names.
+        self.emit_socket_helpers();
 
         // Synthesize a C `int main` that calls Maka `main`.  Two surface shapes:
         //
@@ -768,6 +773,16 @@ impl<'a> Cx<'a> {
         self.w("    return maka_current_fiber->wait_timed_out ? 0 : 1;\n");
         self.w("}\n");
         self.w("#include <fcntl.h>\n");
+        // TCP helpers — defined in an inner block so the sys/socket.h /
+        // netinet/in.h symbol pollution (especially the bare `accept`
+        // function name) doesn't escape into user code.  We define the
+        // runtime functions inside `extern "C"`-equivalent scope and
+        // reference them by their __maka_ names from the rest of the file.
+        self.w("/* TCP runtime — scoped includes to avoid name clashes. */\n");
+        self.w("static inline int64_t __maka_tcp_listen(int64_t port, int64_t backlog);\n");
+        self.w("static inline int64_t __maka_tcp_accept_async(int64_t listen_fd);\n");
+        self.w("static inline int64_t __maka_tcp_connect_v4(int64_t a, int64_t b, int64_t c, int64_t d, int64_t port);\n");
+        self.w("static inline int64_t __maka_close_fd(int64_t fd);\n");
         self.w("int64_t __maka_set_nonblock(int64_t fd) {\n");
         self.w("    int flags = fcntl((int)fd, F_GETFL, 0);\n");
         self.w("    if (flags < 0) return -1;\n");
@@ -2478,6 +2493,84 @@ impl<'a> Cx<'a> {
             HType::Unit => "void".into(),
             _ => self.c_type(t),
         }
+    }
+
+    fn emit_socket_helpers(&mut self) {
+        // Emitted AFTER all user code, and uses manual forward decls + the
+        // syscall(2) for `accept` so neither sys/socket.h's symbol pollution
+        // nor a clash with a user function named `accept` blows up the build.
+        self.w("/* ---- TCP socket runtime ---- */\n");
+        self.w("#include <sys/syscall.h>\n");
+        self.w("typedef unsigned int __maka_socklen_t;\n");
+        self.w("struct __maka_sockaddr_in { unsigned short sin_family; unsigned short sin_port; struct { unsigned int s_addr; } sin_addr; unsigned char sin_zero[8]; };\n");
+        self.w("extern int socket(int, int, int);\n");
+        self.w("extern int bind  (int, const void*, __maka_socklen_t);\n");
+        self.w("extern int listen(int, int);\n");
+        self.w("extern int connect(int, const void*, __maka_socklen_t);\n");
+        self.w("extern int setsockopt(int, int, int, const void*, __maka_socklen_t);\n");
+        self.w("extern int getsockopt(int, int, int, void*, __maka_socklen_t*);\n");
+        self.w("extern unsigned short htons(unsigned short);\n");
+        self.w("extern unsigned int   htonl(unsigned int);\n");
+        self.w("#define __MAKA_AF_INET     2\n");
+        self.w("#define __MAKA_SOCK_STREAM 1\n");
+        self.w("#define __MAKA_INADDR_ANY  0u\n");
+        self.w("#define __MAKA_SOL_SOCKET  1\n");
+        self.w("#define __MAKA_SO_REUSEADDR 2\n");
+        self.w("#define __MAKA_SO_ERROR    4\n");
+        self.w("static inline int64_t __maka_tcp_listen(int64_t port, int64_t backlog) {\n");
+        self.w("    int s = socket(__MAKA_AF_INET, __MAKA_SOCK_STREAM, 0);\n");
+        self.w("    if (s < 0) return -1;\n");
+        self.w("    int one = 1;\n");
+        self.w("    setsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_REUSEADDR, &one, sizeof(one));\n");
+        self.w("    struct __maka_sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n");
+        self.w("    sa.sin_family = __MAKA_AF_INET;\n");
+        self.w("    sa.sin_addr.s_addr = htonl(__MAKA_INADDR_ANY);\n");
+        self.w("    sa.sin_port = htons((unsigned short)port);\n");
+        self.w("    if (bind(s, &sa, sizeof(sa)) != 0) { close(s); return -1; }\n");
+        self.w("    if (listen(s, (int)backlog) != 0) { close(s); return -1; }\n");
+        self.w("    int flags = fcntl(s, F_GETFL, 0);\n");
+        self.w("    fcntl(s, F_SETFL, flags | O_NONBLOCK);\n");
+        self.w("    return s;\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_tcp_accept_async(int64_t listen_fd) {\n");
+        self.w("    while (1) {\n");
+        // Call accept via direct syscall to avoid clashing with a user-named
+        // Maka function called `accept` (see tests/programs/114_*).
+        self.w("        int c = (int)syscall(SYS_accept, (int)listen_fd, (void*)0, (void*)0);\n");
+        self.w("        if (c >= 0) {\n");
+        self.w("            int flags = fcntl(c, F_GETFL, 0);\n");
+        self.w("            fcntl(c, F_SETFL, flags | O_NONBLOCK);\n");
+        self.w("            return c;\n");
+        self.w("        }\n");
+        self.w("        if (errno == EAGAIN || errno == EWOULDBLOCK) {\n");
+        self.w("            __maka_wait_fd(listen_fd, MAKA_EV_READ); continue;\n");
+        self.w("        }\n");
+        self.w("        if (errno == EINTR) continue;\n");
+        self.w("        return -1;\n");
+        self.w("    }\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_tcp_connect_v4(int64_t a, int64_t b, int64_t c, int64_t d, int64_t port) {\n");
+        self.w("    int s = socket(__MAKA_AF_INET, __MAKA_SOCK_STREAM, 0);\n");
+        self.w("    if (s < 0) return -1;\n");
+        self.w("    int flags = fcntl(s, F_GETFL, 0);\n");
+        self.w("    fcntl(s, F_SETFL, flags | O_NONBLOCK);\n");
+        self.w("    struct __maka_sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n");
+        self.w("    sa.sin_family = __MAKA_AF_INET;\n");
+        self.w("    sa.sin_port = htons((unsigned short)port);\n");
+        self.w("    unsigned char octets[4] = {(unsigned char)a, (unsigned char)b, (unsigned char)c, (unsigned char)d};\n");
+        self.w("    memcpy(&sa.sin_addr.s_addr, octets, 4);\n");
+        self.w("    int r = connect(s, &sa, sizeof(sa));\n");
+        self.w("    if (r == 0) return s;\n");
+        self.w("    if (errno == EINPROGRESS) {\n");
+        self.w("        __maka_wait_fd(s, MAKA_EV_WRITE);\n");
+        self.w("        int err = 0; __maka_socklen_t elen = sizeof(err);\n");
+        self.w("        getsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_ERROR, &err, &elen);\n");
+        self.w("        if (err == 0) return s;\n");
+        self.w("        close(s); return -1;\n");
+        self.w("    }\n");
+        self.w("    close(s); return -1;\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_close_fd(int64_t fd) { return close((int)fd); }\n");
     }
 
     fn emit_func(&mut self, f: &HFunc) {

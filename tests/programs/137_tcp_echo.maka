@@ -1,0 +1,48 @@
+// TCP echo: server fiber accepts, reads, echoes; client fiber connects,
+// writes, reads.  Demonstrates tcp_listen / tcp_accept_async /
+// tcp_connect_v4 + the rest of the reactor surface working together.
+
+import std.{
+    tcp_listen, tcp_accept_async, tcp_connect_v4, close_fd,
+    read_async, write_async,
+};
+
+cblock "
+    static maka_unit* __mk_buf(void) { static unsigned char b[16]; return (maka_unit*)b; }
+    static maka_unit* __mk_msg(void) { static unsigned char m[4] = {'P','I','N','G'}; return (maka_unit*)m; }
+    static int        __mk_buf_at(int i) { unsigned char* b = (unsigned char*)__mk_buf(); return (int)b[i]; }
+";
+extern *unit __mk_buf();
+extern *unit __mk_msg();
+extern i32   __mk_buf_at(i32 i);
+
+mut int g_listen_fd = 0;
+mut int g_port      = 0;
+
+unit server_body() {
+    int cfd = tcp_accept_async(g_listen_fd);
+    int n = read_async(cfd, __mk_buf() as *mut unit, 16);
+    _ = write_async(cfd, __mk_buf() as *mut unit, n);
+    _ = close_fd(cfd);
+}
+
+unit client_body() {
+    int s = tcp_connect_v4(127, 0, 0, 1, g_port);
+    _ = write_async(s, __mk_msg() as *mut unit, 4);
+    [4]u8 reply = [0, 0, 0, 0];
+    int n = read_async(s, __mk_buf() as *mut unit, 4);
+    log(n);                          // 4
+    log(__mk_buf_at(0 as i32) as int);  // 80 'P'
+    log(__mk_buf_at(3 as i32) as int);  // 71 'G'
+    _ = close_fd(s);
+}
+
+unit main() {
+    g_port = 38719;
+    g_listen_fd = tcp_listen(g_port, 4);
+    *Thread srv = spawn(unit() { server_body(); });
+    *Thread cli = spawn(unit() { client_body(); });
+    join(srv);
+    join(cli);
+    _ = close_fd(g_listen_fd);
+}
