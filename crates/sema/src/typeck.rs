@@ -2004,13 +2004,41 @@ impl<'a> TypeChecker<'a> {
                 span: sp,
             };
         }
-        // Built-in `par_map_int(start, end, fn)` — produce a freshly-allocated
-        // `[]int` slice of length (end - start) where result[i - start] =
-        // fn(i).  Chunks are distributed across the job pool.
+        // Built-in `par_map_int` — two shapes:
+        //   par_map_int(start, end, fn) -> []int          // integer range
+        //   par_map_int(slice, fn)      -> []int          // slice form
+        // Body in both cases is `int(int)`.  Chunks distributed across the job pool.
         if name == "par_map_int" && qualifier.is_none() {
-            let mut hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            let first_is_int_slice = hargs.first().is_some_and(|a| matches!(&a.ty,
+                HType::Slice { elem, .. } if matches!(**elem, HType::Int)) ||
+                matches!(&a.ty, HType::Ref { inner, .. } if matches!(inner.as_ref(),
+                    HType::Slice { elem, .. } if matches!(**elem, HType::Int))));
+            if first_is_int_slice {
+                if hargs.len() != 2 {
+                    self.err("par_map_int(slice, body): expected 2 arguments", sp);
+                } else {
+                    let body = &hargs[1];
+                    let body_inner = match &body.ty {
+                        HType::FnPtr { .. } => Some(&body.ty),
+                        HType::Heap { inner } => Some(inner.as_ref()),
+                        HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                        HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                        _ => None,
+                    };
+                    let ok_body = matches!(body_inner,
+                        Some(HType::FnPtr { ret, params })
+                            if matches!(**ret, HType::Int) && params.len() == 1 && matches!(params[0], HType::Int));
+                    if !ok_body { self.err(format!("par_map_int(slice) body must be `int(int)`, got `{}`", type_str(&body.ty)), sp); }
+                }
+                return HExpr {
+                    kind: HExprKind::Call { callee: FuncId(u32::MAX - 28), args: hargs },
+                    ty: HType::Slice { mutable: false, elem: Box::new(HType::Int) },
+                    span: sp,
+                };
+            }
             if hargs.len() != 3 {
-                self.err("par_map_int expects (int start, int end, int(int) f)", sp);
+                self.err("par_map_int expects (int start, int end, int(int) f) or ([]int slice, int(int) f)", sp);
             } else {
                 let ok_int = matches!(&hargs[0].ty, HType::Int) && matches!(&hargs[1].ty, HType::Int);
                 let body = &hargs[2];
@@ -2021,17 +2049,105 @@ impl<'a> TypeChecker<'a> {
                     HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
                     _ => None,
                 };
-                let ok_body = matches!(
-                    body_inner,
+                let ok_body = matches!(body_inner,
                     Some(HType::FnPtr { ret, params })
-                        if matches!(**ret, HType::Int) && params.len() == 1 && matches!(params[0], HType::Int)
-                );
+                        if matches!(**ret, HType::Int) && params.len() == 1 && matches!(params[0], HType::Int));
                 if !ok_int { self.err("par_map_int: start/end must be `int`", sp); }
                 if !ok_body { self.err(format!("par_map_int body must be `int(int)`, got `{}`", type_str(&body.ty)), sp); }
             }
-            // Result type: []int slice.
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 22), args: hargs },
+                ty: HType::Slice { mutable: false, elem: Box::new(HType::Int) },
+                span: sp,
+            };
+        }
+        // par_for_each(slice, body) — runs body(elem) for every elem; chunked.
+        if name == "par_for_each" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 2 {
+                self.err("par_for_each expects ([]int slice, unit(int) body)", sp);
+            } else {
+                let is_slice = matches!(&hargs[0].ty,
+                    HType::Slice { elem, .. } if matches!(**elem, HType::Int)) ||
+                    matches!(&hargs[0].ty, HType::Ref { inner, .. } if matches!(inner.as_ref(),
+                        HType::Slice { elem, .. } if matches!(**elem, HType::Int)));
+                let body = &hargs[1];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Unit) && params.len() == 1 && matches!(params[0], HType::Int));
+                if !is_slice { self.err(format!("par_for_each: first arg must be `[]int` or `&[]int`, got `{}`", type_str(&hargs[0].ty)), sp); }
+                if !ok_body { self.err(format!("par_for_each body must be `unit(int)`, got `{}`", type_str(&body.ty)), sp); }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 27), args: hargs },
+                ty: HType::Unit,
+                span: sp,
+            };
+        }
+        // par_filter_int(slice, pred) — bool(int) predicate; returns filtered []int.
+        if name == "par_filter_int" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 2 {
+                self.err("par_filter_int expects ([]int slice, bool(int) pred)", sp);
+            } else {
+                let is_slice = matches!(&hargs[0].ty,
+                    HType::Slice { elem, .. } if matches!(**elem, HType::Int)) ||
+                    matches!(&hargs[0].ty, HType::Ref { inner, .. } if matches!(inner.as_ref(),
+                        HType::Slice { elem, .. } if matches!(**elem, HType::Int)));
+                let body = &hargs[1];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Bool) && params.len() == 1 && matches!(params[0], HType::Int));
+                if !is_slice { self.err(format!("par_filter_int: first arg must be `[]int`, got `{}`", type_str(&hargs[0].ty)), sp); }
+                if !ok_body { self.err(format!("par_filter_int pred must be `bool(int)`, got `{}`", type_str(&body.ty)), sp); }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 30), args: hargs },
+                ty: HType::Slice { mutable: false, elem: Box::new(HType::Int) },
+                span: sp,
+            };
+        }
+        // par_scan_int(slice, combine) — inclusive prefix scan with associative combine.
+        if name == "par_scan_int" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 2 {
+                self.err("par_scan_int expects ([]int slice, int(int, int) combine)", sp);
+            } else {
+                let is_slice = matches!(&hargs[0].ty,
+                    HType::Slice { elem, .. } if matches!(**elem, HType::Int)) ||
+                    matches!(&hargs[0].ty, HType::Ref { inner, .. } if matches!(inner.as_ref(),
+                        HType::Slice { elem, .. } if matches!(**elem, HType::Int)));
+                let body = &hargs[1];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Int) && params.len() == 2 &&
+                            matches!(params[0], HType::Int) && matches!(params[1], HType::Int));
+                if !is_slice { self.err(format!("par_scan_int: first arg must be `[]int`, got `{}`", type_str(&hargs[0].ty)), sp); }
+                if !ok_body { self.err(format!("par_scan_int combine must be `int(int, int)`, got `{}`", type_str(&body.ty)), sp); }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 31), args: hargs },
                 ty: HType::Slice { mutable: false, elem: Box::new(HType::Int) },
                 span: sp,
             };
@@ -2048,13 +2164,45 @@ impl<'a> TypeChecker<'a> {
                 span: sp,
             };
         }
-        // Built-in `par_reduce_int(start, end, init, combiner)` — fold an
-        // integer range using a `int(int, int)` closure that combines an
-        // accumulator with one element.  Returns the final accumulator.
+        // Built-in `par_reduce_int` — two shapes:
+        //   par_reduce_int(start, end, init, combine) -> int   // range
+        //   par_reduce_int(slice, init, combine)      -> int   // slice
+        // Combine in both cases is `int(int, int)`.
         if name == "par_reduce_int" && qualifier.is_none() {
-            let mut hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            let hargs_pre: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            let first_is_int_slice = hargs_pre.first().is_some_and(|a| matches!(&a.ty,
+                HType::Slice { elem, .. } if matches!(**elem, HType::Int)) ||
+                matches!(&a.ty, HType::Ref { inner, .. } if matches!(inner.as_ref(),
+                    HType::Slice { elem, .. } if matches!(**elem, HType::Int))));
+            if first_is_int_slice {
+                if hargs_pre.len() != 3 {
+                    self.err("par_reduce_int(slice, init, combine): expected 3 arguments", sp);
+                } else {
+                    let body = &hargs_pre[2];
+                    let body_inner = match &body.ty {
+                        HType::FnPtr { .. } => Some(&body.ty),
+                        HType::Heap { inner } => Some(inner.as_ref()),
+                        HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                        HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                        _ => None,
+                    };
+                    let ok_init = matches!(&hargs_pre[1].ty, HType::Int);
+                    let ok_body = matches!(body_inner,
+                        Some(HType::FnPtr { ret, params })
+                            if matches!(**ret, HType::Int) && params.len() == 2 &&
+                                matches!(params[0], HType::Int) && matches!(params[1], HType::Int));
+                    if !ok_init { self.err("par_reduce_int(slice): init must be `int`", sp); }
+                    if !ok_body { self.err(format!("par_reduce_int(slice) combine must be `int(int, int)`, got `{}`", type_str(&body.ty)), sp); }
+                }
+                return HExpr {
+                    kind: HExprKind::Call { callee: FuncId(u32::MAX - 29), args: hargs_pre },
+                    ty: HType::Int,
+                    span: sp,
+                };
+            }
+            let mut hargs: Vec<HExpr> = hargs_pre;
             if hargs.len() != 4 {
-                self.err("par_reduce_int expects (int start, int end, int init, int(int, int) combine)", sp);
+                self.err("par_reduce_int expects (int start, int end, int init, int(int, int) combine) or ([]int slice, int init, int(int, int) combine)", sp);
             } else {
                 let ok_int = matches!(&hargs[0].ty, HType::Int)
                     && matches!(&hargs[1].ty, HType::Int)

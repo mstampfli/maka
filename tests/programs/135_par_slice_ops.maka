@@ -1,0 +1,31 @@
+// par_for_each / par_map_int(slice) / par_reduce_int(slice) / par_filter_int / par_scan_int
+//
+// Demonstrates that the slice-based data-parallel primitives produce
+// the same results as their sequential counterparts.
+
+unit main() {
+    [8]int input = [1, 2, 3, 4, 5, 6, 7, 8];
+    []int s = input;
+
+    // par_map_int(slice, fn) — square every element
+    []int squared = par_map_int(s, int(int x) { return x * x; });
+    log(squared[0]);  // 1
+    log(squared[3]);  // 16
+    log(squared[7]);  // 64
+
+    // par_reduce_int(slice, init, combine) — sum
+    int total = par_reduce_int(s, 0, int(int a, int b) { return a + b; });
+    log(total);       // 36
+
+    // par_filter_int — keep evens
+    []int evens = par_filter_int(s, bool(int x) { return x % 2 == 0; });
+    log(evens.len);   // 4
+    log(evens[0]);    // 2
+    log(evens[3]);    // 8
+
+    // par_scan_int — inclusive prefix sum
+    []int prefix = par_scan_int(s, int(int a, int b) { return a + b; });
+    log(prefix[0]);   // 1
+    log(prefix[3]);   // 10
+    log(prefix[7]);   // 36
+}

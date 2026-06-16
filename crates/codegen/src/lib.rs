@@ -370,6 +370,7 @@ impl<'a> Cx<'a> {
         self.w("    Thread* completion;   /* the Thread handle returned to user */\n");
         self.w("    int64_t wake_at_ns;\n");
         self.w("    int   waiting_fd;     /* fd if blocked on IO; -1 otherwise */\n");
+        self.w("    int   waiting_events; /* EPOLLIN/EPOLLOUT bits this waiter is interested in */\n");
         self.w("    int64_t wait_deadline_ns; /* 0 = no deadline; otherwise wake-by-this time */\n");
         self.w("    int   wait_timed_out; /* set by scheduler when deadline expires */\n");
         self.w("    struct maka_fiber_s* next;        /* ready / sleep / fd-wait queue link */\n");
@@ -387,6 +388,38 @@ impl<'a> Cx<'a> {
         self.w("static __thread int maka_anchor_wake_on_finish = 0;\n");
         self.w("static __thread int maka_epoll_fd = -1;\n");
         self.w("static __thread int64_t maka_anchor_deadline_ns = 0; /* 0 = none; otherwise scheduler caps its timeout so anchor wakes by this */\n");
+        // Per-fd reactor registration so that multiple fibers can wait on the
+        // same fd without overwriting each other's epoll entry.  Each fd
+        // tracks its currently-armed event mask; the scheduler re-computes
+        // the mask on every wake and DELs the fd when the last waiter goes.
+        self.w("typedef struct maka_fd_reg_s {\n");
+        self.w("    int fd;\n");
+        self.w("    int events_mask;        /* epoll bits currently armed */\n");
+        self.w("    struct maka_fd_reg_s* next;\n");
+        self.w("} maka_fd_reg_t;\n");
+        self.w("static __thread maka_fd_reg_t* maka_fd_regs = NULL;\n");
+        self.w("static maka_fd_reg_t* __maka_fd_reg_get(int fd) {\n");
+        self.w("    for (maka_fd_reg_t* r = maka_fd_regs; r; r = r->next) if (r->fd == fd) return r;\n");
+        self.w("    return NULL;\n");
+        self.w("}\n");
+        self.w("static maka_fd_reg_t* __maka_fd_reg_ensure(int fd) {\n");
+        self.w("    maka_fd_reg_t* r = __maka_fd_reg_get(fd);\n");
+        self.w("    if (r) return r;\n");
+        self.w("    r = (maka_fd_reg_t*)calloc(1, sizeof(maka_fd_reg_t));\n");
+        self.w("    r->fd = fd; r->events_mask = 0; r->next = maka_fd_regs; maka_fd_regs = r;\n");
+        self.w("    return r;\n");
+        self.w("}\n");
+        self.w("static void __maka_fd_recompute(int fd);     /* fwd decl */\n");
+        self.w("static void __maka_fd_arm(int fd, int events_mask);  /* fwd decl */\n");
+        self.w("static void __maka_fd_reg_drop(int fd) {\n");
+        self.w("    maka_fd_reg_t** prev = &maka_fd_regs;\n");
+        self.w("    while (*prev) {\n");
+        self.w("        if ((*prev)->fd == fd) {\n");
+        self.w("            maka_fd_reg_t* r = *prev; *prev = r->next; free(r); return;\n");
+        self.w("        }\n");
+        self.w("        prev = &(*prev)->next;\n");
+        self.w("    }\n");
+        self.w("}\n");
         self.w("static __thread maka_fiber_t* maka_fd_waiters = NULL;\n");
         self.w("#include <sys/epoll.h>\n");
         self.w("#include <poll.h>\n");
@@ -503,35 +536,47 @@ impl<'a> Cx<'a> {
         self.w("                struct epoll_event evs[32];\n");
         self.w("                int n = epoll_wait(maka_epoll_fd, evs, 32, (int)timeout_ms);\n");
         self.w("                for (int i = 0; i < n; i++) {\n");
-        self.w("                    maka_fiber_t* f = (maka_fiber_t*)evs[i].data.ptr;\n");
+        self.w("                    int evfd = evs[i].data.fd;\n");
+        self.w("                    int err_hup = evs[i].events & (EPOLLERR | EPOLLHUP);\n");
+        self.w("                    /* Wake every fiber waiting on this fd whose interest\n");
+        self.w("                       intersects the fired events, plus all of them on err/hup. */\n");
         self.w("                    maka_fiber_t** prev2 = &maka_fd_waiters;\n");
         self.w("                    while (*prev2) {\n");
-        self.w("                        if (*prev2 == f) { *prev2 = f->next; f->next = NULL; break; }\n");
-        self.w("                        prev2 = &(*prev2)->next;\n");
+        self.w("                        maka_fiber_t* w = *prev2;\n");
+        self.w("                        if (w->waiting_fd == evfd && (err_hup || (evs[i].events & w->waiting_events))) {\n");
+        self.w("                            *prev2 = w->next; w->next = NULL;\n");
+        self.w("                            w->waiting_fd = -1; w->waiting_events = 0;\n");
+        self.w("                            w->wait_deadline_ns = 0; w->wait_timed_out = 0;\n");
+        self.w("                            __maka_ready_enqueue(w);\n");
+        self.w("                        } else {\n");
+        self.w("                            prev2 = &(*prev2)->next;\n");
+        self.w("                        }\n");
         self.w("                    }\n");
-        self.w("                    f->waiting_fd = -1;\n");
-        self.w("                    f->wait_deadline_ns = 0;\n");
-        self.w("                    f->wait_timed_out = 0;\n");
-        self.w("                    __maka_ready_enqueue(f);\n");
+        self.w("                    /* Re-arm with the remaining interest, or drop. */\n");
+        self.w("                    __maka_fd_recompute(evfd);\n");
         self.w("                }\n");
         self.w("                /* After epoll, reap timed-out fd waiters. */\n");
         self.w("                int64_t now2 = __maka_now_ns();\n");
         self.w("                maka_fiber_t** prev3 = &maka_fd_waiters;\n");
+        self.w("                int timed_out_fds[32]; int n_timed_out = 0;\n");
         self.w("                while (*prev3) {\n");
         self.w("                    maka_fiber_t* f = *prev3;\n");
         self.w("                    if (f->wait_deadline_ns != 0 && f->wait_deadline_ns <= now2) {\n");
-        self.w("                        if (maka_epoll_fd >= 0 && f->waiting_fd >= 0) {\n");
-        self.w("                            epoll_ctl(maka_epoll_fd, EPOLL_CTL_DEL, f->waiting_fd, NULL);\n");
-        self.w("                        }\n");
+        self.w("                        int tfd = f->waiting_fd;\n");
         self.w("                        *prev3 = f->next; f->next = NULL;\n");
-        self.w("                        f->waiting_fd = -1;\n");
+        self.w("                        f->waiting_fd = -1; f->waiting_events = 0;\n");
         self.w("                        f->wait_deadline_ns = 0;\n");
         self.w("                        f->wait_timed_out = 1;\n");
         self.w("                        __maka_ready_enqueue(f);\n");
+        self.w("                        /* Record fd so we can recompute the per-fd mask\n");
+        self.w("                           after the walk (avoid mutating the registry while\n");
+        self.w("                           the per-waiter walk is still in flight). */\n");
+        self.w("                        if (n_timed_out < 32 && tfd >= 0) timed_out_fds[n_timed_out++] = tfd;\n");
         self.w("                    } else {\n");
         self.w("                        prev3 = &(*prev3)->next;\n");
         self.w("                    }\n");
         self.w("                }\n");
+        self.w("                for (int k = 0; k < n_timed_out; k++) __maka_fd_recompute(timed_out_fds[k]);\n");
         self.w("            } else if (have_sleepers) {\n");
         self.w("                struct timespec ts = { timeout_ms / 1000, (timeout_ms % 1000) * 1000000 };\n");
         self.w("                nanosleep(&ts, NULL);\n");
@@ -592,6 +637,7 @@ impl<'a> Cx<'a> {
         self.w("    f->completion = t;\n");
         self.w("    f->state = 0;\n");
         self.w("    f->waiting_fd = -1;\n");
+        self.w("    f->waiting_events = 0;\n");
         self.w("    f->wait_deadline_ns = 0;\n");
         self.w("    f->wait_timed_out = 0;\n");
         self.w("    getcontext(&f->ctx);\n");
@@ -623,6 +669,37 @@ impl<'a> Cx<'a> {
         // wait_fd(fd, events) parks the fiber until fd becomes ready for the
         // requested events.  Outside a fiber it falls back to poll() so the
         // same call works from any context.
+        // Arm or re-arm `fd` in epoll with `events_mask` (bitwise OR of all
+        // waiters' requests).  Drops the registration when the mask is 0.
+        self.w("static void __maka_fd_arm(int fd, int events_mask) {\n");
+        self.w("    if (maka_epoll_fd < 0) { maka_epoll_fd = epoll_create1(EPOLL_CLOEXEC); }\n");
+        self.w("    if (events_mask == 0) {\n");
+        self.w("        epoll_ctl(maka_epoll_fd, EPOLL_CTL_DEL, fd, NULL);\n");
+        self.w("        __maka_fd_reg_drop(fd);\n");
+        self.w("        return;\n");
+        self.w("    }\n");
+        self.w("    maka_fd_reg_t* r = __maka_fd_reg_ensure(fd);\n");
+        self.w("    if (r->events_mask == events_mask) return;\n");
+        self.w("    struct epoll_event ev; memset(&ev, 0, sizeof(ev));\n");
+        self.w("    ev.events = events_mask | EPOLLERR | EPOLLHUP;\n");
+        self.w("    ev.data.fd = fd;\n");
+        self.w("    if (epoll_ctl(maka_epoll_fd, EPOLL_CTL_MOD, fd, &ev) != 0) {\n");
+        self.w("        if (errno == ENOENT) epoll_ctl(maka_epoll_fd, EPOLL_CTL_ADD, fd, &ev);\n");
+        self.w("    }\n");
+        self.w("    r->events_mask = events_mask;\n");
+        self.w("}\n");
+        // Recompute the union event mask for `fd` from the remaining waiters
+        // on it and update epoll accordingly.
+        self.w("static void __maka_fd_recompute(int fd) {\n");
+        self.w("    int mask = 0;\n");
+        self.w("    for (maka_fiber_t* w = maka_fd_waiters; w; w = w->next) {\n");
+        self.w("        if (w->waiting_fd == fd) mask |= w->waiting_events;\n");
+        self.w("    }\n");
+        self.w("    __maka_fd_arm(fd, mask);\n");
+        self.w("}\n");
+        // wait_fd: park `me` waiting for `events` on `fd`.  Safe with multiple
+        // fibers parked on the same fd — each gets its own waiter entry and
+        // the per-fd registered mask is the union of all waiters' requests.
         self.w("void __maka_wait_fd(int64_t fd, int64_t events) {\n");
         self.w("    if (!maka_current_fiber || maka_current_fiber == maka_anchor_fiber) {\n");
         self.w("        struct pollfd pfd; pfd.fd = (int)fd; pfd.events = 0; pfd.revents = 0;\n");
@@ -631,21 +708,15 @@ impl<'a> Cx<'a> {
         self.w("        poll(&pfd, 1, -1);\n");
         self.w("        return;\n");
         self.w("    }\n");
-        self.w("    if (maka_epoll_fd < 0) { maka_epoll_fd = epoll_create1(EPOLL_CLOEXEC); }\n");
-        self.w("    struct epoll_event ev; memset(&ev, 0, sizeof(ev));\n");
-        self.w("    if (events & MAKA_EV_READ)  ev.events |= EPOLLIN;\n");
-        self.w("    if (events & MAKA_EV_WRITE) ev.events |= EPOLLOUT;\n");
-        self.w("    ev.events |= EPOLLONESHOT;\n");
-        self.w("    ev.data.ptr = maka_current_fiber;\n");
-        self.w("    if (epoll_ctl(maka_epoll_fd, EPOLL_CTL_MOD, (int)fd, &ev) != 0) {\n");
-        self.w("        if (errno == ENOENT) {\n");
-        self.w("            epoll_ctl(maka_epoll_fd, EPOLL_CTL_ADD, (int)fd, &ev);\n");
-        self.w("        }\n");
-        self.w("    }\n");
+        self.w("    int ep_events = 0;\n");
+        self.w("    if (events & MAKA_EV_READ)  ep_events |= EPOLLIN;\n");
+        self.w("    if (events & MAKA_EV_WRITE) ep_events |= EPOLLOUT;\n");
         self.w("    maka_current_fiber->waiting_fd = (int)fd;\n");
+        self.w("    maka_current_fiber->waiting_events = ep_events;\n");
         self.w("    maka_current_fiber->state = 5;\n");
         self.w("    maka_current_fiber->next = maka_fd_waiters;\n");
         self.w("    maka_fd_waiters = maka_current_fiber;\n");
+        self.w("    __maka_fd_recompute((int)fd);\n");
         self.w("    swapcontext(&maka_current_fiber->ctx, &maka_sched_ctx);\n");
         self.w("}\n");
         // Wall-clock helper used by every timeout primitive below.
@@ -663,21 +734,17 @@ impl<'a> Cx<'a> {
         self.w("        int r = poll(&pfd, 1, (int)ms);\n");
         self.w("        return r > 0 ? 1 : 0;\n");
         self.w("    }\n");
-        self.w("    if (maka_epoll_fd < 0) { maka_epoll_fd = epoll_create1(EPOLL_CLOEXEC); }\n");
-        self.w("    struct epoll_event ev; memset(&ev, 0, sizeof(ev));\n");
-        self.w("    if (events & MAKA_EV_READ)  ev.events |= EPOLLIN;\n");
-        self.w("    if (events & MAKA_EV_WRITE) ev.events |= EPOLLOUT;\n");
-        self.w("    ev.events |= EPOLLONESHOT;\n");
-        self.w("    ev.data.ptr = maka_current_fiber;\n");
-        self.w("    if (epoll_ctl(maka_epoll_fd, EPOLL_CTL_MOD, (int)fd, &ev) != 0) {\n");
-        self.w("        if (errno == ENOENT) { epoll_ctl(maka_epoll_fd, EPOLL_CTL_ADD, (int)fd, &ev); }\n");
-        self.w("    }\n");
+        self.w("    int ep_events = 0;\n");
+        self.w("    if (events & MAKA_EV_READ)  ep_events |= EPOLLIN;\n");
+        self.w("    if (events & MAKA_EV_WRITE) ep_events |= EPOLLOUT;\n");
         self.w("    maka_current_fiber->waiting_fd = (int)fd;\n");
+        self.w("    maka_current_fiber->waiting_events = ep_events;\n");
         self.w("    maka_current_fiber->state = 5;\n");
-        self.w("    maka_current_fiber->wait_deadline_ns = (int64_t)__maka_now_ms() * 1000000 + ms * 1000000;\n");
+        self.w("    maka_current_fiber->wait_deadline_ns = __maka_now_ns() + ms * 1000000LL;\n");
         self.w("    maka_current_fiber->wait_timed_out = 0;\n");
         self.w("    maka_current_fiber->next = maka_fd_waiters;\n");
         self.w("    maka_fd_waiters = maka_current_fiber;\n");
+        self.w("    __maka_fd_recompute((int)fd);\n");
         self.w("    swapcontext(&maka_current_fiber->ctx, &maka_sched_ctx);\n");
         self.w("    /* Scheduler resumes us either on fd event or on deadline. */\n");
         self.w("    return maka_current_fiber->wait_timed_out ? 0 : 1;\n");
@@ -891,9 +958,9 @@ impl<'a> Cx<'a> {
         self.w("    int done = t->done_flag;\n");
         self.w("    pthread_mutex_unlock(&t->done_mutex);\n");
         self.w("    if (!done) {\n");
-        self.w("        /* If the scheduler has ready/sleeping fibers, drive it instead\n");
-        self.w("           of pthread-cond-waiting (which would freeze the scheduler). */\n");
-        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head)) {\n");
+        self.w("        /* If the scheduler has ready/sleeping/fd-waiting fibers, drive\n");
+        self.w("           it instead of pthread-cond-waiting (which would freeze it). */\n");
+        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            /* Walk ready/sleep queues to find the fiber whose completion is t. */\n");
         self.w("            maka_fiber_t* target = NULL;\n");
         self.w("            for (maka_fiber_t* f = maka_ready_head; f; f = f->next) {\n");
@@ -901,6 +968,11 @@ impl<'a> Cx<'a> {
         self.w("            }\n");
         self.w("            if (!target) {\n");
         self.w("                for (maka_fiber_t* f = maka_sleep_head; f; f = f->next) {\n");
+        self.w("                    if (f->completion == t) { target = f; break; }\n");
+        self.w("                }\n");
+        self.w("            }\n");
+        self.w("            if (!target) {\n");
+        self.w("                for (maka_fiber_t* f = maka_fd_waiters; f; f = f->next) {\n");
         self.w("                    if (f->completion == t) { target = f; break; }\n");
         self.w("                }\n");
         self.w("            }\n");
@@ -920,7 +992,7 @@ impl<'a> Cx<'a> {
         self.w("                    int d = t->done_flag;\n");
         self.w("                    pthread_mutex_unlock(&t->done_mutex);\n");
         self.w("                    if (d) break;\n");
-        self.w("                    if (maka_ready_head || maka_sleep_head) {\n");
+        self.w("                    if (maka_ready_head || maka_sleep_head || maka_fd_waiters) {\n");
         self.w("                        maka_join_target = NULL;\n");
         self.w("                        swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("                        maka_current_fiber = maka_anchor_fiber;\n");
@@ -1040,20 +1112,20 @@ impl<'a> Cx<'a> {
         self.w("                prev = &(*prev)->next;\n");
         self.w("            }\n");
         self.w("        }\n");
+        self.w("        int cancelled_fd = -1;\n");
         self.w("        if (!found) {\n");
         self.w("            prev = &maka_fd_waiters;\n");
         self.w("            while (*prev) {\n");
         self.w("                if ((*prev)->completion == t) {\n");
         self.w("                    found = *prev; *prev = found->next;\n");
-        self.w("                    if (maka_epoll_fd >= 0 && found->waiting_fd >= 0) {\n");
-        self.w("                        epoll_ctl(maka_epoll_fd, EPOLL_CTL_DEL, found->waiting_fd, NULL);\n");
-        self.w("                    }\n");
+        self.w("                    cancelled_fd = found->waiting_fd;\n");
         self.w("                    break;\n");
         self.w("                }\n");
         self.w("                prev = &(*prev)->next;\n");
         self.w("            }\n");
         self.w("        }\n");
         self.w("        if (found) { __maka_slab_free(found->slab); free(found); }\n");
+        self.w("        if (cancelled_fd >= 0) __maka_fd_recompute(cancelled_fd);\n");
         self.w("    } else if (!t->is_job) {\n");
         self.w("        pthread_cancel(t->handle);\n");
         self.w("        pthread_join(t->handle, NULL);\n");
@@ -1122,21 +1194,21 @@ impl<'a> Cx<'a> {
         self.w("                            prev = &(*prev)->next;\n");
         self.w("                        }\n");
         self.w("                    }\n");
+        self.w("                    int loser_fd = -1;\n");
         self.w("                    if (!found) {\n");
         self.w("                        /* Parked in wait_fd — also remove from epoll. */\n");
         self.w("                        prev = &maka_fd_waiters;\n");
         self.w("                        while (*prev) {\n");
         self.w("                            if ((*prev)->completion == l) {\n");
         self.w("                                found = *prev; *prev = found->next;\n");
-        self.w("                                if (maka_epoll_fd >= 0 && found->waiting_fd >= 0) {\n");
-        self.w("                                    epoll_ctl(maka_epoll_fd, EPOLL_CTL_DEL, found->waiting_fd, NULL);\n");
-        self.w("                                }\n");
+        self.w("                                loser_fd = found->waiting_fd;\n");
         self.w("                                break;\n");
         self.w("                            }\n");
         self.w("                            prev = &(*prev)->next;\n");
         self.w("                        }\n");
         self.w("                    }\n");
         self.w("                    if (found) { __maka_slab_free(found->slab); free(found); }\n");
+        self.w("                    if (loser_fd >= 0) __maka_fd_recompute(loser_fd);\n");
         self.w("                    /* Mark handle done so resource cleanup proceeds. */\n");
         self.w("                    pthread_mutex_lock(&l->done_mutex);\n");
         self.w("                    l->done_flag = 1;\n");
@@ -1422,6 +1494,289 @@ impl<'a> Cx<'a> {
         self.w("        (void)__maka_join_result((maka_unit*)handles[c]);\n");
         self.w("    }\n");
         self.w("    free(handles);\n");
+        self.w("}\n");
+        // ====================================================================
+        // Slice-based data-parallel primitives (par_for_each / par_filter /
+        // par_scan / par_map_slice / par_reduce_slice).  Each works over a
+        // `[]int` slice of length `n` rather than an integer range.
+        // ====================================================================
+        self.w("typedef struct {\n");
+        self.w("    int64_t i_start, i_end;\n");
+        self.w("    int64_t* in_ptr;\n");
+        self.w("    void* env;\n");
+        self.w("    Thread* completion;\n");
+        self.w("    union { void (*body)(void*, int64_t);\n");
+        self.w("            int64_t (*fn)(void*, int64_t);\n");
+        self.w("            int (*pred)(void*, int64_t);\n");
+        self.w("            int64_t (*combine)(void*, int64_t, int64_t); } code;\n");
+        self.w("    int64_t init;     /* reduce/scan seed */\n");
+        self.w("    int64_t out_acc;  /* reduce result, scan offset */\n");
+        self.w("    int64_t* out_ptr; /* map/scan/filter output */\n");
+        self.w("    int64_t  out_len; /* filter: count written */\n");
+        self.w("} __maka_slice_chunk_t;\n");
+
+        // par_for_each: body(env, elem) for each elem
+        self.w("static void* __maka_par_each_entry(void* arg) {\n");
+        self.w("    __maka_slice_chunk_t* c = (__maka_slice_chunk_t*)arg;\n");
+        self.w("    for (int64_t i = c->i_start; i < c->i_end; i++) c->code.body(c->env, c->in_ptr[i]);\n");
+        self.w("    pthread_mutex_lock(&c->completion->done_mutex);\n");
+        self.w("    c->completion->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&c->completion->done_cond);\n");
+        self.w("    pthread_mutex_unlock(&c->completion->done_mutex);\n");
+        self.w("    free(c); return NULL;\n");
+        self.w("}\n");
+        self.w("void __maka_par_for_each_i64(Slice_maka_int s, void* code, void* env) {\n");
+        self.w("    if (s.len <= 0) return;\n");
+        self.w("    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);\n");
+        self.w("    if (nprocs < 1) nprocs = 1; if (nprocs > 16) nprocs = 16;\n");
+        self.w("    int64_t chunks = (int64_t)nprocs;\n");
+        self.w("    if (chunks > s.len) chunks = s.len;\n");
+        self.w("    int64_t per = (s.len + chunks - 1) / chunks;\n");
+        self.w("    Thread** hs = (Thread**)malloc(sizeof(Thread*) * (size_t)chunks);\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        Thread* th = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("        pthread_mutex_init(&th->done_mutex, NULL); pthread_cond_init(&th->done_cond, NULL);\n");
+        self.w("        __maka_slice_chunk_t* ch = (__maka_slice_chunk_t*)calloc(1, sizeof(__maka_slice_chunk_t));\n");
+        self.w("        ch->i_start = c * per; ch->i_end = ch->i_start + per;\n");
+        self.w("        if (ch->i_end > s.len) ch->i_end = s.len;\n");
+        self.w("        ch->in_ptr = s.ptr; ch->env = env; ch->completion = th;\n");
+        self.w("        ch->code.body = (void(*)(void*, int64_t))code;\n");
+        self.w("        pthread_create(&th->handle, NULL, __maka_par_each_entry, ch);\n");
+        self.w("        hs[c] = th;\n");
+        self.w("    }\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) (void)__maka_join_result((maka_unit*)hs[c]);\n");
+        self.w("    free(hs);\n");
+        self.w("}\n");
+
+        // par_map_int over slice: body(env, elem) -> int.  Output[i] = fn(in[i]).
+        self.w("static void* __maka_par_map_slice_entry(void* arg) {\n");
+        self.w("    __maka_slice_chunk_t* c = (__maka_slice_chunk_t*)arg;\n");
+        self.w("    for (int64_t i = c->i_start; i < c->i_end; i++) c->out_ptr[i] = c->code.fn(c->env, c->in_ptr[i]);\n");
+        self.w("    pthread_mutex_lock(&c->completion->done_mutex);\n");
+        self.w("    c->completion->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&c->completion->done_cond);\n");
+        self.w("    pthread_mutex_unlock(&c->completion->done_mutex);\n");
+        self.w("    free(c); return NULL;\n");
+        self.w("}\n");
+        self.w("Slice_maka_int __maka_par_map_int_slice(Slice_maka_int s, void* code, void* env) {\n");
+        self.w("    Slice_maka_int empty = { .ptr = NULL, .len = 0 };\n");
+        self.w("    if (s.len <= 0) return empty;\n");
+        self.w("    int64_t* out = (int64_t*)malloc(sizeof(int64_t) * (size_t)s.len);\n");
+        self.w("    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);\n");
+        self.w("    if (nprocs < 1) nprocs = 1; if (nprocs > 16) nprocs = 16;\n");
+        self.w("    int64_t chunks = (int64_t)nprocs;\n");
+        self.w("    if (chunks > s.len) chunks = s.len;\n");
+        self.w("    int64_t per = (s.len + chunks - 1) / chunks;\n");
+        self.w("    Thread** hs = (Thread**)malloc(sizeof(Thread*) * (size_t)chunks);\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        Thread* th = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("        pthread_mutex_init(&th->done_mutex, NULL); pthread_cond_init(&th->done_cond, NULL);\n");
+        self.w("        __maka_slice_chunk_t* ch = (__maka_slice_chunk_t*)calloc(1, sizeof(__maka_slice_chunk_t));\n");
+        self.w("        ch->i_start = c * per; ch->i_end = ch->i_start + per;\n");
+        self.w("        if (ch->i_end > s.len) ch->i_end = s.len;\n");
+        self.w("        ch->in_ptr = s.ptr; ch->out_ptr = out; ch->env = env; ch->completion = th;\n");
+        self.w("        ch->code.fn = (int64_t(*)(void*, int64_t))code;\n");
+        self.w("        pthread_create(&th->handle, NULL, __maka_par_map_slice_entry, ch);\n");
+        self.w("        hs[c] = th;\n");
+        self.w("    }\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) (void)__maka_join_result((maka_unit*)hs[c]);\n");
+        self.w("    free(hs);\n");
+        self.w("    Slice_maka_int res = { .ptr = out, .len = s.len };\n");
+        self.w("    return res;\n");
+        self.w("}\n");
+
+        // par_reduce over slice: per-chunk fold then sequential merge of partials.
+        self.w("static void* __maka_par_reduce_slice_entry(void* arg) {\n");
+        self.w("    __maka_slice_chunk_t* c = (__maka_slice_chunk_t*)arg;\n");
+        self.w("    int64_t acc = c->init;\n");
+        self.w("    for (int64_t i = c->i_start; i < c->i_end; i++) acc = c->code.combine(c->env, acc, c->in_ptr[i]);\n");
+        self.w("    c->out_acc = acc;\n");
+        self.w("    pthread_mutex_lock(&c->completion->done_mutex);\n");
+        self.w("    c->completion->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&c->completion->done_cond);\n");
+        self.w("    pthread_mutex_unlock(&c->completion->done_mutex);\n");
+        self.w("    return NULL;\n");
+        self.w("}\n");
+        self.w("int64_t __maka_par_reduce_int_slice(Slice_maka_int s, int64_t init, void* code, void* env) {\n");
+        self.w("    if (s.len <= 0) return init;\n");
+        self.w("    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);\n");
+        self.w("    if (nprocs < 1) nprocs = 1; if (nprocs > 16) nprocs = 16;\n");
+        self.w("    int64_t chunks = (int64_t)nprocs;\n");
+        self.w("    if (chunks > s.len) chunks = s.len;\n");
+        self.w("    int64_t per = (s.len + chunks - 1) / chunks;\n");
+        self.w("    Thread** hs = (Thread**)malloc(sizeof(Thread*) * (size_t)chunks);\n");
+        self.w("    __maka_slice_chunk_t** chs = (__maka_slice_chunk_t**)malloc(sizeof(void*) * (size_t)chunks);\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        Thread* th = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("        pthread_mutex_init(&th->done_mutex, NULL); pthread_cond_init(&th->done_cond, NULL);\n");
+        self.w("        __maka_slice_chunk_t* ch = (__maka_slice_chunk_t*)calloc(1, sizeof(__maka_slice_chunk_t));\n");
+        self.w("        ch->i_start = c * per; ch->i_end = ch->i_start + per;\n");
+        self.w("        if (ch->i_end > s.len) ch->i_end = s.len;\n");
+        self.w("        ch->in_ptr = s.ptr; ch->env = env; ch->completion = th; ch->init = init;\n");
+        self.w("        ch->code.combine = (int64_t(*)(void*, int64_t, int64_t))code;\n");
+        self.w("        chs[c] = ch;\n");
+        self.w("        pthread_create(&th->handle, NULL, __maka_par_reduce_slice_entry, ch);\n");
+        self.w("        hs[c] = th;\n");
+        self.w("    }\n");
+        self.w("    int64_t acc = init;\n");
+        self.w("    int64_t (*combine)(void*, int64_t, int64_t) = (int64_t(*)(void*, int64_t, int64_t))code;\n");
+        self.w("    int merged_first = 0;\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        pthread_join(hs[c]->handle, NULL);\n");
+        self.w("        if (!merged_first) { acc = chs[c]->out_acc; merged_first = 1; }\n");
+        self.w("        else { acc = combine(env, acc, chs[c]->out_acc); }\n");
+        self.w("        pthread_mutex_destroy(&hs[c]->done_mutex);\n");
+        self.w("        pthread_cond_destroy(&hs[c]->done_cond);\n");
+        self.w("        free(hs[c]); free(chs[c]);\n");
+        self.w("    }\n");
+        self.w("    free(hs); free(chs);\n");
+        self.w("    return acc;\n");
+        self.w("}\n");
+
+        // par_filter_int: 2-pass parallel filter.  Pass 1 marks predicate
+        // result in a flag array; pass 2 prefix-sums-then-scatters into output.
+        // For simplicity in v1, do this sequentially in chunks then concat.
+        self.w("static void* __maka_par_filter_entry(void* arg) {\n");
+        self.w("    __maka_slice_chunk_t* c = (__maka_slice_chunk_t*)arg;\n");
+        self.w("    int64_t w = 0;\n");
+        self.w("    for (int64_t i = c->i_start; i < c->i_end; i++) {\n");
+        self.w("        int64_t v = c->in_ptr[i];\n");
+        self.w("        if (c->code.pred(c->env, v)) c->out_ptr[w++] = v;\n");
+        self.w("    }\n");
+        self.w("    c->out_len = w;\n");
+        self.w("    pthread_mutex_lock(&c->completion->done_mutex);\n");
+        self.w("    c->completion->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&c->completion->done_cond);\n");
+        self.w("    pthread_mutex_unlock(&c->completion->done_mutex);\n");
+        self.w("    return NULL;\n");
+        self.w("}\n");
+        self.w("Slice_maka_int __maka_par_filter_int(Slice_maka_int s, void* code, void* env) {\n");
+        self.w("    Slice_maka_int empty = { .ptr = NULL, .len = 0 };\n");
+        self.w("    if (s.len <= 0) return empty;\n");
+        self.w("    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);\n");
+        self.w("    if (nprocs < 1) nprocs = 1; if (nprocs > 16) nprocs = 16;\n");
+        self.w("    int64_t chunks = (int64_t)nprocs;\n");
+        self.w("    if (chunks > s.len) chunks = s.len;\n");
+        self.w("    int64_t per = (s.len + chunks - 1) / chunks;\n");
+        self.w("    int64_t* tmp = (int64_t*)malloc(sizeof(int64_t) * (size_t)s.len);\n");
+        self.w("    Thread** hs = (Thread**)malloc(sizeof(Thread*) * (size_t)chunks);\n");
+        self.w("    __maka_slice_chunk_t** chs = (__maka_slice_chunk_t**)malloc(sizeof(void*) * (size_t)chunks);\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        Thread* th = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("        pthread_mutex_init(&th->done_mutex, NULL); pthread_cond_init(&th->done_cond, NULL);\n");
+        self.w("        __maka_slice_chunk_t* ch = (__maka_slice_chunk_t*)calloc(1, sizeof(__maka_slice_chunk_t));\n");
+        self.w("        ch->i_start = c * per; ch->i_end = ch->i_start + per;\n");
+        self.w("        if (ch->i_end > s.len) ch->i_end = s.len;\n");
+        self.w("        ch->in_ptr = s.ptr; ch->out_ptr = tmp + ch->i_start;\n");
+        self.w("        ch->env = env; ch->completion = th;\n");
+        self.w("        ch->code.pred = (int(*)(void*, int64_t))code;\n");
+        self.w("        chs[c] = ch;\n");
+        self.w("        pthread_create(&th->handle, NULL, __maka_par_filter_entry, ch);\n");
+        self.w("        hs[c] = th;\n");
+        self.w("    }\n");
+        self.w("    int64_t total = 0;\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        pthread_join(hs[c]->handle, NULL);\n");
+        self.w("        total += chs[c]->out_len;\n");
+        self.w("    }\n");
+        self.w("    int64_t* out = (int64_t*)malloc(sizeof(int64_t) * (size_t)(total > 0 ? total : 1));\n");
+        self.w("    int64_t w = 0;\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        memcpy(out + w, tmp + chs[c]->i_start, sizeof(int64_t) * (size_t)chs[c]->out_len);\n");
+        self.w("        w += chs[c]->out_len;\n");
+        self.w("        pthread_mutex_destroy(&hs[c]->done_mutex);\n");
+        self.w("        pthread_cond_destroy(&hs[c]->done_cond);\n");
+        self.w("        free(hs[c]); free(chs[c]);\n");
+        self.w("    }\n");
+        self.w("    free(hs); free(chs); free(tmp);\n");
+        self.w("    Slice_maka_int res = { .ptr = out, .len = total };\n");
+        self.w("    return res;\n");
+        self.w("}\n");
+
+        // par_scan_int: 2-pass parallel inclusive scan with associative combine.
+        // Pass 1: each chunk computes local prefix into the output slice.
+        // Pass 2: cross-chunk offsets are added in via combine.
+        self.w("static void* __maka_par_scan_local_entry(void* arg) {\n");
+        self.w("    __maka_slice_chunk_t* c = (__maka_slice_chunk_t*)arg;\n");
+        self.w("    if (c->i_start < c->i_end) {\n");
+        self.w("        int64_t acc = c->in_ptr[c->i_start];\n");
+        self.w("        c->out_ptr[c->i_start] = acc;\n");
+        self.w("        for (int64_t i = c->i_start + 1; i < c->i_end; i++) {\n");
+        self.w("            acc = c->code.combine(c->env, acc, c->in_ptr[i]);\n");
+        self.w("            c->out_ptr[i] = acc;\n");
+        self.w("        }\n");
+        self.w("        c->out_acc = acc;\n");
+        self.w("    }\n");
+        self.w("    pthread_mutex_lock(&c->completion->done_mutex);\n");
+        self.w("    c->completion->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&c->completion->done_cond);\n");
+        self.w("    pthread_mutex_unlock(&c->completion->done_mutex);\n");
+        self.w("    return NULL;\n");
+        self.w("}\n");
+        self.w("static void* __maka_par_scan_offset_entry(void* arg) {\n");
+        self.w("    __maka_slice_chunk_t* c = (__maka_slice_chunk_t*)arg;\n");
+        self.w("    for (int64_t i = c->i_start; i < c->i_end; i++) {\n");
+        self.w("        c->out_ptr[i] = c->code.combine(c->env, c->init, c->out_ptr[i]);\n");
+        self.w("    }\n");
+        self.w("    pthread_mutex_lock(&c->completion->done_mutex);\n");
+        self.w("    c->completion->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&c->completion->done_cond);\n");
+        self.w("    pthread_mutex_unlock(&c->completion->done_mutex);\n");
+        self.w("    return NULL;\n");
+        self.w("}\n");
+        self.w("Slice_maka_int __maka_par_scan_int(Slice_maka_int s, void* code, void* env) {\n");
+        self.w("    Slice_maka_int empty = { .ptr = NULL, .len = 0 };\n");
+        self.w("    if (s.len <= 0) return empty;\n");
+        self.w("    int64_t* out = (int64_t*)malloc(sizeof(int64_t) * (size_t)s.len);\n");
+        self.w("    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);\n");
+        self.w("    if (nprocs < 1) nprocs = 1; if (nprocs > 16) nprocs = 16;\n");
+        self.w("    int64_t chunks = (int64_t)nprocs;\n");
+        self.w("    if (chunks > s.len) chunks = s.len;\n");
+        self.w("    int64_t per = (s.len + chunks - 1) / chunks;\n");
+        self.w("    Thread** hs = (Thread**)malloc(sizeof(Thread*) * (size_t)chunks);\n");
+        self.w("    __maka_slice_chunk_t** chs = (__maka_slice_chunk_t**)malloc(sizeof(void*) * (size_t)chunks);\n");
+        self.w("    int64_t (*combine)(void*, int64_t, int64_t) = (int64_t(*)(void*, int64_t, int64_t))code;\n");
+        self.w("    /* pass 1: per-chunk local prefix */\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        Thread* th = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("        pthread_mutex_init(&th->done_mutex, NULL); pthread_cond_init(&th->done_cond, NULL);\n");
+        self.w("        __maka_slice_chunk_t* ch = (__maka_slice_chunk_t*)calloc(1, sizeof(__maka_slice_chunk_t));\n");
+        self.w("        ch->i_start = c * per; ch->i_end = ch->i_start + per;\n");
+        self.w("        if (ch->i_end > s.len) ch->i_end = s.len;\n");
+        self.w("        ch->in_ptr = s.ptr; ch->out_ptr = out; ch->env = env; ch->completion = th;\n");
+        self.w("        ch->code.combine = combine;\n");
+        self.w("        chs[c] = ch;\n");
+        self.w("        pthread_create(&th->handle, NULL, __maka_par_scan_local_entry, ch);\n");
+        self.w("        hs[c] = th;\n");
+        self.w("    }\n");
+        self.w("    int64_t* offsets = (int64_t*)malloc(sizeof(int64_t) * (size_t)chunks);\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        pthread_join(hs[c]->handle, NULL);\n");
+        self.w("        offsets[c] = chs[c]->out_acc;\n");
+        self.w("        pthread_mutex_destroy(&hs[c]->done_mutex);\n");
+        self.w("        pthread_cond_destroy(&hs[c]->done_cond);\n");
+        self.w("        free(hs[c]);\n");
+        self.w("    }\n");
+        self.w("    /* pass 2: apply running offset across chunks (chunk 0 stays). */\n");
+        self.w("    int64_t running = offsets[0];\n");
+        self.w("    for (int64_t c = 1; c < chunks; c++) {\n");
+        self.w("        Thread* th = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("        pthread_mutex_init(&th->done_mutex, NULL); pthread_cond_init(&th->done_cond, NULL);\n");
+        self.w("        chs[c]->completion = th; chs[c]->init = running;\n");
+        self.w("        pthread_create(&th->handle, NULL, __maka_par_scan_offset_entry, chs[c]);\n");
+        self.w("        hs[c] = th;\n");
+        self.w("        running = combine(env, running, offsets[c]);\n");
+        self.w("    }\n");
+        self.w("    for (int64_t c = 1; c < chunks; c++) {\n");
+        self.w("        pthread_join(hs[c]->handle, NULL);\n");
+        self.w("        pthread_mutex_destroy(&hs[c]->done_mutex);\n");
+        self.w("        pthread_cond_destroy(&hs[c]->done_cond);\n");
+        self.w("        free(hs[c]); free(chs[c]);\n");
+        self.w("    }\n");
+        self.w("    free(chs[0]);\n");
+        self.w("    free(hs); free(chs); free(offsets);\n");
+        self.w("    Slice_maka_int res = { .ptr = out, .len = s.len };\n");
+        self.w("    return res;\n");
         self.w("}\n");
         self.w("\n");
     }
@@ -2993,6 +3348,67 @@ impl<'a> Cx<'a> {
                         );
                     }
                     return "0".into();
+                }
+                // par_for_each(slice, body)
+                if callee.0 == u32::MAX - 27 {
+                    if args.len() == 2 {
+                        let s = self.emit_expr(f, &args[0]);
+                        let b = self.emit_expr(f, &args[1]);
+                        return format!(
+                            "(__maka_par_for_each_i64(({0}), (({1}).code), (({1}).env)), MAKA_UNIT)",
+                            s, b
+                        );
+                    }
+                    return "MAKA_UNIT".into();
+                }
+                // par_map_int(slice, fn)
+                if callee.0 == u32::MAX - 28 {
+                    if args.len() == 2 {
+                        let s = self.emit_expr(f, &args[0]);
+                        let b = self.emit_expr(f, &args[1]);
+                        return format!(
+                            "__maka_par_map_int_slice(({0}), (({1}).code), (({1}).env))",
+                            s, b
+                        );
+                    }
+                    return "(Slice_maka_int){0}".into();
+                }
+                // par_reduce_int(slice, init, combine)
+                if callee.0 == u32::MAX - 29 {
+                    if args.len() == 3 {
+                        let s = self.emit_expr(f, &args[0]);
+                        let init = self.emit_expr(f, &args[1]);
+                        let b = self.emit_expr(f, &args[2]);
+                        return format!(
+                            "__maka_par_reduce_int_slice(({0}), (int64_t)({1}), (({2}).code), (({2}).env))",
+                            s, init, b
+                        );
+                    }
+                    return "0".into();
+                }
+                // par_filter_int(slice, pred)
+                if callee.0 == u32::MAX - 30 {
+                    if args.len() == 2 {
+                        let s = self.emit_expr(f, &args[0]);
+                        let b = self.emit_expr(f, &args[1]);
+                        return format!(
+                            "__maka_par_filter_int(({0}), (({1}).code), (({1}).env))",
+                            s, b
+                        );
+                    }
+                    return "(Slice_maka_int){0}".into();
+                }
+                // par_scan_int(slice, combine)
+                if callee.0 == u32::MAX - 31 {
+                    if args.len() == 2 {
+                        let s = self.emit_expr(f, &args[0]);
+                        let b = self.emit_expr(f, &args[1]);
+                        return format!(
+                            "__maka_par_scan_int(({0}), (({1}).code), (({1}).env))",
+                            s, b
+                        );
+                    }
+                    return "(Slice_maka_int){0}".into();
                 }
                 // Built-in `select_timeout(slice, int) -> int`.
                 if callee.0 == u32::MAX - 26 {
