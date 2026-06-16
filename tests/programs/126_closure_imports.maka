@@ -1,0 +1,13 @@
+// Closure bodies inherit imports from their enclosing function.
+// Before the fix, `sleep_ms` inside the spawn closure required a
+// module-level helper.  Now it resolves directly.
+
+import std.sleep_ms;
+
+unit main() {
+    *Thread t = spawn(unit() {
+        sleep_ms(1);
+        log(42);
+    });
+    join(t);
+}

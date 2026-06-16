@@ -48,22 +48,34 @@ impl std::fmt::Display for SemaWarning {
 /// Replaces each lambda expression with `Expr::Ident("__lambda_<N>")`.
 fn lambda_lift(mut m: maka_ast::Module) -> maka_ast::Module {
     let mut counter: u32 = 0;
-    let mut new_funcs: Vec<maka_ast::FuncDecl> = Vec::new();
-    for item in &mut m.items {
+    // Group the lifted lambdas by the enclosing item's index so that we can
+    // copy that item's module path + imports onto the synthesized FuncDecl.
+    // Without this, closure bodies can't call any non-`pub`/non-imported name
+    // that the enclosing function relied on (e.g. `sleep_ms` from std).
+    let mut lifted: Vec<(usize, maka_ast::FuncDecl)> = Vec::new();
+    for (idx, item) in m.items.iter_mut().enumerate() {
+        let mut bucket: Vec<maka_ast::FuncDecl> = Vec::new();
         match item {
             maka_ast::Item::Func(f) => {
-                lift_block(&mut f.body, &mut counter, &mut new_funcs);
+                lift_block(&mut f.body, &mut counter, &mut bucket);
             }
             maka_ast::Item::Logic(l) => {
                 for f in &mut l.funcs {
-                    lift_block(&mut f.body, &mut counter, &mut new_funcs);
+                    lift_block(&mut f.body, &mut counter, &mut bucket);
                 }
             }
             _ => {}
         }
+        for nf in bucket { lifted.push((idx, nf)); }
     }
-    for nf in new_funcs {
+    for (src_idx, nf) in lifted {
+        let module_path = m.item_modules.get(src_idx).cloned().unwrap_or_default();
+        let imports = m.item_imports.get(src_idx).cloned().unwrap_or_default();
+        let has_imports = m.item_has_imports.get(src_idx).cloned().unwrap_or_default();
         m.items.push(maka_ast::Item::Func(nf));
+        m.item_modules.push(module_path);
+        m.item_imports.push(imports);
+        m.item_has_imports.push(has_imports);
     }
     m
 }

@@ -2562,6 +2562,23 @@ impl<'a> TypeChecker<'a> {
                 (Ptr { .. }, Ptr { .. }) => CastKind::Reinterpret,
                 // References can be read as addresses — safe, just looking at the pointer value.
                 (Ref { .. }, SizedInt { bits: 0, .. }) | (Ref { .. }, Int) => CastKind::Reinterpret,
+                // &T  →  *T  is the FFI bridge: same address, narrower lifetime tracking
+                //               drops to "non-owning". The pointee still aliases the
+                //               source binding's memory, so this is no less safe than
+                //               *T → *U (which is already allowed without unsafe).
+                (Ref { .. }, Ptr { .. }) => CastKind::Reinterpret,
+                // &T → raw *T is the explicit FFI escape; require `unsafe { }` so the
+                // call site visibly opts out of borrow tracking.
+                (Ref { .. }, RawPtr { .. }) => {
+                    if self.in_unsafe == 0 {
+                        self.err(
+                            "casting a reference to a `raw *T` drops borrow tracking; \
+                             wrap the cast in an `unsafe { ... }` block".to_string(),
+                            sp,
+                        );
+                    }
+                    CastKind::Reinterpret
+                }
                 // own *T and own &T can also expose their address (no ownership transfer).
                 (OwnPtr { .. }, SizedInt { bits: 0, .. }) | (OwnPtr { .. }, Int) => CastKind::Reinterpret,
                 (Heap { .. }, SizedInt { bits: 0, .. }) | (Heap { .. }, Int) => CastKind::Reinterpret,
@@ -2667,6 +2684,13 @@ impl<'a> TypeChecker<'a> {
         let lifted_name = format!("__lambda_cap_{}", env_idx);
         let env_ref_ty = HType::Ref { mutable: false, inner: Box::new(HType::Struct(env_struct_id)) };
         let mut sub = TypeChecker::new_with_logic(self.sym, None);
+        // Inherit the enclosing function's imports / has-imports / module path
+        // so closure bodies can call the same names that worked in the outer
+        // scope (e.g. `sleep_ms` imported from std).
+        sub.cur_module = self.cur_module.clone();
+        sub.cur_imports = self.cur_imports.clone();
+        sub.cur_has_imports = self.cur_has_imports.clone();
+        sub.cur_where_bounds = self.cur_where_bounds.clone();
         sub.enter_scope();
 
         // First param: the env reference.
@@ -2734,10 +2758,10 @@ impl<'a> TypeChecker<'a> {
             is_gate: false,
             is_variadic: false,
             is_pub: false,
-            module_path: Vec::new(),
-            imports: Vec::new(),
-            has_imports: Vec::new(),
-            where_bounds: Vec::new(),
+            module_path: self.cur_module.clone(),
+            imports: self.cur_imports.clone(),
+            has_imports: self.cur_has_imports.clone(),
+            where_bounds: self.cur_where_bounds.clone(),
         });
         self.synth_funcs.push(synth_func);
 

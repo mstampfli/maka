@@ -1,0 +1,48 @@
+// Gap 1 regression: select() must remove fd-parked losers from the
+// reactor's waiter list — not just from ready/sleep — otherwise the
+// loser fiber leaks and the next epoll event dereferences freed state.
+//
+// Setup: open a pipe, give it nothing.  Spawn three fibers:
+//   - winner: sleeps 5 ms, then logs
+//   - loser_a: parks in wait_fd on the read end forever
+//   - loser_b: also parks in wait_fd on the read end forever
+// select() picks the winner; the two fd-parked losers get reaped.
+
+import std.{sleep_ms, wait_fd, set_nonblock, EV_READ};
+
+cblock "
+    #include <unistd.h>
+    static int __mk_rfd = -1, __mk_wfd = -1;
+    static int __mk_open_pipe(void) {
+        int fds[2];
+        if (pipe(fds) != 0) return -1;
+        __mk_rfd = fds[0]; __mk_wfd = fds[1];
+        return 0;
+    }
+    static int __mk_rfd_get(void) { return __mk_rfd; }
+";
+extern i32 __mk_open_pipe();
+extern i32 __mk_rfd_get();
+
+unit winner_body() {
+    sleep_ms(5);
+    log(1);
+}
+unit loser_body() {
+    wait_fd(__mk_rfd_get() as int, EV_READ);
+    log(99);     // never reached — cancelled
+}
+
+unit main() {
+    _ = __mk_open_pipe();
+    _ = set_nonblock(__mk_rfd_get() as int);
+
+    [3]*Thread handles = [
+        spawn(unit() { loser_body();  }),
+        spawn(unit() { winner_body(); }),
+        spawn(unit() { loser_body();  }),
+    ];
+    []*Thread s = handles;
+    select(s);
+    log(0);
+}

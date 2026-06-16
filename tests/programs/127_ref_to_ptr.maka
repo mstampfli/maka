@@ -1,0 +1,17 @@
+// `&T` and `&mut T` cast to `*T` and `*mut T` for FFI.  C-side helpers
+// take out-parameters via real pointers, and Maka calls them with a
+// plain `&x as *mut T` — no cblock indirection needed.
+
+cblock "
+    static void __mk_set_pair(int* a, int* b) { *a = 7; *b = 11; }
+";
+
+extern unit __mk_set_pair(*mut i32 a, *mut i32 b);
+
+unit main() {
+    mut i32 x = 0;
+    mut i32 y = 0;
+    __mk_set_pair(&mut x as *mut i32, &mut y as *mut i32);
+    log(x as int);
+    log(y as int);
+}

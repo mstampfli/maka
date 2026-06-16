@@ -2,13 +2,11 @@
 // cancelled.  The 10ms fiber wins; the 100ms / 200ms losers never log.
 import std.{sleep_ms};
 
-unit short_sleep(int ms) { sleep_ms(ms); }
-
 unit main() {
     [3]*Thread handles = [
-        spawn(unit() { short_sleep(100); log(1); }),
-        spawn(unit() { short_sleep(10);  log(2); }),   // winner
-        spawn(unit() { short_sleep(200); log(3); }),
+        spawn(unit() { sleep_ms(100); log(1); }),
+        spawn(unit() { sleep_ms(10);  log(2); }),   // winner
+        spawn(unit() { sleep_ms(200); log(3); }),
     ];
     []*Thread s = handles;
     select(s);
