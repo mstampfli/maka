@@ -83,12 +83,16 @@ pub int pipe_write_fd() { return __pipe_write_fd(); }
 // TLS client (OpenSSL).  Requires the C source to be compiled with
 // -DMAKA_TLS and linked with `-l ssl -l crypto` — otherwise these
 // helpers return -1 / NULL so user programs still compile cleanly.
-extern "__maka_tls_client_new" *unit __tls_client_new(int fd, string hostname);
+extern "__maka_tls_server_init"        int   __tls_server_init(string cert_pem, string key_pem);
+extern "__maka_tls_server_accept_new"  *unit __tls_server_accept_new(int fd);
+extern "__maka_tls_client_new"         *unit __tls_client_new(int fd, string hostname);
 extern "__maka_tls_handshake"   int  __tls_handshake(*unit ssl);
 extern "__maka_tls_read"        int  __tls_read(*unit ssl, *mut unit buf, int cap);
 extern "__maka_tls_write"       int  __tls_write(*unit ssl, *mut unit buf, int len);
 extern "__maka_tls_close"       unit __tls_close(*unit ssl);
 
+pub int   tls_server_init(string cert_pem_path, string key_pem_path) { return __tls_server_init(cert_pem_path, key_pem_path); }
+pub *unit tls_server_accept(int client_fd)                            { return __tls_server_accept_new(client_fd); }
 pub *unit tls_client_new(int fd, string hostname)               { return __tls_client_new(fd, hostname); }
 pub int   tls_handshake (*unit ssl)                              { return __tls_handshake(ssl); }
 pub int   tls_read      (*unit ssl, *mut unit buf, int cap)      { return __tls_read(ssl, buf, cap); }
