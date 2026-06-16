@@ -281,19 +281,10 @@ impl<'a> Cx<'a> {
         self.w("    pthread_cond_signal(&c->c);\n");
         self.w("    pthread_mutex_unlock(&c->m);\n");
         self.w("}\n");
-        self.w("void maka_chan_bytes_recv(maka_unit* p, maka_unit* dst) {\n");
-        self.w("    maka_bchan_t* c = (maka_bchan_t*)p;\n");
-        self.w("    pthread_mutex_lock(&c->m);\n");
-        self.w("    while (!c->head && !c->closed) pthread_cond_wait(&c->c, &c->m);\n");
-        self.w("    maka_bnode_t* n = c->head;\n");
-        self.w("    if (n) {\n");
-        self.w("        c->head = n->next; if (!c->head) c->tail = NULL;\n");
-        self.w("        c->count--;\n");
-        self.w("        memcpy((void*)dst, n->data, (size_t)c->item_size);\n");
-        self.w("    } else { memset((void*)dst, 0, (size_t)c->item_size); }\n");
-        self.w("    pthread_mutex_unlock(&c->m);\n");
-        self.w("    free(n);\n");
-        self.w("}\n");
+        // recv is defined later (after the scheduler) so it can yield via
+        // swapcontext when called from the anchor with other fiber work
+        // ready.  Forward declaration so other early code can reference it.
+        self.w("void maka_chan_bytes_recv(maka_unit* p, maka_unit* dst);\n");
         self.w("int64_t maka_chan_bytes_count(maka_unit* p) {\n");
         self.w("    maka_bchan_t* c = (maka_bchan_t*)p;\n");
         self.w("    pthread_mutex_lock(&c->m);\n");
@@ -2082,6 +2073,39 @@ impl<'a> Cx<'a> {
         self.w("    maka_once_t* o = (maka_once_t*)p;\n");
         self.w("    pthread_mutex_destroy(&o->mu); pthread_cond_destroy(&o->cv);\n");
         self.w("    free(o);\n");
+        self.w("}\n");
+        // Fiber-aware byte-channel recv.  On the anchor with pending fiber
+        // work, drive the scheduler in short bursts so other fibers can run
+        // (and possibly post to the channel) instead of blocking the worker.
+        self.w("void maka_chan_bytes_recv(maka_unit* p, maka_unit* dst) {\n");
+        self.w("    maka_bchan_t* c = (maka_bchan_t*)p;\n");
+        self.w("    while (1) {\n");
+        self.w("        pthread_mutex_lock(&c->m);\n");
+        self.w("        maka_bnode_t* n = c->head;\n");
+        self.w("        if (n) {\n");
+        self.w("            c->head = n->next; if (!c->head) c->tail = NULL;\n");
+        self.w("            c->count--;\n");
+        self.w("            memcpy((void*)dst, n->data, (size_t)c->item_size);\n");
+        self.w("            pthread_mutex_unlock(&c->m);\n");
+        self.w("            free(n);\n");
+        self.w("            return;\n");
+        self.w("        }\n");
+        self.w("        if (c->closed) {\n");
+        self.w("            memset((void*)dst, 0, (size_t)c->item_size);\n");
+        self.w("            pthread_mutex_unlock(&c->m);\n");
+        self.w("            return;\n");
+        self.w("        }\n");
+        self.w("        pthread_mutex_unlock(&c->m);\n");
+        self.w("        if (maka_sched_inited && maka_current_fiber == maka_anchor_fiber\n");
+        self.w("            && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("            continue;\n");
+        self.w("        }\n");
+        self.w("        pthread_mutex_lock(&c->m);\n");
+        self.w("        while (!c->head && !c->closed) pthread_cond_wait(&c->c, &c->m);\n");
+        self.w("        pthread_mutex_unlock(&c->m);\n");
+        self.w("    }\n");
         self.w("}\n");
         // ====================================================================
         // Slice-based data-parallel primitives (par_for_each / par_filter /

@@ -1,0 +1,20 @@
+// Fiber-aware byte channel: producer fiber sends, consumer (anchor)
+// receives.  If chan_bytes_recv weren't fiber-aware, the anchor would
+// pthread_cond_wait and the producer fiber would never get to run.
+
+import std.{chan_bytes_new, chan_bytes_send, chan_bytes_recv, chan_bytes_destroy};
+
+unit producer_body(*unit ch) {
+    mut int x = 99;
+    chan_bytes_send(ch, &mut x as *mut unit);
+}
+
+unit main() {
+    *unit ch = chan_bytes_new(8);
+    *Thread p = spawn(unit() [ch] { producer_body(ch); });
+    mut int out = 0;
+    chan_bytes_recv(ch, &mut out as *mut unit);   // yields to scheduler if empty
+    join(p);
+    log(out);   // 99
+    chan_bytes_destroy(ch);
+}
