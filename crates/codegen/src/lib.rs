@@ -185,9 +185,32 @@ impl<'a> Cx<'a> {
         self.w("#include <io.h>\n");
         self.w("#include <fcntl.h>\n");
         self.w("typedef SSIZE_T ssize_t;\n");
-        // Provide POSIX pipe() in terms of mingw's _pipe so user cblocks
-        // and the runtime can both call `pipe(int[2])`.
-        self.w("static inline int pipe(int* fds) { return _pipe(fds, 4096, _O_BINARY); }\n");
+        // pipe() on Windows: emulate with a TCP loopback socket pair so
+        // that WSAPoll can wait on the read fd in the reactor.  Otherwise
+        // _pipe() returns CRT file descriptors that WSAPoll can't poll.
+        // The fds returned ARE SOCKETs cast to int — callers can use
+        // recv/send (mapped by our shim) and closesocket transparently.
+        self.w("static inline int pipe(int* fds) {\n");
+        self.w("    SOCKET listener = socket(AF_INET, SOCK_STREAM, 0);\n");
+        self.w("    if (listener == INVALID_SOCKET) return -1;\n");
+        self.w("    struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));\n");
+        self.w("    addr.sin_family = AF_INET;\n");
+        self.w("    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);\n");
+        self.w("    addr.sin_port = 0;\n");
+        self.w("    if (bind(listener, (struct sockaddr*)&addr, sizeof(addr)) != 0) { closesocket(listener); return -1; }\n");
+        self.w("    int alen = sizeof(addr);\n");
+        self.w("    if (getsockname(listener, (struct sockaddr*)&addr, &alen) != 0) { closesocket(listener); return -1; }\n");
+        self.w("    if (listen(listener, 1) != 0) { closesocket(listener); return -1; }\n");
+        self.w("    SOCKET writer = socket(AF_INET, SOCK_STREAM, 0);\n");
+        self.w("    if (writer == INVALID_SOCKET) { closesocket(listener); return -1; }\n");
+        self.w("    if (connect(writer, (struct sockaddr*)&addr, sizeof(addr)) != 0) { closesocket(listener); closesocket(writer); return -1; }\n");
+        self.w("    SOCKET reader = accept(listener, NULL, NULL);\n");
+        self.w("    closesocket(listener);\n");
+        self.w("    if (reader == INVALID_SOCKET) { closesocket(writer); return -1; }\n");
+        self.w("    fds[0] = (int)reader;\n");
+        self.w("    fds[1] = (int)writer;\n");
+        self.w("    return 0;\n");
+        self.w("}\n");
         self.w("static inline long getline(char** buf, size_t* cap, FILE* f) {\n");
         self.w("    (void)cap; if (!*buf) *buf = (char*)malloc(4096);\n");
         self.w("    if (!fgets(*buf, 4096, f)) return -1;\n");
@@ -1337,6 +1360,7 @@ impl<'a> Cx<'a> {
         // reference them by their __maka_ names from the rest of the file.
         self.w("/* TCP runtime — scoped includes to avoid name clashes. */\n");
         self.w("static inline int64_t __maka_tcp_listen(int64_t port, int64_t backlog);\n");
+        self.w("static inline int64_t __maka_tcp_listen_any(int64_t port, int64_t backlog);\n");
         self.w("static inline int64_t __maka_udp_open(int64_t port);\n");
         self.w("static inline int64_t __maka_udp_send_v4(int64_t fd, int64_t a, int64_t b, int64_t c, int64_t d, int64_t port, maka_unit* buf, int64_t len);\n");
         self.w("static inline int64_t __maka_udp_recv_async(int64_t fd, maka_unit* buf, int64_t cap);\n");
@@ -3361,7 +3385,28 @@ impl<'a> Cx<'a> {
         self.w("#define __MAKA_SOL_SOCKET  1\n");
         self.w("#define __MAKA_SO_REUSEADDR 2\n");
         self.w("#define __MAKA_SO_ERROR    4\n");
+        // tcp_listen binds to 127.0.0.1 — safer default that doesn't trip the
+        // Windows firewall prompt on every fresh binary.  For public servers
+        // that need to accept external connections, use tcp_listen_any below.
         self.w("static inline int64_t __maka_tcp_listen(int64_t port, int64_t backlog) {\n");
+        self.w("    int s = socket(__MAKA_AF_INET, __MAKA_SOCK_STREAM, 0);\n");
+        self.w("    if (s < 0) return -1;\n");
+        self.w("    int one = 1;\n");
+        self.w("    setsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_REUSEADDR, &one, sizeof(one));\n");
+        self.w("    struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n");
+        self.w("    sa.sin_family = __MAKA_AF_INET;\n");
+        self.w("    sa.sin_addr.s_addr = htonl(0x7F000001u);   /* 127.0.0.1 */\n");
+        self.w("    sa.sin_port = htons((unsigned short)port);\n");
+        self.w("    if (bind(s, (struct sockaddr*)&sa, sizeof(sa)) != 0) { close(s); return -1; }\n");
+        self.w("    if (listen(s, (int)backlog) != 0) { close(s); return -1; }\n");
+        self.w("    int flags = fcntl(s, F_GETFL, 0);\n");
+        self.w("    fcntl(s, F_SETFL, flags | O_NONBLOCK);\n");
+        self.w("    return s;\n");
+        self.w("}\n");
+        // Same as tcp_listen but binds INADDR_ANY (0.0.0.0) — accepts on all
+        // interfaces.  On Windows the firewall will prompt the first time
+        // a binary calls this.  Use for production servers.
+        self.w("static inline int64_t __maka_tcp_listen_any(int64_t port, int64_t backlog) {\n");
         self.w("    int s = socket(__MAKA_AF_INET, __MAKA_SOCK_STREAM, 0);\n");
         self.w("    if (s < 0) return -1;\n");
         self.w("    int one = 1;\n");
