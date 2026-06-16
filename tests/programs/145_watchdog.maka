@@ -1,0 +1,20 @@
+// Watchdog demo: when MAKA_WATCHDOG_MS is set, a global thread watches
+// each scheduler's tick.  Here a fiber calls libc usleep(300_000) — a
+// blocking syscall that freezes the scheduler.  We only verify the
+// program completes (the warning goes to stderr; we don't observe it
+// in stdout to keep the test deterministic).
+import std.sleep_ms;
+cblock "
+    #include <unistd.h>
+    static void __mk_block_300ms(void) { usleep(300000); }
+";
+extern unit __mk_block_300ms();
+
+unit main() {
+    *Thread t = spawn(unit() {
+        __mk_block_300ms();   // blocks scheduler for ~300ms
+        log(1);
+    });
+    join(t);
+    log(0);
+}

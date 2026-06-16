@@ -595,7 +595,8 @@ unit frame() {
 | Cross-thread fiber pool (`spawn_pool`) — fibers fan out across worker threads | **Implemented** — global MPMC queue + N background workers, each runs its own scheduler |
 | transfer/share enforcement on spawn captures (Send-probe at boundary) | **Implemented** — `&T`/`&mut T` captures rejected on `thread`/`job`/`spawn_pool` (cross-thread tiers); `spawn` (same-thread fiber) allows them.  Rust<T> probes flow to the sidecar as before |
 | IOCP backend (Windows) | Pending — different completion model |
-| Blocking-syscall watchdog warning | Pending — runtime detection of fibers that don't yield |
+| Blocking-syscall watchdog warning | **Implemented** — opt-in via `MAKA_WATCHDOG_MS=<ms>`; a global thread checks every scheduler's tick and warns on stderr when a scheduler has work but hasn't yielded past the threshold |
+| UDP datagram helpers (`udp_open`, `udp_send_v4`, `udp_recv_async`) | **Implemented** — reactor-aware (yields via wait_fd on EAGAIN) |
 
 The **surface is final** and user code written against it today will
 continue to work as the runtime improves.  Performance will improve

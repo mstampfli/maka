@@ -410,6 +410,23 @@ impl<'a> Cx<'a> {
         self.w("static __thread maka_fiber_t* maka_ready_tail = NULL;\n");
         self.w("static __thread maka_fiber_t* maka_sleep_head = NULL;\n");
         self.w("static __thread int maka_sched_inited = 0;\n");
+        // Blocking-syscall watchdog: each scheduler updates `last_tick_ns`
+        // at the top of every loop iteration.  If MAKA_WATCHDOG_MS is set in
+        // the env, a global watchdog thread periodically checks every
+        // registered scheduler — if its tick hasn't advanced past the
+        // threshold AND it has pending work, we warn on stderr.  The
+        // assumption is that the fiber is stuck in a blocking syscall.
+        self.w("typedef struct maka_sched_tick_s {\n");
+        self.w("    _Atomic int64_t last_tick_ns;\n");
+        self.w("    _Atomic int     has_work;\n");
+        self.w("    _Atomic int     warned;\n");
+        self.w("    struct maka_sched_tick_s* next;\n");
+        self.w("} maka_sched_tick_t;\n");
+        self.w("static pthread_mutex_t __maka_ticks_mu = PTHREAD_MUTEX_INITIALIZER;\n");
+        self.w("static maka_sched_tick_t* __maka_ticks_head = NULL;\n");
+        self.w("static __thread maka_sched_tick_t* __maka_my_tick = NULL;\n");
+        self.w("static _Atomic int __maka_watchdog_started = 0;\n");
+        self.w("static int64_t __maka_watchdog_threshold_ns = 0;\n");
         self.w("static __thread maka_fiber_t* maka_join_target = NULL;\n");
         self.w("static __thread maka_fiber_t* maka_anchor_fiber = NULL;\n");
         self.w("static __thread int maka_anchor_wake_on_finish = 0;\n");
@@ -591,9 +608,60 @@ impl<'a> Cx<'a> {
         self.w("    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);\n");
         self.w("    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;\n");
         self.w("}\n");
+        // Watchdog thread: scans the registered scheduler ticks every
+        // (threshold / 2) milliseconds and warns about any tick whose
+        // `has_work` flag is set but whose `last_tick_ns` is older than
+        // the threshold.  Warn at most once per quiet period.
+        self.w("static void* __maka_watchdog_loop(void* arg) {\n");
+        self.w("    (void)arg;\n");
+        self.w("    int64_t threshold = __maka_watchdog_threshold_ns;\n");
+        self.w("    int64_t sleep_ms = (threshold / 1000000) / 2;\n");
+        self.w("    if (sleep_ms < 100) sleep_ms = 100;\n");
+        self.w("    while (1) {\n");
+        self.w("        struct timespec ts = { sleep_ms / 1000, (sleep_ms % 1000) * 1000000L };\n");
+        self.w("        nanosleep(&ts, NULL);\n");
+        self.w("        int64_t now = __maka_now_ns();\n");
+        self.w("        pthread_mutex_lock(&__maka_ticks_mu);\n");
+        self.w("        for (maka_sched_tick_t* t = __maka_ticks_head; t; t = t->next) {\n");
+        self.w("            if (!atomic_load(&t->has_work)) { atomic_store(&t->warned, 0); continue; }\n");
+        self.w("            int64_t last = atomic_load(&t->last_tick_ns);\n");
+        self.w("            if (now - last > threshold && !atomic_load(&t->warned)) {\n");
+        self.w("                fprintf(stderr, \"maka: scheduler stuck — fibers haven't yielded for %.2fs (likely a blocking syscall inside a fiber)\\n\", (double)(now - last) / 1e9);\n");
+        self.w("                atomic_store(&t->warned, 1);\n");
+        self.w("            }\n");
+        self.w("            if (now - last <= threshold && atomic_load(&t->warned)) atomic_store(&t->warned, 0);\n");
+        self.w("        }\n");
+        self.w("        pthread_mutex_unlock(&__maka_ticks_mu);\n");
+        self.w("    }\n");
+        self.w("    return NULL;\n");
+        self.w("}\n");
+        self.w("static void __maka_watchdog_register(void) {\n");
+        self.w("    if (__maka_watchdog_threshold_ns == 0) {\n");
+        self.w("        const char* env = getenv(\"MAKA_WATCHDOG_MS\");\n");
+        self.w("        int64_t ms = env ? atoll(env) : 0;\n");
+        self.w("        if (ms <= 0) { __maka_watchdog_threshold_ns = -1; return; }\n");
+        self.w("        __maka_watchdog_threshold_ns = ms * 1000000LL;\n");
+        self.w("    }\n");
+        self.w("    if (__maka_watchdog_threshold_ns < 0) return;\n");
+        self.w("    if (__maka_my_tick) return;\n");
+        self.w("    __maka_my_tick = (maka_sched_tick_t*)calloc(1, sizeof(maka_sched_tick_t));\n");
+        self.w("    atomic_init(&__maka_my_tick->last_tick_ns, __maka_now_ns());\n");
+        self.w("    pthread_mutex_lock(&__maka_ticks_mu);\n");
+        self.w("    __maka_my_tick->next = __maka_ticks_head;\n");
+        self.w("    __maka_ticks_head = __maka_my_tick;\n");
+        self.w("    pthread_mutex_unlock(&__maka_ticks_mu);\n");
+        self.w("    int expected = 0;\n");
+        self.w("    if (atomic_compare_exchange_strong(&__maka_watchdog_started, &expected, 1)) {\n");
+        self.w("        pthread_t w; pthread_create(&w, NULL, __maka_watchdog_loop, NULL); pthread_detach(w);\n");
+        self.w("    }\n");
+        self.w("}\n");
         self.w("static void __maka_scheduler_loop(void) {\n");
         self.w("    while (1) {\n");
         self.w("        int64_t now = __maka_now_ns();\n");
+        self.w("        if (__maka_my_tick) {\n");
+        self.w("            atomic_store(&__maka_my_tick->last_tick_ns, now);\n");
+        self.w("            atomic_store(&__maka_my_tick->has_work, (maka_ready_head || maka_sleep_head || maka_fd_waiters) ? 1 : 0);\n");
+        self.w("        }\n");
         self.w("        /* Move expired sleepers to ready */\n");
         self.w("        maka_fiber_t** prev = &maka_sleep_head;\n");
         self.w("        while (*prev) {\n");
@@ -762,6 +830,7 @@ impl<'a> Cx<'a> {
         self.w("static void __maka_sched_init(void) {\n");
         self.w("    if (maka_sched_inited) return;\n");
         self.w("    maka_sched_inited = 1;\n");
+        self.w("    __maka_watchdog_register();\n");
         self.w("    /* anchor represents the calling (main or pthread) context */\n");
         self.w("    maka_anchor_fiber = (maka_fiber_t*)calloc(1, sizeof(maka_fiber_t));\n");
         self.w("    maka_anchor_fiber->state = 1;\n");
