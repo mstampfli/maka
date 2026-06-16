@@ -2433,6 +2433,60 @@ impl<'a> Cx<'a> {
         self.w("    return acc;\n");
         self.w("}\n");
 
+        // Generic par_map_bytes — input slice of opaque items (in_item_size
+        // bytes each), output slice of (out_item_size each).  The body
+        // takes (env, in_ptr, out_ptr).  Users wrap to build typed par_map
+        // for arbitrary T → U.
+        self.w("typedef struct {\n");
+        self.w("    int64_t i_start, i_end;\n");
+        self.w("    char* in_ptr;\n");
+        self.w("    char* out_ptr;\n");
+        self.w("    int64_t in_sz;\n");
+        self.w("    int64_t out_sz;\n");
+        self.w("    void (*body)(void*, void*, void*);\n");
+        self.w("    void* env;\n");
+        self.w("    Thread* completion;\n");
+        self.w("} __maka_bytes_chunk_t;\n");
+        self.w("static void* __maka_par_map_bytes_entry(void* arg) {\n");
+        self.w("    __maka_bytes_chunk_t* c = (__maka_bytes_chunk_t*)arg;\n");
+        self.w("    for (int64_t i = c->i_start; i < c->i_end; i++) {\n");
+        self.w("        c->body(c->env, (void*)(c->in_ptr + i * c->in_sz), (void*)(c->out_ptr + i * c->out_sz));\n");
+        self.w("    }\n");
+        self.w("    pthread_mutex_lock(&c->completion->done_mutex);\n");
+        self.w("    c->completion->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&c->completion->done_cond);\n");
+        self.w("    pthread_mutex_unlock(&c->completion->done_mutex);\n");
+        self.w("    free(c); return NULL;\n");
+        self.w("}\n");
+        // Returns a malloc'd buffer of (n * out_item_size) bytes; caller is
+        // responsible for freeing (via free() since malloc was used).
+        self.w("void* maka_par_map_bytes(void* in_ptr, int64_t n, int64_t in_sz, int64_t out_sz, void* code, void* env) {\n");
+        self.w("    if (n <= 0) return NULL;\n");
+        self.w("    char* out = (char*)malloc((size_t)(n * out_sz));\n");
+        self.w("    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);\n");
+        self.w("    if (nprocs < 1) nprocs = 1; if (nprocs > 16) nprocs = 16;\n");
+        self.w("    int64_t chunks = (int64_t)nprocs;\n");
+        self.w("    if (chunks > n) chunks = n;\n");
+        self.w("    int64_t per = (n + chunks - 1) / chunks;\n");
+        self.w("    Thread** hs = (Thread**)malloc(sizeof(Thread*) * (size_t)chunks);\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) {\n");
+        self.w("        Thread* th = (Thread*)calloc(1, sizeof(Thread));\n");
+        self.w("        pthread_mutex_init(&th->done_mutex, NULL); pthread_cond_init(&th->done_cond, NULL);\n");
+        self.w("        __maka_bytes_chunk_t* ch = (__maka_bytes_chunk_t*)calloc(1, sizeof(__maka_bytes_chunk_t));\n");
+        self.w("        ch->i_start = c * per; ch->i_end = ch->i_start + per;\n");
+        self.w("        if (ch->i_end > n) ch->i_end = n;\n");
+        self.w("        ch->in_ptr = (char*)in_ptr;\n");
+        self.w("        ch->out_ptr = out;\n");
+        self.w("        ch->in_sz = in_sz; ch->out_sz = out_sz;\n");
+        self.w("        ch->env = env; ch->completion = th;\n");
+        self.w("        ch->body = (void(*)(void*, void*, void*))code;\n");
+        self.w("        pthread_create(&th->handle, NULL, __maka_par_map_bytes_entry, ch);\n");
+        self.w("        hs[c] = th;\n");
+        self.w("    }\n");
+        self.w("    for (int64_t c = 0; c < chunks; c++) (void)__maka_join_result((maka_unit*)hs[c]);\n");
+        self.w("    free(hs);\n");
+        self.w("    return (void*)out;\n");
+        self.w("}\n");
         // par_scan_int: 2-pass parallel inclusive scan with associative combine.
         // Pass 1: each chunk computes local prefix into the output slice.
         // Pass 2: cross-chunk offsets are added in via combine.
@@ -4399,6 +4453,22 @@ impl<'a> Cx<'a> {
                 // Built-in `yield_now()` — cooperative yield.
                 if callee.0 == u32::MAX - 20 {
                     return "(__maka_yield_now(), MAKA_UNIT)".into();
+                }
+                // par_map_bytes(in_ptr, n, in_sz, out_sz, body) — generic.
+                if callee.0 == u32::MAX - 38 {
+                    if args.len() == 5 {
+                        let ip = self.emit_expr(f, &args[0]);
+                        let n  = self.emit_expr(f, &args[1]);
+                        let isz = self.emit_expr(f, &args[2]);
+                        let osz = self.emit_expr(f, &args[3]);
+                        let body = self.emit_expr(f, &args[4]);
+                        return format!(
+                            "(__extension__ ({{ Callable_unit_Pmunit_Pmunit_ __cb = ({4}); \
+                             (maka_unit*)maka_par_map_bytes((void*)({0}), (int64_t)({1}), (int64_t)({2}), (int64_t)({3}), (void*)__cb.code, (void*)__cb.env); }}))",
+                            ip, n, isz, osz, body
+                        );
+                    }
+                    return "NULL".into();
                 }
                 // Built-in `detach(*Thread)`.
                 if callee.0 == u32::MAX - 33 {

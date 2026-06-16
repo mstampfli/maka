@@ -1,0 +1,40 @@
+// Generic par_map_bytes: maps a slice of 16-byte Pair structs to a
+// slice of 8-byte int sums, in parallel.  Demonstrates that the
+// generic primitive can be wrapped to type any T → U.
+
+import std.par_map_bytes;
+
+cblock "
+    struct Pair { long a; long b; };
+    static maka_unit* __mk_input(void) {
+        static struct Pair items[4] = { {1,2}, {3,4}, {5,6}, {7,8} };
+        return (maka_unit*)items;
+    }
+    static int __mk_pair_size(void) { return sizeof(struct Pair); }
+    static int __mk_int_size (void) { return sizeof(long); }
+    static long __mk_out_at(maka_unit* p, int i) { return ((long*)p)[i]; }
+    static void __mk_pair_sum(maka_unit* in_item, maka_unit* out_item) {
+        long* p = (long*)in_item;
+        *(long*)out_item = p[0] + p[1];
+    }
+";
+extern *unit __mk_input();
+extern i32   __mk_pair_size();
+extern i32   __mk_int_size();
+extern int   __mk_out_at(*unit p, i32 i);
+extern unit  __mk_pair_sum(*mut unit in_item, *mut unit out_item);
+
+unit main() {
+    *mut unit input  = __mk_input() as *mut unit;
+    int n = 4;
+    int in_sz  = __mk_pair_size() as int;
+    int out_sz = __mk_int_size () as int;
+
+    *mut unit out = par_map_bytes(input, n, in_sz, out_sz, unit(*mut unit a, *mut unit b) { __mk_pair_sum(a, b); });
+
+    log(__mk_out_at(out as *unit, 0 as i32));   // 3
+    log(__mk_out_at(out as *unit, 1 as i32));   // 7
+    log(__mk_out_at(out as *unit, 2 as i32));   // 11
+    log(__mk_out_at(out as *unit, 3 as i32));   // 15
+    free(out);
+}

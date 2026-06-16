@@ -2152,6 +2152,34 @@ impl<'a> TypeChecker<'a> {
                 span: sp,
             };
         }
+        // par_map_bytes(*mut unit in, int n, int in_sz, int out_sz, body)
+        // body: unit(*mut unit in_item, *mut unit out_item)
+        if name == "par_map_bytes" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 5 {
+                self.err("par_map_bytes expects (*mut unit in, int n, int in_sz, int out_sz, body)", sp);
+            } else {
+                let body = &hargs[4];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Unit) && params.len() == 2);
+                if !ok_body {
+                    self.err(format!("par_map_bytes body must be `unit(*mut unit, *mut unit)`, got `{}`", type_str(&body.ty)), sp);
+                }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 38), args: hargs },
+                ty: HType::Ptr { mutable: true, inner: Box::new(HType::Unit) },
+                span: sp,
+            };
+        }
         // par_for_each_float(slice, body) — float-slice iteration; body is `unit(float)`.
         if name == "par_for_each_float" && qualifier.is_none() {
             let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();

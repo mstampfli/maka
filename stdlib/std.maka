@@ -278,6 +278,13 @@ pub int       chan_float_count (FloatChan c)         { return __chan_bytes_count
 pub unit      chan_float_close (FloatChan c)         { __chan_bytes_close(c.h); }
 pub unit      chan_float_destroy(FloatChan c)        { __chan_bytes_destroy(c.h); }
 
+// Generic par_map_bytes — chunks N items across the job pool, calling
+// `body(in_item_ptr, out_item_ptr)` for every item.  `par_map_bytes` is
+// a compiler builtin (FuncId u32::MAX - 38) so codegen can split the
+// Callable's code/env at the call site, just like `once_do` and the
+// par_* family.  Returns a freshly-malloc'd buffer of n * out_sz bytes;
+// free yourself when done.
+
 pub *unit atomic_new   (int v)                              { return __atomic_new(v); }
 // `atomic_get` / `atomic_set` instead of load/store to avoid clashing with
 // the C11 <stdatomic.h> macros of those names.
