@@ -1,0 +1,10 @@
+// TLS stubs compile and the symbols resolve.  When the C source is
+// compiled with -DMAKA_TLS and linked with -l ssl -l crypto, the helpers
+// perform a real handshake.  Without MAKA_TLS they return -1 / NULL —
+// here we just verify the symbol surface is callable.
+import std.{tls_client_new, tls_handshake, tls_close};
+
+unit main() {
+    *unit ssl = tls_client_new(-1, "example.com");
+    if (ssl == null) { log(0); } else { log(1); }
+}

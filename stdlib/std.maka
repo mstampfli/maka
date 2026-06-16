@@ -80,6 +80,21 @@ extern "__maka_pipe_write_fd"    int  __pipe_write_fd();
 pub int pipe_create  () { return __pipe_create(); }
 pub int pipe_write_fd() { return __pipe_write_fd(); }
 
+// TLS client (OpenSSL).  Requires the C source to be compiled with
+// -DMAKA_TLS and linked with `-l ssl -l crypto` — otherwise these
+// helpers return -1 / NULL so user programs still compile cleanly.
+extern "__maka_tls_client_new" *unit __tls_client_new(int fd, string hostname);
+extern "__maka_tls_handshake"   int  __tls_handshake(*unit ssl);
+extern "__maka_tls_read"        int  __tls_read(*unit ssl, *mut unit buf, int cap);
+extern "__maka_tls_write"       int  __tls_write(*unit ssl, *mut unit buf, int len);
+extern "__maka_tls_close"       unit __tls_close(*unit ssl);
+
+pub *unit tls_client_new(int fd, string hostname)               { return __tls_client_new(fd, hostname); }
+pub int   tls_handshake (*unit ssl)                              { return __tls_handshake(ssl); }
+pub int   tls_read      (*unit ssl, *mut unit buf, int cap)      { return __tls_read(ssl, buf, cap); }
+pub int   tls_write     (*unit ssl, *mut unit buf, int len)      { return __tls_write(ssl, buf, len); }
+pub unit  tls_close     (*unit ssl)                              { __tls_close(ssl); }
+
 // Unix domain sockets — pathname-based IPC.  Same stream semantics as TCP,
 // so accept_async / read_async / write_async / close_fd work on the
 // returned fd identically.

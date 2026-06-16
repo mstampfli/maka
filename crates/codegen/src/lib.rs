@@ -1171,6 +1171,11 @@ impl<'a> Cx<'a> {
         self.w("static inline int64_t __maka_http_content_length_g(void);\n");
         self.w("static inline int64_t __maka_pipe_create(void);\n");
         self.w("static inline int64_t __maka_pipe_write_fd(void);\n");
+        self.w("static inline maka_unit* __maka_tls_client_new(int64_t fd, const char* hostname);\n");
+        self.w("static inline int64_t __maka_tls_handshake(maka_unit* p);\n");
+        self.w("static inline int64_t __maka_tls_read(maka_unit* p, maka_unit* buf, int64_t cap);\n");
+        self.w("static inline int64_t __maka_tls_write(maka_unit* p, maka_unit* buf, int64_t len);\n");
+        self.w("static inline void __maka_tls_close(maka_unit* p);\n");
         self.w("int64_t __maka_set_nonblock(int64_t fd) {\n");
         self.w("    int flags = fcntl((int)fd, F_GETFL, 0);\n");
         self.w("    if (flags < 0) return -1;\n");
@@ -3283,6 +3288,85 @@ impl<'a> Cx<'a> {
         self.w("    return fds[0];\n");
         self.w("}\n");
         self.w("static inline int64_t __maka_pipe_write_fd(void) { return __maka_last_pipe_wfd; }\n");
+        // ---- TLS (OpenSSL) ----------------------------------------------
+        // Conditional on -DMAKA_TLS at compile time + -lssl -lcrypto link.
+        // Without that, the helpers return -1 / NULL so user programs at
+        // least compile.  When MAKA_TLS is defined, full OpenSSL handshake
+        // + reactor-aware read/write that yields on WANT_READ/WANT_WRITE.
+        self.w("#ifdef MAKA_TLS\n");
+        self.w("#include <openssl/ssl.h>\n");
+        self.w("#include <openssl/err.h>\n");
+        self.w("static _Atomic int __maka_tls_inited = 0;\n");
+        self.w("static SSL_CTX* __maka_tls_ctx = NULL;\n");
+        self.w("static void __maka_tls_init_once(void) {\n");
+        self.w("    int e = 0;\n");
+        self.w("    if (!atomic_compare_exchange_strong(&__maka_tls_inited, &e, 1)) return;\n");
+        self.w("    SSL_library_init();\n");
+        self.w("    SSL_load_error_strings();\n");
+        self.w("    OpenSSL_add_all_algorithms();\n");
+        self.w("    __maka_tls_ctx = SSL_CTX_new(TLS_client_method());\n");
+        self.w("    if (__maka_tls_ctx) SSL_CTX_set_default_verify_paths(__maka_tls_ctx);\n");
+        self.w("}\n");
+        self.w("static inline maka_unit* __maka_tls_client_new(int64_t fd, const char* hostname) {\n");
+        self.w("    __maka_tls_init_once();\n");
+        self.w("    if (!__maka_tls_ctx) return NULL;\n");
+        self.w("    SSL* s = SSL_new(__maka_tls_ctx);\n");
+        self.w("    if (!s) return NULL;\n");
+        self.w("    SSL_set_fd(s, (int)fd);\n");
+        self.w("    SSL_set_tlsext_host_name(s, hostname);\n");
+        self.w("    return (maka_unit*)s;\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_tls_handshake(maka_unit* p) {\n");
+        self.w("    SSL* s = (SSL*)p;\n");
+        self.w("    while (1) {\n");
+        self.w("        int r = SSL_connect(s);\n");
+        self.w("        if (r == 1) return 0;\n");
+        self.w("        int e = SSL_get_error(s, r);\n");
+        self.w("        int fd = SSL_get_fd(s);\n");
+        self.w("        if (e == SSL_ERROR_WANT_READ)  { __maka_wait_fd(fd, MAKA_EV_READ); continue; }\n");
+        self.w("        if (e == SSL_ERROR_WANT_WRITE) { __maka_wait_fd(fd, MAKA_EV_WRITE); continue; }\n");
+        self.w("        return -1;\n");
+        self.w("    }\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_tls_read(maka_unit* p, maka_unit* buf, int64_t cap) {\n");
+        self.w("    SSL* s = (SSL*)p;\n");
+        self.w("    while (1) {\n");
+        self.w("        int r = SSL_read(s, (void*)buf, (int)cap);\n");
+        self.w("        if (r > 0) return (int64_t)r;\n");
+        self.w("        int e = SSL_get_error(s, r);\n");
+        self.w("        int fd = SSL_get_fd(s);\n");
+        self.w("        if (e == SSL_ERROR_WANT_READ)  { __maka_wait_fd(fd, MAKA_EV_READ); continue; }\n");
+        self.w("        if (e == SSL_ERROR_WANT_WRITE) { __maka_wait_fd(fd, MAKA_EV_WRITE); continue; }\n");
+        self.w("        if (e == SSL_ERROR_ZERO_RETURN) return 0;\n");
+        self.w("        return -1;\n");
+        self.w("    }\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_tls_write(maka_unit* p, maka_unit* buf, int64_t len) {\n");
+        self.w("    SSL* s = (SSL*)p;\n");
+        self.w("    int64_t w = 0;\n");
+        self.w("    while (w < len) {\n");
+        self.w("        int r = SSL_write(s, (const char*)(const void*)buf + w, (int)(len - w));\n");
+        self.w("        if (r > 0) { w += r; continue; }\n");
+        self.w("        int e = SSL_get_error(s, r);\n");
+        self.w("        int fd = SSL_get_fd(s);\n");
+        self.w("        if (e == SSL_ERROR_WANT_READ)  { __maka_wait_fd(fd, MAKA_EV_READ); continue; }\n");
+        self.w("        if (e == SSL_ERROR_WANT_WRITE) { __maka_wait_fd(fd, MAKA_EV_WRITE); continue; }\n");
+        self.w("        return -1;\n");
+        self.w("    }\n");
+        self.w("    return w;\n");
+        self.w("}\n");
+        self.w("static inline void __maka_tls_close(maka_unit* p) {\n");
+        self.w("    SSL* s = (SSL*)p;\n");
+        self.w("    SSL_shutdown(s);\n");
+        self.w("    SSL_free(s);\n");
+        self.w("}\n");
+        self.w("#else\n");
+        self.w("static inline maka_unit* __maka_tls_client_new(int64_t fd, const char* hostname) { (void)fd; (void)hostname; return NULL; }\n");
+        self.w("static inline int64_t __maka_tls_handshake(maka_unit* p) { (void)p; return -1; }\n");
+        self.w("static inline int64_t __maka_tls_read(maka_unit* p, maka_unit* buf, int64_t cap) { (void)p; (void)buf; (void)cap; return -1; }\n");
+        self.w("static inline int64_t __maka_tls_write(maka_unit* p, maka_unit* buf, int64_t len) { (void)p; (void)buf; (void)len; return -1; }\n");
+        self.w("static inline void __maka_tls_close(maka_unit* p) { (void)p; }\n");
+        self.w("#endif\n");
         // Unix domain sockets — bind/connect by path.  Use the same socket
         // forward decls + syscall machinery as the TCP helpers; AF_UNIX = 1.
         self.w("struct __maka_sockaddr_un { unsigned short sun_family; char sun_path[108]; };\n");
