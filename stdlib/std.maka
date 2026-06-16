@@ -71,6 +71,15 @@ extern "__maka_udp_send_v4"      int  __udp_send_v4(int fd, int a, int b, int c,
 extern "__maka_udp_recv_async"   int  __udp_recv_async(int fd, *mut unit buf, int cap);
 extern "__maka_signalfd_open"    int  __signalfd_open(int signum);
 extern "__maka_signalfd_recv"    int  __signalfd_recv(int fd);
+extern "__maka_timerfd_create"   int  __timerfd_create(int initial_ns, int interval_ns);
+extern "__maka_timerfd_recv"     int  __timerfd_recv(int fd);
+
+// Periodic timer fd.  `initial_ns` is the delay until the first fire;
+// `interval_ns` is the recurring period (0 = one-shot).  timer_recv_async
+// returns the number of times the timer has fired since the last call —
+// always >= 1 (or -1 on error).
+pub int timer_fd_create   (int initial_ns, int interval_ns) { return __timerfd_create(initial_ns, interval_ns); }
+pub int timer_recv_async  (int fd)                          { return __timerfd_recv(fd); }
 
 // Signal handling via signalfd (Linux).  signal_fd_open(signum) returns
 // an fd that becomes readable when the signal is delivered; the signal

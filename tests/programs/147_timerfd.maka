@@ -1,0 +1,15 @@
+// Periodic timer via timerfd.  Fiber waits on a 10ms-interval timer and
+// counts 3 ticks.  The reactor wakes the fiber each time the kernel
+// posts to the fd.
+import std.{timer_fd_create, timer_recv_async, close_fd};
+
+unit main() {
+    int fd = timer_fd_create(10000000, 10000000);   // 10ms first + 10ms interval
+    mut int total = 0;
+    for (int i in 0..3) {
+        int n = timer_recv_async(fd);
+        if (n > 0) { total = total + 1; }
+    }
+    log(total);   // 3
+    _ = close_fd(fd);
+}
