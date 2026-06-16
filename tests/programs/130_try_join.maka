@@ -1,0 +1,10 @@
+// try_join(*Thread) — non-blocking poll.  Returns false while running,
+// true once finished (and reclaims the handle exactly once).
+import std.sleep_ms;
+
+unit main() {
+    *Thread t = spawn(unit() { sleep_ms(20); });
+    if (try_join(t)) { log(1); } else { log(0); }     // 0 — not done yet
+    sleep_ms(40);
+    if (try_join(t)) { log(1); } else { log(0); }     // 1 — done now
+}

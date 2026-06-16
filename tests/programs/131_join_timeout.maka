@@ -1,0 +1,13 @@
+// join_timeout(*Thread, int ms) — bounded join.  Returns false on timeout,
+// true if joined within the deadline.  The handle is reclaimed on a true
+// return; on false it can be retried or cancelled.
+import std.sleep_ms;
+
+unit main() {
+    *Thread fast = spawn(unit() { sleep_ms(5); });
+    if (join_timeout(fast, 100)) { log(1); } else { log(0); }    // 1
+
+    *Thread slow = spawn(unit() { sleep_ms(100); });
+    if (join_timeout(slow, 10))  { log(1); } else { log(0); }    // 0
+    cancel(slow);
+}

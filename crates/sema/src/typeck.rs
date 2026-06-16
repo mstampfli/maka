@@ -1894,6 +1894,116 @@ impl<'a> TypeChecker<'a> {
             );
             return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
         }
+        // Built-in `cancel(*Thread)` — user-callable cancellation.  No-op for
+        // jobs (run to completion); pthread_cancel for threads; queue-walk
+        // removal for fibers.  Frees the handle.
+        if name == "cancel" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 1 {
+                self.err("cancel expects exactly one `*Thread` argument", sp);
+            } else {
+                let is_thread_ptr = matches!(&hargs[0].ty,
+                    HType::Ptr { inner, .. } if matches!(**inner, HType::Struct(id) if {
+                        let info = self.sym.struct_info(id);
+                        info.name == "Thread"
+                    }));
+                if !is_thread_ptr {
+                    self.err(format!("cancel: expected `*Thread`, got `{}`", type_str(&hargs[0].ty)), sp);
+                }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 23), args: hargs },
+                ty: HType::Unit,
+                span: sp,
+            };
+        }
+        // Built-in `try_join(*Thread) -> bool` — non-blocking poll.  Returns
+        // true if the handle had finished (and reclaims it); false otherwise.
+        if name == "try_join" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 1 {
+                self.err("try_join expects exactly one `*Thread` argument", sp);
+            } else {
+                let is_thread_ptr = matches!(&hargs[0].ty,
+                    HType::Ptr { inner, .. } if matches!(**inner, HType::Struct(id) if {
+                        let info = self.sym.struct_info(id);
+                        info.name == "Thread"
+                    }));
+                if !is_thread_ptr {
+                    self.err(format!("try_join: expected `*Thread`, got `{}`", type_str(&hargs[0].ty)), sp);
+                }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 24), args: hargs },
+                ty: HType::Bool,
+                span: sp,
+            };
+        }
+        // Built-in `join_timeout(*Thread, int ms) -> bool` — returns true if
+        // the handle joined within the deadline, false if the deadline expired.
+        if name == "join_timeout" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 2 {
+                self.err("join_timeout expects (`*Thread`, `int ms`)", sp);
+            } else {
+                let is_thread_ptr = matches!(&hargs[0].ty,
+                    HType::Ptr { inner, .. } if matches!(**inner, HType::Struct(id) if {
+                        let info = self.sym.struct_info(id);
+                        info.name == "Thread"
+                    }));
+                if !is_thread_ptr {
+                    self.err(format!("join_timeout: first arg must be `*Thread`, got `{}`", type_str(&hargs[0].ty)), sp);
+                }
+                if !matches!(&hargs[1].ty, HType::Int) {
+                    self.err(format!("join_timeout: second arg must be `int` (milliseconds), got `{}`", type_str(&hargs[1].ty)), sp);
+                }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 25), args: hargs },
+                ty: HType::Bool,
+                span: sp,
+            };
+        }
+        // Built-in `select_timeout(slice, int ms) -> int` — returns the index
+        // of the first handle to finish, or -1 on timeout.  Losers are
+        // cancelled exactly like plain `select`.
+        if name == "select_timeout" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 2 {
+                self.err("select_timeout expects (`[]*Thread`, `int ms`)", sp);
+            } else {
+                let is_slice = matches!(&hargs[0].ty,
+                    HType::Slice { elem, .. } if matches!(
+                        elem.as_ref(),
+                        HType::Ptr { inner, .. } if matches!(**inner, HType::Struct(id) if {
+                            let info = self.sym.struct_info(id);
+                            info.name == "Thread"
+                        })
+                    ));
+                let is_slice_ref = matches!(&hargs[0].ty,
+                    HType::Ref { inner, .. } if matches!(
+                        inner.as_ref(),
+                        HType::Slice { elem, .. } if matches!(
+                            elem.as_ref(),
+                            HType::Ptr { inner: i2, .. } if matches!(**i2, HType::Struct(id) if {
+                                let info = self.sym.struct_info(id);
+                                info.name == "Thread"
+                            })
+                        )
+                    ));
+                if !is_slice && !is_slice_ref {
+                    self.err(format!("select_timeout: first arg must be `[]*Thread` or `&[]*Thread`, got `{}`", type_str(&hargs[0].ty)), sp);
+                }
+                if !matches!(&hargs[1].ty, HType::Int) {
+                    self.err(format!("select_timeout: second arg must be `int` (milliseconds), got `{}`", type_str(&hargs[1].ty)), sp);
+                }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 26), args: hargs },
+                ty: HType::Int,
+                span: sp,
+            };
+        }
         // Built-in `par_map_int(start, end, fn)` — produce a freshly-allocated
         // `[]int` slice of length (end - start) where result[i - start] =
         // fn(i).  Chunks are distributed across the job pool.

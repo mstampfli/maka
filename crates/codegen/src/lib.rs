@@ -370,6 +370,8 @@ impl<'a> Cx<'a> {
         self.w("    Thread* completion;   /* the Thread handle returned to user */\n");
         self.w("    int64_t wake_at_ns;\n");
         self.w("    int   waiting_fd;     /* fd if blocked on IO; -1 otherwise */\n");
+        self.w("    int64_t wait_deadline_ns; /* 0 = no deadline; otherwise wake-by-this time */\n");
+        self.w("    int   wait_timed_out; /* set by scheduler when deadline expires */\n");
         self.w("    struct maka_fiber_s* next;        /* ready / sleep / fd-wait queue link */\n");
         self.w("    struct maka_fiber_s* waiters;     /* fibers blocked on this fiber */\n");
         self.w("    struct maka_fiber_s* next_waiter; /* waiter list link */\n");
@@ -384,6 +386,7 @@ impl<'a> Cx<'a> {
         self.w("static __thread maka_fiber_t* maka_anchor_fiber = NULL;\n");
         self.w("static __thread int maka_anchor_wake_on_finish = 0;\n");
         self.w("static __thread int maka_epoll_fd = -1;\n");
+        self.w("static __thread int64_t maka_anchor_deadline_ns = 0; /* 0 = none; otherwise scheduler caps its timeout so anchor wakes by this */\n");
         self.w("static __thread maka_fiber_t* maka_fd_waiters = NULL;\n");
         self.w("#include <sys/epoll.h>\n");
         self.w("#include <poll.h>\n");
@@ -466,33 +469,78 @@ impl<'a> Cx<'a> {
         self.w("        int have_fd_waiters = (maka_fd_waiters != NULL);\n");
         self.w("        if (have_sleepers || have_fd_waiters) {\n");
         self.w("            int64_t timeout_ms = -1;\n");
+        self.w("            int64_t now_ns = __maka_now_ns();\n");
         self.w("            if (have_sleepers) {\n");
         self.w("                int64_t min_wake = maka_sleep_head->wake_at_ns;\n");
         self.w("                for (maka_fiber_t* s = maka_sleep_head->next; s; s = s->next) {\n");
         self.w("                    if (s->wake_at_ns < min_wake) min_wake = s->wake_at_ns;\n");
         self.w("                }\n");
-        self.w("                int64_t delta = min_wake - __maka_now_ns();\n");
+        self.w("                int64_t delta = min_wake - now_ns;\n");
         self.w("                if (delta <= 0) { continue; /* wake immediately */ }\n");
         self.w("                timeout_ms = delta / 1000000LL;\n");
         self.w("                if (timeout_ms < 1) timeout_ms = 1;\n");
+        self.w("            }\n");
+        self.w("            /* Honor wait_fd_timeout deadlines. */\n");
+        self.w("            for (maka_fiber_t* f = maka_fd_waiters; f; f = f->next) {\n");
+        self.w("                if (f->wait_deadline_ns == 0) continue;\n");
+        self.w("                int64_t delta = f->wait_deadline_ns - now_ns;\n");
+        self.w("                if (delta <= 0) { timeout_ms = 0; break; }\n");
+        self.w("                int64_t dms = delta / 1000000LL;\n");
+        self.w("                if (dms < 1) dms = 1;\n");
+        self.w("                if (timeout_ms < 0 || dms < timeout_ms) timeout_ms = dms;\n");
+        self.w("            }\n");
+        self.w("            /* Honor anchor deadline (set by join_timeout / select_timeout). */\n");
+        self.w("            if (maka_anchor_deadline_ns != 0) {\n");
+        self.w("                int64_t delta = maka_anchor_deadline_ns - now_ns;\n");
+        self.w("                if (delta <= 0) { timeout_ms = 0; }\n");
+        self.w("                else {\n");
+        self.w("                    int64_t dms = delta / 1000000LL;\n");
+        self.w("                    if (dms < 1) dms = 1;\n");
+        self.w("                    if (timeout_ms < 0 || dms < timeout_ms) timeout_ms = dms;\n");
+        self.w("                }\n");
         self.w("            }\n");
         self.w("            if (have_fd_waiters && maka_epoll_fd >= 0) {\n");
         self.w("                struct epoll_event evs[32];\n");
         self.w("                int n = epoll_wait(maka_epoll_fd, evs, 32, (int)timeout_ms);\n");
         self.w("                for (int i = 0; i < n; i++) {\n");
         self.w("                    maka_fiber_t* f = (maka_fiber_t*)evs[i].data.ptr;\n");
-        self.w("                    /* Remove from fd waiter list. */\n");
         self.w("                    maka_fiber_t** prev2 = &maka_fd_waiters;\n");
         self.w("                    while (*prev2) {\n");
         self.w("                        if (*prev2 == f) { *prev2 = f->next; f->next = NULL; break; }\n");
         self.w("                        prev2 = &(*prev2)->next;\n");
         self.w("                    }\n");
         self.w("                    f->waiting_fd = -1;\n");
+        self.w("                    f->wait_deadline_ns = 0;\n");
+        self.w("                    f->wait_timed_out = 0;\n");
         self.w("                    __maka_ready_enqueue(f);\n");
+        self.w("                }\n");
+        self.w("                /* After epoll, reap timed-out fd waiters. */\n");
+        self.w("                int64_t now2 = __maka_now_ns();\n");
+        self.w("                maka_fiber_t** prev3 = &maka_fd_waiters;\n");
+        self.w("                while (*prev3) {\n");
+        self.w("                    maka_fiber_t* f = *prev3;\n");
+        self.w("                    if (f->wait_deadline_ns != 0 && f->wait_deadline_ns <= now2) {\n");
+        self.w("                        if (maka_epoll_fd >= 0 && f->waiting_fd >= 0) {\n");
+        self.w("                            epoll_ctl(maka_epoll_fd, EPOLL_CTL_DEL, f->waiting_fd, NULL);\n");
+        self.w("                        }\n");
+        self.w("                        *prev3 = f->next; f->next = NULL;\n");
+        self.w("                        f->waiting_fd = -1;\n");
+        self.w("                        f->wait_deadline_ns = 0;\n");
+        self.w("                        f->wait_timed_out = 1;\n");
+        self.w("                        __maka_ready_enqueue(f);\n");
+        self.w("                    } else {\n");
+        self.w("                        prev3 = &(*prev3)->next;\n");
+        self.w("                    }\n");
         self.w("                }\n");
         self.w("            } else if (have_sleepers) {\n");
         self.w("                struct timespec ts = { timeout_ms / 1000, (timeout_ms % 1000) * 1000000 };\n");
         self.w("                nanosleep(&ts, NULL);\n");
+        self.w("            }\n");
+        self.w("            /* Anchor deadline reached?  Hand control back so the\n");
+        self.w("               caller's timeout primitive can finish. */\n");
+        self.w("            if (maka_anchor_deadline_ns != 0 && __maka_now_ns() >= maka_anchor_deadline_ns && maka_anchor_fiber) {\n");
+        self.w("                maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("                swapcontext(&maka_sched_ctx, &maka_anchor_fiber->ctx);\n");
         self.w("            }\n");
         self.w("            continue;\n");
         self.w("        }\n");
@@ -544,6 +592,8 @@ impl<'a> Cx<'a> {
         self.w("    f->completion = t;\n");
         self.w("    f->state = 0;\n");
         self.w("    f->waiting_fd = -1;\n");
+        self.w("    f->wait_deadline_ns = 0;\n");
+        self.w("    f->wait_timed_out = 0;\n");
         self.w("    getcontext(&f->ctx);\n");
         self.w("    f->ctx.uc_stack.ss_sp = f->slab->stack_top;\n");
         self.w("    f->ctx.uc_stack.ss_size = MAKA_FIBER_STACK_SIZE;\n");
@@ -597,6 +647,40 @@ impl<'a> Cx<'a> {
         self.w("    maka_current_fiber->next = maka_fd_waiters;\n");
         self.w("    maka_fd_waiters = maka_current_fiber;\n");
         self.w("    swapcontext(&maka_current_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("}\n");
+        // Wall-clock helper used by every timeout primitive below.
+        self.w("static int64_t __maka_now_ms(void) {\n");
+        self.w("    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);\n");
+        self.w("    return (int64_t)ts.tv_sec * 1000 + (int64_t)ts.tv_nsec / 1000000;\n");
+        self.w("}\n");
+        // wait_fd_timeout: yields up to `ms` milliseconds, returns 1 on event,
+        // 0 on timeout.  Outside a fiber, falls back to a bounded poll().
+        self.w("int64_t __maka_wait_fd_timeout(int64_t fd, int64_t events, int64_t ms) {\n");
+        self.w("    if (!maka_current_fiber || maka_current_fiber == maka_anchor_fiber) {\n");
+        self.w("        struct pollfd pfd; pfd.fd = (int)fd; pfd.events = 0; pfd.revents = 0;\n");
+        self.w("        if (events & MAKA_EV_READ)  pfd.events |= POLLIN;\n");
+        self.w("        if (events & MAKA_EV_WRITE) pfd.events |= POLLOUT;\n");
+        self.w("        int r = poll(&pfd, 1, (int)ms);\n");
+        self.w("        return r > 0 ? 1 : 0;\n");
+        self.w("    }\n");
+        self.w("    if (maka_epoll_fd < 0) { maka_epoll_fd = epoll_create1(EPOLL_CLOEXEC); }\n");
+        self.w("    struct epoll_event ev; memset(&ev, 0, sizeof(ev));\n");
+        self.w("    if (events & MAKA_EV_READ)  ev.events |= EPOLLIN;\n");
+        self.w("    if (events & MAKA_EV_WRITE) ev.events |= EPOLLOUT;\n");
+        self.w("    ev.events |= EPOLLONESHOT;\n");
+        self.w("    ev.data.ptr = maka_current_fiber;\n");
+        self.w("    if (epoll_ctl(maka_epoll_fd, EPOLL_CTL_MOD, (int)fd, &ev) != 0) {\n");
+        self.w("        if (errno == ENOENT) { epoll_ctl(maka_epoll_fd, EPOLL_CTL_ADD, (int)fd, &ev); }\n");
+        self.w("    }\n");
+        self.w("    maka_current_fiber->waiting_fd = (int)fd;\n");
+        self.w("    maka_current_fiber->state = 5;\n");
+        self.w("    maka_current_fiber->wait_deadline_ns = (int64_t)__maka_now_ms() * 1000000 + ms * 1000000;\n");
+        self.w("    maka_current_fiber->wait_timed_out = 0;\n");
+        self.w("    maka_current_fiber->next = maka_fd_waiters;\n");
+        self.w("    maka_fd_waiters = maka_current_fiber;\n");
+        self.w("    swapcontext(&maka_current_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("    /* Scheduler resumes us either on fd event or on deadline. */\n");
+        self.w("    return maka_current_fiber->wait_timed_out ? 0 : 1;\n");
         self.w("}\n");
         self.w("#include <fcntl.h>\n");
         self.w("int64_t __maka_set_nonblock(int64_t fd) {\n");
@@ -865,6 +949,120 @@ impl<'a> Cx<'a> {
         self.w("}\n");
         self.w("void __maka_join(maka_unit* h) { (void)__maka_join_result(h); }\n");
         // ====================================================================
+        // try_join(h, &out) -> 1 if done (and writes result), 0 if still running.
+        // Never blocks, never reaps a non-done handle.  When done, reclaims
+        // the handle exactly once (same as join), so a try_join+true MUST
+        // NOT be followed by another join on the same handle.
+        // ====================================================================
+        self.w("int64_t __maka_try_join(maka_unit* h, int64_t* out_result) {\n");
+        self.w("    Thread* t = (Thread*)h;\n");
+        self.w("    pthread_mutex_lock(&t->done_mutex);\n");
+        self.w("    int done = t->done_flag;\n");
+        self.w("    pthread_mutex_unlock(&t->done_mutex);\n");
+        self.w("    if (!done) return 0;\n");
+        self.w("    if (out_result) *out_result = t->result;\n");
+        self.w("    if (!t->is_job && !t->is_fiber) { pthread_join(t->handle, NULL); }\n");
+        self.w("    pthread_mutex_destroy(&t->done_mutex);\n");
+        self.w("    pthread_cond_destroy(&t->done_cond);\n");
+        self.w("    free(t);\n");
+        self.w("    return 1;\n");
+        self.w("}\n");
+        // ====================================================================
+        // join_timeout(h, ms, &out) -> 1 if done within deadline, 0 on timeout.
+        // Deadline driving cooperates with the fiber scheduler: yields to it
+        // while the timeout has not expired.
+        // ====================================================================
+        self.w("int64_t __maka_join_timeout(maka_unit* h, int64_t ms, int64_t* out_result) {\n");
+        self.w("    int64_t deadline_ms = __maka_now_ms() + ms;\n");
+        self.w("    int64_t deadline_ns = __maka_now_ns() + ms * 1000000LL;\n");
+        self.w("    Thread* t = (Thread*)h;\n");
+        self.w("    int64_t prev_anchor_deadline = maka_anchor_deadline_ns;\n");
+        self.w("    maka_anchor_deadline_ns = deadline_ns;\n");
+        self.w("    while (1) {\n");
+        self.w("        pthread_mutex_lock(&t->done_mutex);\n");
+        self.w("        int d = t->done_flag;\n");
+        self.w("        pthread_mutex_unlock(&t->done_mutex);\n");
+        self.w("        if (d) {\n");
+        self.w("            maka_anchor_deadline_ns = prev_anchor_deadline;\n");
+        self.w("            if (out_result) *out_result = t->result;\n");
+        self.w("            if (!t->is_job && !t->is_fiber) { pthread_join(t->handle, NULL); }\n");
+        self.w("            pthread_mutex_destroy(&t->done_mutex);\n");
+        self.w("            pthread_cond_destroy(&t->done_cond);\n");
+        self.w("            free(t);\n");
+        self.w("            return 1;\n");
+        self.w("        }\n");
+        self.w("        int64_t now = __maka_now_ms();\n");
+        self.w("        if (now >= deadline_ms) {\n");
+        self.w("            maka_anchor_deadline_ns = prev_anchor_deadline;\n");
+        self.w("            return 0;\n");
+        self.w("        }\n");
+        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("        } else {\n");
+        self.w("            int64_t rem_ms = deadline_ms - now;\n");
+        self.w("            if (rem_ms > 5) rem_ms = 5;\n");
+        self.w("            struct timespec ts = { 0, rem_ms * 1000000LL };\n");
+        self.w("            nanosleep(&ts, NULL);\n");
+        self.w("        }\n");
+        self.w("    }\n");
+        self.w("}\n");
+        // ====================================================================
+        // cancel(h) — user-callable cancellation.  Behavior by tier:
+        //   fiber: walk ready / sleep / fd-waiters; remove without resuming;
+        //          free slab + handle.
+        //   thread: pthread_cancel + pthread_join, then free handle.
+        //   job: not supported — jobs run to completion, this is a no-op
+        //        with done_flag flip so subsequent join doesn't hang.  In
+        //        practice users shouldn't expect job cancellation.
+        // ====================================================================
+        self.w("void __maka_cancel(maka_unit* h) {\n");
+        self.w("    Thread* t = (Thread*)h;\n");
+        self.w("    pthread_mutex_lock(&t->done_mutex);\n");
+        self.w("    int already_done = t->done_flag;\n");
+        self.w("    pthread_mutex_unlock(&t->done_mutex);\n");
+        self.w("    if (already_done) { (void)__maka_join_result(h); return; }\n");
+        self.w("    if (t->is_fiber) {\n");
+        self.w("        maka_fiber_t** prev = &maka_ready_head;\n");
+        self.w("        maka_fiber_t* found = NULL;\n");
+        self.w("        while (*prev) {\n");
+        self.w("            if ((*prev)->completion == t) {\n");
+        self.w("                found = *prev; *prev = found->next;\n");
+        self.w("                if (maka_ready_tail == found) maka_ready_tail = NULL;\n");
+        self.w("                break;\n");
+        self.w("            }\n");
+        self.w("            prev = &(*prev)->next;\n");
+        self.w("        }\n");
+        self.w("        if (!found) {\n");
+        self.w("            prev = &maka_sleep_head;\n");
+        self.w("            while (*prev) {\n");
+        self.w("                if ((*prev)->completion == t) { found = *prev; *prev = found->next; break; }\n");
+        self.w("                prev = &(*prev)->next;\n");
+        self.w("            }\n");
+        self.w("        }\n");
+        self.w("        if (!found) {\n");
+        self.w("            prev = &maka_fd_waiters;\n");
+        self.w("            while (*prev) {\n");
+        self.w("                if ((*prev)->completion == t) {\n");
+        self.w("                    found = *prev; *prev = found->next;\n");
+        self.w("                    if (maka_epoll_fd >= 0 && found->waiting_fd >= 0) {\n");
+        self.w("                        epoll_ctl(maka_epoll_fd, EPOLL_CTL_DEL, found->waiting_fd, NULL);\n");
+        self.w("                    }\n");
+        self.w("                    break;\n");
+        self.w("                }\n");
+        self.w("                prev = &(*prev)->next;\n");
+        self.w("            }\n");
+        self.w("        }\n");
+        self.w("        if (found) { __maka_slab_free(found->slab); free(found); }\n");
+        self.w("    } else if (!t->is_job) {\n");
+        self.w("        pthread_cancel(t->handle);\n");
+        self.w("        pthread_join(t->handle, NULL);\n");
+        self.w("    }\n");
+        self.w("    pthread_mutex_destroy(&t->done_mutex);\n");
+        self.w("    pthread_cond_destroy(&t->done_cond);\n");
+        self.w("    free(t);\n");
+        self.w("}\n");
+        // ====================================================================
         // join(&[]Handle) -> [N] of results.  Handles must all be Thread*.
         // Sequentially joins each (since they're already running concurrently).
         // Caller is responsible for the result-slice memory.
@@ -973,21 +1171,79 @@ impl<'a> Cx<'a> {
         self.w("    }\n");
         self.w("}\n");
         // ====================================================================
+        // select_timeout(handles, n, ms) -> winner result, or -1 on timeout.
+        // out_index gets the winning index, or -1 on timeout.  Losers are
+        // cancelled identically to plain select().
+        // ====================================================================
+        self.w("int64_t __maka_select_timeout_i64(maka_unit** handles, int64_t n, int64_t ms, int64_t* out_index) {\n");
+        self.w("    int64_t deadline_ms = __maka_now_ms() + ms;\n");
+        self.w("    int64_t deadline_ns = __maka_now_ns() + ms * 1000000LL;\n");
+        self.w("    int64_t prev_anchor_deadline = maka_anchor_deadline_ns;\n");
+        self.w("    maka_anchor_deadline_ns = deadline_ns;\n");
+        self.w("    while (1) {\n");
+        self.w("        int i = __maka_find_winner(handles, n);\n");
+        self.w("        if (i >= 0) {\n");
+        self.w("            maka_anchor_deadline_ns = prev_anchor_deadline;\n");
+        self.w("            Thread* t = (Thread*)handles[i];\n");
+        self.w("            int64_t r = t->result;\n");
+        self.w("            if (out_index) *out_index = (int64_t)i;\n");
+        self.w("            for (int64_t j = 0; j < n; j++) {\n");
+        self.w("                if (j == i) continue;\n");
+        self.w("                __maka_cancel(handles[j]);\n");
+        self.w("            }\n");
+        self.w("            (void)__maka_join_result(handles[i]);\n");
+        self.w("            return r;\n");
+        self.w("        }\n");
+        self.w("        if (__maka_now_ms() >= deadline_ms) {\n");
+        self.w("            maka_anchor_deadline_ns = prev_anchor_deadline;\n");
+        self.w("            if (out_index) *out_index = -1;\n");
+        self.w("            return -1;\n");
+        self.w("        }\n");
+        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("            maka_anchor_wake_on_finish = 1;\n");
+        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_anchor_wake_on_finish = 0;\n");
+        self.w("            maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("        } else {\n");
+        self.w("            int64_t rem_ms = deadline_ms - __maka_now_ms();\n");
+        self.w("            if (rem_ms > 5) rem_ms = 5;\n");
+        self.w("            struct timespec ts = { 0, rem_ms * 1000000LL };\n");
+        self.w("            nanosleep(&ts, NULL);\n");
+        self.w("        }\n");
+        self.w("    }\n");
+        self.w("}\n");
+        // ====================================================================
         // SLEEP — sleeps the current thread/fiber for the requested duration.
         // Maka exposes this via `sleep_ms(int)` in stdlib.async.
         // ====================================================================
         self.w("void __maka_sleep_ns(int64_t nanos) {\n");
-        self.w("    /* Inside a cooperative fiber, yield with timer instead of\n");
-        self.w("       blocking the scheduler thread. */\n");
+        self.w("    /* Inside a cooperative fiber (not the anchor), yield with timer. */\n");
         self.w("    if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
         self.w("        __maka_sleep_fiber(nanos);\n");
         self.w("        return;\n");
         self.w("    }\n");
-        self.w("    /* Else: block the calling thread directly. */\n");
-        self.w("    struct timespec ts;\n");
-        self.w("    ts.tv_sec = nanos / 1000000000LL;\n");
-        self.w("    ts.tv_nsec = nanos % 1000000000LL;\n");
-        self.w("    nanosleep(&ts, NULL);\n");
+        self.w("    /* On the anchor: if other fibers exist, drive the scheduler\n");
+        self.w("       in short bursts instead of blocking outright.  This lets\n");
+        self.w("       fibers progress while the caller is `sleeping`. */\n");
+        self.w("    int64_t deadline = __maka_now_ns() + nanos;\n");
+        self.w("    int64_t prev_anchor_deadline = maka_anchor_deadline_ns;\n");
+        self.w("    maka_anchor_deadline_ns = deadline;\n");
+        self.w("    while (1) {\n");
+        self.w("        int64_t now = __maka_now_ns();\n");
+        self.w("        if (now >= deadline) { maka_anchor_deadline_ns = prev_anchor_deadline; return; }\n");
+        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("        } else {\n");
+        self.w("            int64_t rem = deadline - now;\n");
+        self.w("            struct timespec ts;\n");
+        self.w("            ts.tv_sec = rem / 1000000000LL;\n");
+        self.w("            ts.tv_nsec = rem % 1000000000LL;\n");
+        self.w("            nanosleep(&ts, NULL);\n");
+        self.w("            maka_anchor_deadline_ns = prev_anchor_deadline;\n");
+        self.w("            return;\n");
+        self.w("        }\n");
+        self.w("    }\n");
         self.w("}\n");
         // ====================================================================
         // par_for_range — chunks an integer range across the job pool.
@@ -2709,6 +2965,48 @@ impl<'a> Cx<'a> {
                 // Built-in `yield_now()` — cooperative yield.
                 if callee.0 == u32::MAX - 20 {
                     return "(__maka_yield_now(), MAKA_UNIT)".into();
+                }
+                // Built-in `cancel(*Thread)`.
+                if callee.0 == u32::MAX - 23 {
+                    if let Some(a) = args.first() {
+                        let s = self.emit_expr(f, a);
+                        return format!("(__maka_cancel((maka_unit*)({})), MAKA_UNIT)", s);
+                    }
+                    return "MAKA_UNIT".into();
+                }
+                // Built-in `try_join(*Thread) -> bool`.
+                if callee.0 == u32::MAX - 24 {
+                    if let Some(a) = args.first() {
+                        let s = self.emit_expr(f, a);
+                        return format!("((bool)(__maka_try_join((maka_unit*)({}), NULL) != 0))", s);
+                    }
+                    return "0".into();
+                }
+                // Built-in `join_timeout(*Thread, int) -> bool`.
+                if callee.0 == u32::MAX - 25 {
+                    if args.len() == 2 {
+                        let h = self.emit_expr(f, &args[0]);
+                        let ms = self.emit_expr(f, &args[1]);
+                        return format!(
+                            "((bool)(__maka_join_timeout((maka_unit*)({}), (int64_t)({}), NULL) != 0))",
+                            h, ms
+                        );
+                    }
+                    return "0".into();
+                }
+                // Built-in `select_timeout(slice, int) -> int`.
+                if callee.0 == u32::MAX - 26 {
+                    if args.len() == 2 {
+                        let s = self.emit_expr(f, &args[0]);
+                        let ms = self.emit_expr(f, &args[1]);
+                        return format!(
+                            "({{ int64_t __out_i = -1; \
+                                 (void)__maka_select_timeout_i64((maka_unit**)({0}).ptr, ({0}).len, (int64_t)({1}), &__out_i); \
+                                 __out_i; }})",
+                            s, ms
+                        );
+                    }
+                    return "(-1)".into();
                 }
                 // Built-in `par_map_int(start, end, fn)` — produce a `[]int`.
                 if callee.0 == u32::MAX - 22 {

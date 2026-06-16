@@ -1,0 +1,24 @@
+// select_timeout(slice, int ms) — race with a deadline.  Returns the
+// winner index, or -1 if no handle finishes within the deadline.
+import std.sleep_ms;
+
+unit main() {
+    [2]*Thread fast_handles = [
+        spawn(unit() { sleep_ms(200); }),
+        spawn(unit() { sleep_ms(5);   }),    // winner
+    ];
+    []*Thread fs = fast_handles;
+    int win = select_timeout(fs, 50);
+    log(win);            // 1
+
+    [2]*Thread slow_handles = [
+        spawn(unit() { sleep_ms(100); }),
+        spawn(unit() { sleep_ms(100); }),
+    ];
+    []*Thread ss = slow_handles;
+    int miss = select_timeout(ss, 10);
+    log(miss);           // -1
+    // Drain the stragglers via join (a 200 ms cap is enough).
+    _ = join_timeout(slow_handles[0], 200);
+    _ = join_timeout(slow_handles[1], 200);
+}

@@ -1,0 +1,15 @@
+// User-callable cancel(*Thread) — a fiber spawned and then immediately
+// cancelled never gets a chance to run.
+import std.sleep_ms;
+
+unit main() {
+    *Thread t = spawn(unit() {
+        sleep_ms(50);
+        log(99);   // never reached — cancelled before the timer fires
+    });
+    sleep_ms(5);
+    cancel(t);
+    log(0);
+    sleep_ms(60);  // wait past the would-have-fired moment
+    log(1);
+}
