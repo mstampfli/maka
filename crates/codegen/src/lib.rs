@@ -1010,6 +1010,9 @@ impl<'a> Cx<'a> {
         // reference them by their __maka_ names from the rest of the file.
         self.w("/* TCP runtime — scoped includes to avoid name clashes. */\n");
         self.w("static inline int64_t __maka_tcp_listen(int64_t port, int64_t backlog);\n");
+        self.w("static inline int64_t __maka_udp_open(int64_t port);\n");
+        self.w("static inline int64_t __maka_udp_send_v4(int64_t fd, int64_t a, int64_t b, int64_t c, int64_t d, int64_t port, maka_unit* buf, int64_t len);\n");
+        self.w("static inline int64_t __maka_udp_recv_async(int64_t fd, maka_unit* buf, int64_t cap);\n");
         self.w("static inline int64_t __maka_tcp_accept_async(int64_t listen_fd);\n");
         self.w("static inline int64_t __maka_tcp_connect_v4(int64_t a, int64_t b, int64_t c, int64_t d, int64_t port);\n");
         self.w("static inline int64_t __maka_close_fd(int64_t fd);\n");
@@ -2950,6 +2953,44 @@ impl<'a> Cx<'a> {
         self.w("    close(s); return -1;\n");
         self.w("}\n");
         self.w("static inline int64_t __maka_close_fd(int64_t fd) { return close((int)fd); }\n");
+        // UDP helpers — bind a datagram socket, send/recv from a peer.
+        self.w("static inline int64_t __maka_udp_open(int64_t port) {\n");
+        self.w("    int s = socket(__MAKA_AF_INET, 2 /*SOCK_DGRAM*/, 0);\n");
+        self.w("    if (s < 0) return -1;\n");
+        self.w("    struct __maka_sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n");
+        self.w("    sa.sin_family = __MAKA_AF_INET;\n");
+        self.w("    sa.sin_addr.s_addr = htonl(__MAKA_INADDR_ANY);\n");
+        self.w("    sa.sin_port = htons((unsigned short)port);\n");
+        self.w("    if (port > 0 && bind(s, &sa, sizeof(sa)) != 0) { close(s); return -1; }\n");
+        self.w("    int flags = fcntl(s, F_GETFL, 0);\n");
+        self.w("    fcntl(s, F_SETFL, flags | O_NONBLOCK);\n");
+        self.w("    return s;\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_udp_send_v4(int64_t fd, int64_t a, int64_t b, int64_t c, int64_t d, int64_t port, maka_unit* buf, int64_t len) {\n");
+        self.w("    struct __maka_sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n");
+        self.w("    sa.sin_family = __MAKA_AF_INET;\n");
+        self.w("    sa.sin_port = htons((unsigned short)port);\n");
+        self.w("    unsigned char oct[4] = {(unsigned char)a, (unsigned char)b, (unsigned char)c, (unsigned char)d};\n");
+        self.w("    memcpy(&sa.sin_addr.s_addr, oct, 4);\n");
+        self.w("    extern ssize_t sendto(int, const void*, size_t, int, const void*, __maka_socklen_t);\n");
+        self.w("    while (1) {\n");
+        self.w("        ssize_t n = sendto((int)fd, (void*)buf, (size_t)len, 0, &sa, sizeof(sa));\n");
+        self.w("        if (n >= 0) return (int64_t)n;\n");
+        self.w("        if (errno == EAGAIN || errno == EWOULDBLOCK) { __maka_wait_fd(fd, MAKA_EV_WRITE); continue; }\n");
+        self.w("        if (errno == EINTR) continue;\n");
+        self.w("        return -1;\n");
+        self.w("    }\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_udp_recv_async(int64_t fd, maka_unit* buf, int64_t cap) {\n");
+        self.w("    extern ssize_t recvfrom(int, void*, size_t, int, void*, __maka_socklen_t*);\n");
+        self.w("    while (1) {\n");
+        self.w("        ssize_t n = recvfrom((int)fd, (void*)buf, (size_t)cap, 0, NULL, NULL);\n");
+        self.w("        if (n >= 0) return (int64_t)n;\n");
+        self.w("        if (errno == EAGAIN || errno == EWOULDBLOCK) { __maka_wait_fd(fd, MAKA_EV_READ); continue; }\n");
+        self.w("        if (errno == EINTR) continue;\n");
+        self.w("        return -1;\n");
+        self.w("    }\n");
+        self.w("}\n");
     }
 
     fn emit_func(&mut self, f: &HFunc) {

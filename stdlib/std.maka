@@ -66,6 +66,16 @@ extern "__maka_tcp_listen"       int  __tcp_listen(int port, int backlog);
 extern "__maka_tcp_accept_async" int  __tcp_accept(int listen_fd);
 extern "__maka_tcp_connect_v4"   int  __tcp_connect_v4(int a, int b, int c, int d, int port);
 extern "__maka_close_fd"         int  __close_fd(int fd);
+extern "__maka_udp_open"         int  __udp_open(int port);
+extern "__maka_udp_send_v4"      int  __udp_send_v4(int fd, int a, int b, int c, int d, int port, *mut unit buf, int len);
+extern "__maka_udp_recv_async"   int  __udp_recv_async(int fd, *mut unit buf, int cap);
+
+// UDP datagram helpers.  Port 0 picks an ephemeral local port.
+pub int udp_open      (int port)                                       { return __udp_open(port); }
+pub int udp_send_v4   (int fd, int a, int b, int c, int d, int port, *mut unit buf, int len) {
+    return __udp_send_v4(fd, a, b, c, d, port, buf, len);
+}
+pub int udp_recv_async(int fd, *mut unit buf, int cap)                 { return __udp_recv_async(fd, buf, cap); }
 
 // TCP helpers.  All sockets are returned in non-blocking mode so the
 // reactor primitives (wait_fd, read_async, write_async) work directly.

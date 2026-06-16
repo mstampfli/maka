@@ -1,0 +1,45 @@
+// UDP datagram echo.  Server fiber recvs 4 bytes, replies to the
+// sender's source port (via a separate send socket).  Demonstrates
+// udp_open / udp_send_v4 / udp_recv_async working through the reactor.
+
+import std.{udp_open, udp_send_v4, udp_recv_async, close_fd};
+
+cblock "
+    static maka_unit* __mk_buf(void) { static unsigned char b[16]; return (maka_unit*)b; }
+    static maka_unit* __mk_msg(void) { static unsigned char m[4] = {'P','I','N','G'}; return (maka_unit*)m; }
+    static int        __mk_buf_at(int i) { unsigned char* b = (unsigned char*)__mk_buf(); return (int)b[i]; }
+";
+extern *unit __mk_buf();
+extern *unit __mk_msg();
+extern i32   __mk_buf_at(i32 i);
+
+mut int g_server_fd  = 0;
+mut int g_server_port = 0;
+mut int g_client_port = 0;
+
+unit server_body() {
+    int n = udp_recv_async(g_server_fd, __mk_buf() as *mut unit, 16);
+    // Echo to client's known port (test-only — simpler than peeking at sender).
+    _ = udp_send_v4(g_server_fd, 127, 0, 0, 1, g_client_port, __mk_buf() as *mut unit, n);
+}
+
+unit client_body() {
+    int s = udp_open(g_client_port);
+    _ = udp_send_v4(s, 127, 0, 0, 1, g_server_port, __mk_msg() as *mut unit, 4);
+    int n = udp_recv_async(s, __mk_buf() as *mut unit, 4);
+    log(n);                              // 4
+    log(__mk_buf_at(0 as i32) as int);   // 80 'P'
+    log(__mk_buf_at(3 as i32) as int);   // 71 'G'
+    _ = close_fd(s);
+}
+
+unit main() {
+    g_server_port = 40521;
+    g_client_port = 40522;
+    g_server_fd = udp_open(g_server_port);
+    *Thread srv = spawn(unit() { server_body(); });
+    *Thread cli = spawn(unit() { client_body(); });
+    join(srv);
+    join(cli);
+    _ = close_fd(g_server_fd);
+}
