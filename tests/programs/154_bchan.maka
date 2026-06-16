@@ -1,0 +1,29 @@
+// Generic byte channel: ship arbitrary-size items by per-channel
+// item_size.  Here we round-trip 8-byte int values through it; users
+// can wrap to ship structs by passing &struct_value as the raw pointer.
+
+import std.{chan_bytes_new, chan_bytes_send, chan_bytes_recv,
+            chan_bytes_count, chan_bytes_destroy};
+
+unit main() {
+    // 8 bytes per int (i64 / maka_int)
+    *unit ch = chan_bytes_new(8);
+
+    mut int x = 42;
+    chan_bytes_send(ch, &mut x as *mut unit);
+    mut int y = 7;
+    chan_bytes_send(ch, &mut y as *mut unit);
+
+    log(chan_bytes_count(ch));   // 2
+
+    mut int a = 0;
+    chan_bytes_recv(ch, &mut a as *mut unit);
+    mut int b = 0;
+    chan_bytes_recv(ch, &mut b as *mut unit);
+
+    log(a);   // 42
+    log(b);   // 7
+    log(chan_bytes_count(ch));   // 0
+
+    chan_bytes_destroy(ch);
+}

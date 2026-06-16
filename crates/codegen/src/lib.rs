@@ -244,6 +244,76 @@ impl<'a> Cx<'a> {
         self.w("void maka_channel_send(maka_unit* p, maka_int v) { maka_channel_t* ch = (maka_channel_t*)p; maka_chan_node_t* n = (maka_chan_node_t*)malloc(sizeof(maka_chan_node_t)); n->v = v; n->next = NULL; pthread_mutex_lock(&ch->m); if (ch->tail) ch->tail->next = n; else ch->head = n; ch->tail = n; ch->count++; pthread_cond_signal(&ch->c); pthread_mutex_unlock(&ch->m); }\n");
         self.w("maka_int maka_channel_recv(maka_unit* p) { maka_channel_t* ch = (maka_channel_t*)p; pthread_mutex_lock(&ch->m); while (!ch->head) pthread_cond_wait(&ch->c, &ch->m); maka_chan_node_t* n = ch->head; ch->head = n->next; if (!ch->head) ch->tail = NULL; ch->count--; pthread_mutex_unlock(&ch->m); maka_int v = n->v; free(n); return v; }\n");
         self.w("void maka_channel_destroy(maka_unit* p) { maka_channel_t* ch = (maka_channel_t*)p; while (ch->head) { maka_chan_node_t* n = ch->head; ch->head = n->next; free(n); } pthread_mutex_destroy(&ch->m); pthread_cond_destroy(&ch->c); free(ch); }\n");
+        // Byte-channel: variable-size items (per-channel item_size).  Users
+        // wrap this with typed sugar in their own modules — e.g.
+        //   data PointChan { *unit handle }
+        //   pt_chan_send(c, p) { chan_bytes_send(c.handle, &p as raw *unit); }
+        // The runtime memcpy()s `item_size` bytes per send/recv.  Unbounded
+        // capacity for v1.
+        self.w("typedef struct maka_bnode_t {\n");
+        self.w("    struct maka_bnode_t* next;\n");
+        self.w("    char data[];\n");
+        self.w("} maka_bnode_t;\n");
+        self.w("typedef struct {\n");
+        self.w("    int item_size;\n");
+        self.w("    pthread_mutex_t m;\n");
+        self.w("    pthread_cond_t  c;\n");
+        self.w("    maka_bnode_t*   head;\n");
+        self.w("    maka_bnode_t*   tail;\n");
+        self.w("    int count;\n");
+        self.w("    int closed;\n");
+        self.w("} maka_bchan_t;\n");
+        self.w("maka_unit* maka_chan_bytes_new(int64_t item_size) {\n");
+        self.w("    maka_bchan_t* c = (maka_bchan_t*)calloc(1, sizeof(maka_bchan_t));\n");
+        self.w("    c->item_size = (int)item_size;\n");
+        self.w("    pthread_mutex_init(&c->m, NULL);\n");
+        self.w("    pthread_cond_init(&c->c, NULL);\n");
+        self.w("    return (maka_unit*)c;\n");
+        self.w("}\n");
+        self.w("void maka_chan_bytes_send(maka_unit* p, maka_unit* src) {\n");
+        self.w("    maka_bchan_t* c = (maka_bchan_t*)p;\n");
+        self.w("    maka_bnode_t* n = (maka_bnode_t*)malloc(sizeof(maka_bnode_t) + (size_t)c->item_size);\n");
+        self.w("    memcpy(n->data, (void*)src, (size_t)c->item_size);\n");
+        self.w("    n->next = NULL;\n");
+        self.w("    pthread_mutex_lock(&c->m);\n");
+        self.w("    if (c->tail) c->tail->next = n; else c->head = n;\n");
+        self.w("    c->tail = n; c->count++;\n");
+        self.w("    pthread_cond_signal(&c->c);\n");
+        self.w("    pthread_mutex_unlock(&c->m);\n");
+        self.w("}\n");
+        self.w("void maka_chan_bytes_recv(maka_unit* p, maka_unit* dst) {\n");
+        self.w("    maka_bchan_t* c = (maka_bchan_t*)p;\n");
+        self.w("    pthread_mutex_lock(&c->m);\n");
+        self.w("    while (!c->head && !c->closed) pthread_cond_wait(&c->c, &c->m);\n");
+        self.w("    maka_bnode_t* n = c->head;\n");
+        self.w("    if (n) {\n");
+        self.w("        c->head = n->next; if (!c->head) c->tail = NULL;\n");
+        self.w("        c->count--;\n");
+        self.w("        memcpy((void*)dst, n->data, (size_t)c->item_size);\n");
+        self.w("    } else { memset((void*)dst, 0, (size_t)c->item_size); }\n");
+        self.w("    pthread_mutex_unlock(&c->m);\n");
+        self.w("    free(n);\n");
+        self.w("}\n");
+        self.w("int64_t maka_chan_bytes_count(maka_unit* p) {\n");
+        self.w("    maka_bchan_t* c = (maka_bchan_t*)p;\n");
+        self.w("    pthread_mutex_lock(&c->m);\n");
+        self.w("    int64_t v = c->count;\n");
+        self.w("    pthread_mutex_unlock(&c->m);\n");
+        self.w("    return v;\n");
+        self.w("}\n");
+        self.w("void maka_chan_bytes_close(maka_unit* p) {\n");
+        self.w("    maka_bchan_t* c = (maka_bchan_t*)p;\n");
+        self.w("    pthread_mutex_lock(&c->m);\n");
+        self.w("    c->closed = 1;\n");
+        self.w("    pthread_cond_broadcast(&c->c);\n");
+        self.w("    pthread_mutex_unlock(&c->m);\n");
+        self.w("}\n");
+        self.w("void maka_chan_bytes_destroy(maka_unit* p) {\n");
+        self.w("    maka_bchan_t* c = (maka_bchan_t*)p;\n");
+        self.w("    while (c->head) { maka_bnode_t* n = c->head; c->head = n->next; free(n); }\n");
+        self.w("    pthread_mutex_destroy(&c->m); pthread_cond_destroy(&c->c);\n");
+        self.w("    free(c);\n");
+        self.w("}\n");
         // Atomic<i64> — the only sync primitive whose body has no scheduler
         // dependency, so it lives here.  The fiber-aware Mutex / WaitGroup /
         // Once primitives are emitted after the scheduler is defined (they

@@ -229,6 +229,26 @@ extern "maka_atomic_i64_add"     int   __atomic_add(*unit a, int delta);
 extern "maka_atomic_i64_cas"     int   __atomic_cas(*unit a, int expected, int desired);
 extern "maka_atomic_i64_destroy" unit  __atomic_destroy(*unit a);
 
+// Byte-channel: variable-size items, set per channel via item_size.  Use
+// these to build typed channels in user code — wrap the *unit handle in a
+// `data MyTypeChan { *unit h }`, cast `&value as raw *mut unit` for send,
+// `&mut out as raw *mut unit` for recv.  v1: unbounded, blocks pthread on
+// empty recv (not yet fiber-aware — use spawn_pool on receiver to keep
+// the fiber scheduler running).
+extern "maka_chan_bytes_new"     *unit __chan_bytes_new(int item_size);
+extern "maka_chan_bytes_send"    unit  __chan_bytes_send(*unit ch, *unit src);
+extern "maka_chan_bytes_recv"    unit  __chan_bytes_recv(*unit ch, *unit dst);
+extern "maka_chan_bytes_count"   int   __chan_bytes_count(*unit ch);
+extern "maka_chan_bytes_close"   unit  __chan_bytes_close(*unit ch);
+extern "maka_chan_bytes_destroy" unit  __chan_bytes_destroy(*unit ch);
+
+pub *unit chan_bytes_new    (int item_size)              { return __chan_bytes_new(item_size); }
+pub unit  chan_bytes_send   (*unit ch, *unit src)        { __chan_bytes_send(ch, src); }
+pub unit  chan_bytes_recv   (*unit ch, *unit dst)        { __chan_bytes_recv(ch, dst); }
+pub int   chan_bytes_count  (*unit ch)                   { return __chan_bytes_count(ch); }
+pub unit  chan_bytes_close  (*unit ch)                   { __chan_bytes_close(ch); }
+pub unit  chan_bytes_destroy(*unit ch)                   { __chan_bytes_destroy(ch); }
+
 pub *unit atomic_new   (int v)                              { return __atomic_new(v); }
 // `atomic_get` / `atomic_set` instead of load/store to avoid clashing with
 // the C11 <stdatomic.h> macros of those names.
