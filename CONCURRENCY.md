@@ -589,7 +589,13 @@ unit frame() {
 | `poll()` fallback reactor for non-epoll kernels | **Implemented** — rebuilds pollfd[] from maka_fd_regs per tick |
 | IOCP backend (Windows) | Pending — different completion-model; not yet ported |
 | Cross-thread fiber migration (load-balance fibers across worker schedulers) | Pending — job pool covers parallelism today |
-| Generic `par_map<T, U>` / `par_reduce<T>` for non-int element types | Pending |
+| `par_map_float` / `par_reduce_float` / `par_for_each_float` (float slices) | **Implemented** |
+| `TcpListener` / `TcpStream` typed wrappers + tcp_listener_open/accept/close, tcp_dial_v4, tcp_stream_read/write/close | **Implemented** |
+| Generic `par_map<T, U>` / `par_reduce<T>` for arbitrary element types | Pending — requires monomorphization-aware codegen |
+| Cross-thread fiber migration / shared MPMC ready queue | Pending — fibers are per-scheduler; job pool covers cross-thread parallelism |
+| transfer/share enforcement on spawn captures (Send-probe at boundary) | Partial — Rust<T> captures probed; raw Maka captures not yet verified |
+| IOCP backend (Windows) | Pending — different completion model |
+| Blocking-syscall watchdog warning | Pending — runtime detection of fibers that don't yield |
 
 The **surface is final** and user code written against it today will
 continue to work as the runtime improves.  Performance will improve
