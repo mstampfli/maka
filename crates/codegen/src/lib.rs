@@ -1099,6 +1099,8 @@ impl<'a> Cx<'a> {
         self.w("static inline int64_t __maka_file_open(const char* path, int64_t flags, int64_t mode);\n");
         self.w("static inline int64_t __maka_file_read_async(int64_t fd, maka_unit* buf, int64_t cap, int64_t offset);\n");
         self.w("static inline int64_t __maka_file_write_async(int64_t fd, maka_unit* buf, int64_t len, int64_t offset);\n");
+        self.w("static inline int64_t __maka_unix_listen(const char* path, int64_t backlog);\n");
+        self.w("static inline int64_t __maka_unix_connect(const char* path);\n");
         self.w("int64_t __maka_set_nonblock(int64_t fd) {\n");
         self.w("    int flags = fcntl((int)fd, F_GETFL, 0);\n");
         self.w("    if (flags < 0) return -1;\n");
@@ -3043,6 +3045,41 @@ impl<'a> Cx<'a> {
         self.w("    close(s); return -1;\n");
         self.w("}\n");
         self.w("static inline int64_t __maka_close_fd(int64_t fd) { return close((int)fd); }\n");
+        // Unix domain sockets — bind/connect by path.  Use the same socket
+        // forward decls + syscall machinery as the TCP helpers; AF_UNIX = 1.
+        self.w("struct __maka_sockaddr_un { unsigned short sun_family; char sun_path[108]; };\n");
+        self.w("#define __MAKA_AF_UNIX 1\n");
+        self.w("static inline int64_t __maka_unix_listen(const char* path, int64_t backlog) {\n");
+        self.w("    int s = socket(__MAKA_AF_UNIX, __MAKA_SOCK_STREAM, 0);\n");
+        self.w("    if (s < 0) return -1;\n");
+        self.w("    struct __maka_sockaddr_un sa; memset(&sa, 0, sizeof(sa));\n");
+        self.w("    sa.sun_family = __MAKA_AF_UNIX;\n");
+        self.w("    size_t pl = strlen(path); if (pl >= sizeof(sa.sun_path)) pl = sizeof(sa.sun_path) - 1;\n");
+        self.w("    memcpy(sa.sun_path, path, pl);\n");
+        self.w("    unlink(path);  /* best-effort prior cleanup */\n");
+        self.w("    if (bind(s, (struct sockaddr*)&sa, sizeof(sa)) != 0) { close(s); return -1; }\n");
+        self.w("    if (listen(s, (int)backlog) != 0) { close(s); return -1; }\n");
+        self.w("    int flags = fcntl(s, F_GETFL, 0); fcntl(s, F_SETFL, flags | O_NONBLOCK);\n");
+        self.w("    return s;\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_unix_connect(const char* path) {\n");
+        self.w("    int s = socket(__MAKA_AF_UNIX, __MAKA_SOCK_STREAM, 0);\n");
+        self.w("    if (s < 0) return -1;\n");
+        self.w("    int flags = fcntl(s, F_GETFL, 0); fcntl(s, F_SETFL, flags | O_NONBLOCK);\n");
+        self.w("    struct __maka_sockaddr_un sa; memset(&sa, 0, sizeof(sa));\n");
+        self.w("    sa.sun_family = __MAKA_AF_UNIX;\n");
+        self.w("    size_t pl = strlen(path); if (pl >= sizeof(sa.sun_path)) pl = sizeof(sa.sun_path) - 1;\n");
+        self.w("    memcpy(sa.sun_path, path, pl);\n");
+        self.w("    int r = connect(s, (struct sockaddr*)&sa, sizeof(sa));\n");
+        self.w("    if (r == 0) return s;\n");
+        self.w("    if (errno == EINPROGRESS) {\n");
+        self.w("        __maka_wait_fd(s, MAKA_EV_WRITE);\n");
+        self.w("        int err = 0; __maka_socklen_t elen = sizeof(err);\n");
+        self.w("        getsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_ERROR, &err, &elen);\n");
+        self.w("        if (err == 0) return s;\n");
+        self.w("    }\n");
+        self.w("    close(s); return -1;\n");
+        self.w("}\n");
         // File async IO via offload thread.  Each call spawns a one-shot
         // pthread that does the blocking pread/pwrite, then signals an
         // eventfd the calling fiber waits on.  Heavy per call (pthread

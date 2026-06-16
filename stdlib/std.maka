@@ -67,6 +67,14 @@ extern "__maka_tcp_accept_async" int  __tcp_accept(int listen_fd);
 extern "__maka_tcp_connect_v4"   int  __tcp_connect_v4(int a, int b, int c, int d, int port);
 extern "__maka_close_fd"         int  __close_fd(int fd);
 extern "__maka_dns_resolve_v4"   int  __dns_resolve_v4(string host);
+extern "__maka_unix_listen"      int  __unix_listen(string path, int backlog);
+extern "__maka_unix_connect"     int  __unix_connect(string path);
+
+// Unix domain sockets — pathname-based IPC.  Same stream semantics as TCP,
+// so accept_async / read_async / write_async / close_fd work on the
+// returned fd identically.
+pub int unix_listen (string path, int backlog) { return __unix_listen(path, backlog); }
+pub int unix_connect(string path)               { return __unix_connect(path); }
 extern "__maka_file_open"        int  __file_open(string path, int flags, int mode);
 extern "__maka_file_read_async"  int  __file_read_async(int fd, *mut unit buf, int cap, int offset);
 extern "__maka_file_write_async" int  __file_write_async(int fd, *mut unit buf, int len, int offset);
