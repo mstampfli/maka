@@ -1162,6 +1162,13 @@ impl<'a> Cx<'a> {
         self.w("static inline int64_t __maka_file_write_async(int64_t fd, maka_unit* buf, int64_t len, int64_t offset);\n");
         self.w("static inline int64_t __maka_unix_listen(const char* path, int64_t backlog);\n");
         self.w("static inline int64_t __maka_unix_connect(const char* path);\n");
+        self.w("static inline int64_t __maka_http_parse(const char* buf, int64_t len);\n");
+        self.w("static inline int64_t __maka_http_method_off_g(void);\n");
+        self.w("static inline int64_t __maka_http_method_len_g(void);\n");
+        self.w("static inline int64_t __maka_http_path_off_g(void);\n");
+        self.w("static inline int64_t __maka_http_path_len_g(void);\n");
+        self.w("static inline int64_t __maka_http_body_off_g(void);\n");
+        self.w("static inline int64_t __maka_http_content_length_g(void);\n");
         self.w("static inline int64_t __maka_pipe_create(void);\n");
         self.w("static inline int64_t __maka_pipe_write_fd(void);\n");
         self.w("int64_t __maka_set_nonblock(int64_t fd) {\n");
@@ -3195,6 +3202,72 @@ impl<'a> Cx<'a> {
         self.w("    close(s); return -1;\n");
         self.w("}\n");
         self.w("static inline int64_t __maka_close_fd(int64_t fd) { return close((int)fd); }\n");
+        // HTTP request line parser — given a request buffer, returns the
+        // method, path, and Content-Length as offset+len in pieces.
+        // Caller exposes them via separate getters (Maka can't return tuples).
+        self.w("static __thread int __maka_http_method_off = -1;\n");
+        self.w("static __thread int __maka_http_method_len = 0;\n");
+        self.w("static __thread int __maka_http_path_off = -1;\n");
+        self.w("static __thread int __maka_http_path_len = 0;\n");
+        self.w("static __thread int __maka_http_body_off = -1;\n");
+        self.w("static __thread int __maka_http_content_length = -1;\n");
+        self.w("static inline int64_t __maka_http_parse(const char* buf, int64_t len) {\n");
+        self.w("    __maka_http_method_off = -1; __maka_http_method_len = 0;\n");
+        self.w("    __maka_http_path_off   = -1; __maka_http_path_len = 0;\n");
+        self.w("    __maka_http_body_off   = -1; __maka_http_content_length = -1;\n");
+        self.w("    if (len < 4) return -1;\n");
+        // method
+        self.w("    int i = 0;\n");
+        self.w("    __maka_http_method_off = 0;\n");
+        self.w("    while (i < len && buf[i] != ' ') i++;\n");
+        self.w("    if (i >= len) return -1;\n");
+        self.w("    __maka_http_method_len = i;\n");
+        self.w("    i++;\n");
+        // path
+        self.w("    __maka_http_path_off = i;\n");
+        self.w("    while (i < len && buf[i] != ' ') i++;\n");
+        self.w("    if (i >= len) return -1;\n");
+        self.w("    __maka_http_path_len = i - __maka_http_path_off;\n");
+        // skip to end of request line
+        self.w("    while (i < len && buf[i] != '\\n') i++;\n");
+        self.w("    if (i >= len) return -1;\n");
+        self.w("    i++;\n");
+        // headers — scan for Content-Length and the empty line that ends the headers.
+        self.w("    while (i < len) {\n");
+        self.w("        if (buf[i] == '\\r' || buf[i] == '\\n') {\n");
+        self.w("            int j = i; if (buf[j] == '\\r' && j + 1 < len && buf[j+1] == '\\n') j += 2; else j++;\n");
+        self.w("            __maka_http_body_off = j;\n");
+        self.w("            return 0;\n");
+        self.w("        }\n");
+        // Case-insensitive compare with "Content-Length:"
+        self.w("        if (i + 15 < len) {\n");
+        self.w("            const char* cl = \"Content-Length:\";\n");
+        self.w("            int match = 1;\n");
+        self.w("            for (int k = 0; k < 15; k++) {\n");
+        self.w("                char a = buf[i + k]; char b = cl[k];\n");
+        self.w("                if (a >= 'A' && a <= 'Z') a += 32;\n");
+        self.w("                if (b >= 'A' && b <= 'Z') b += 32;\n");
+        self.w("                if (a != b) { match = 0; break; }\n");
+        self.w("            }\n");
+        self.w("            if (match) {\n");
+        self.w("                int p = i + 15;\n");
+        self.w("                while (p < len && (buf[p] == ' ' || buf[p] == '\\t')) p++;\n");
+        self.w("                int v = 0;\n");
+        self.w("                while (p < len && buf[p] >= '0' && buf[p] <= '9') { v = v * 10 + (buf[p] - '0'); p++; }\n");
+        self.w("                __maka_http_content_length = v;\n");
+        self.w("            }\n");
+        self.w("        }\n");
+        self.w("        while (i < len && buf[i] != '\\n') i++;\n");
+        self.w("        if (i < len) i++;\n");
+        self.w("    }\n");
+        self.w("    return -1;  /* headers incomplete */\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_http_method_off_g(void) { return __maka_http_method_off; }\n");
+        self.w("static inline int64_t __maka_http_method_len_g(void) { return __maka_http_method_len; }\n");
+        self.w("static inline int64_t __maka_http_path_off_g  (void) { return __maka_http_path_off; }\n");
+        self.w("static inline int64_t __maka_http_path_len_g  (void) { return __maka_http_path_len; }\n");
+        self.w("static inline int64_t __maka_http_body_off_g  (void) { return __maka_http_body_off; }\n");
+        self.w("static inline int64_t __maka_http_content_length_g(void) { return __maka_http_content_length; }\n");
         // pipe_create: opens a non-blocking pipe pair and returns the read
         // fd; the write fd is stashed and retrievable via pipe_write_fd.
         // Per-thread stash — keeps the simple "make a pipe, send it through

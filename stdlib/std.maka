@@ -85,6 +85,28 @@ pub int pipe_write_fd() { return __pipe_write_fd(); }
 // returned fd identically.
 pub int unix_listen (string path, int backlog) { return __unix_listen(path, backlog); }
 pub int unix_connect(string path)               { return __unix_connect(path); }
+
+// Minimal HTTP/1.x request parser.  `http_parse(buf, len)` returns 0 on
+// success (full headers present in buf) or -1 if more bytes are needed.
+// After a successful parse, the offset+length pairs and the body offset
+// are available via the getter calls below — they read from per-thread
+// state set by the most recent parse, so don't call other http_parse
+// concurrently on the same thread.
+extern "__maka_http_parse"               int __http_parse(string buf, int len);
+extern "__maka_http_method_off_g"        int __http_method_off();
+extern "__maka_http_method_len_g"        int __http_method_len();
+extern "__maka_http_path_off_g"          int __http_path_off();
+extern "__maka_http_path_len_g"          int __http_path_len();
+extern "__maka_http_body_off_g"          int __http_body_off();
+extern "__maka_http_content_length_g"    int __http_content_length();
+
+pub int http_parse           (string buf, int len) { return __http_parse(buf, len); }
+pub int http_method_off      ()                    { return __http_method_off(); }
+pub int http_method_len      ()                    { return __http_method_len(); }
+pub int http_path_off        ()                    { return __http_path_off(); }
+pub int http_path_len        ()                    { return __http_path_len(); }
+pub int http_body_off        ()                    { return __http_body_off(); }
+pub int http_content_length  ()                    { return __http_content_length(); }
 extern "__maka_file_open"        int  __file_open(string path, int flags, int mode);
 extern "__maka_file_read_async"  int  __file_read_async(int fd, *mut unit buf, int cap, int offset);
 extern "__maka_file_write_async" int  __file_write_async(int fd, *mut unit buf, int len, int offset);

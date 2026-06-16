@@ -1,0 +1,34 @@
+// HTTP request parser: feed a complete request, verify the parser
+// extracts method, path, and body offset.
+import std.{http_parse, http_method_off, http_method_len,
+            http_path_off, http_path_len, http_body_off,
+            http_content_length};
+
+cblock "
+    static const char* __mk_req(void) {
+        return \"POST /api/users HTTP/1.1\\r\\n\"
+               \"Host: example.com\\r\\n\"
+               \"Content-Length: 5\\r\\n\"
+               \"Content-Type: application/json\\r\\n\"
+               \"\\r\\n\"
+               \"hello\";
+    }
+    static int __mk_req_len(void) { return (int)strlen(__mk_req()); }
+    static int __mk_byte(int i)   { return (int)(unsigned char)__mk_req()[i]; }
+";
+extern string __mk_req();
+extern i32    __mk_req_len();
+extern i32    __mk_byte(i32 i);
+
+unit main() {
+    int rc = http_parse(__mk_req(), __mk_req_len() as int);
+    log(rc);                       // 0
+    log(http_method_off());        // 0
+    log(http_method_len());        // 4 ("POST")
+    log(http_method_off() as int + http_method_len()); // 4
+    log(http_path_len());          // 10 ("/api/users")
+    log(http_content_length());    // 5
+    // First byte of body should be 'h' = 104.
+    int b = http_body_off();
+    log(__mk_byte(b as i32) as int);  // 104
+}
