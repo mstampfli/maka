@@ -587,7 +587,7 @@ unit frame() {
 | Closure env auto-freed on fiber/thread/job completion (no leak per spawn) | **Implemented** |
 | kqueue backend (macOS/BSD) | **Implemented** — translates epoll API → kevent / EVFILT_READ/WRITE |
 | `poll()` fallback reactor for non-epoll kernels | **Implemented** — rebuilds pollfd[] from maka_fd_regs per tick |
-| IOCP backend (Windows) | Pending — different completion-model; not yet ported |
+| IOCP backend (Windows) | **Partial** — compile-only port: Win32 Fibers (CreateFiber/SwitchToFiber) implement the ucontext API; reactor + signalfd/timerfd/eventfd/inotify return -1 stubs.  Untested without Windows hardware; a proper completion-based IOCP reactor remains a multi-day project |
 | Cross-thread fiber migration (load-balance fibers across worker schedulers) | Pending — job pool covers parallelism today |
 | `par_map_float` / `par_reduce_float` / `par_for_each_float` (float slices) | **Implemented** |
 | `TcpListener` / `TcpStream` typed wrappers + tcp_listener_open/accept/close, tcp_dial_v4, tcp_stream_read/write/close | **Implemented** |

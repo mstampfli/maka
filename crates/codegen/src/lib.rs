@@ -222,6 +222,36 @@ impl<'a> Cx<'a> {
         // Mutex via pthread: opaque pointer-sized handle, exposed via maka_unit* to match Maka's `*unit`.
         self.w("#include <pthread.h>\n");
         self.w("#include <stdatomic.h>\n");
+        // ucontext.h is Unix-only.  On Windows, provide a compat shim that
+        // emulates getcontext/swapcontext/makecontext via Win32 Fibers
+        // (CreateFiber, SwitchToFiber, GetCurrentFiber, ConvertThreadToFiber).
+        // The struct keeps a void* fiber handle plus the same uc_stack /
+        // uc_link fields the rest of the runtime references (which the
+        // Win32 implementation ignores — fibers manage their own stack).
+        // Untested without Windows hardware; ships as a compile-only port.
+        self.w("#ifdef _WIN32\n");
+        self.w("#include <windows.h>\n");
+        self.w("typedef struct { void* fiber; struct { void* ss_sp; size_t ss_size; } uc_stack; void* uc_link; } ucontext_t;\n");
+        self.w("static __thread int __maka_win_fiber_inited = 0;\n");
+        self.w("static inline void __maka_win_fiber_init(void) {\n");
+        self.w("    if (__maka_win_fiber_inited) return;\n");
+        self.w("    __maka_win_fiber_inited = 1;\n");
+        self.w("    ConvertThreadToFiber(NULL);\n");
+        self.w("}\n");
+        self.w("static inline int getcontext(ucontext_t* c) { __maka_win_fiber_init(); c->fiber = GetCurrentFiber(); return 0; }\n");
+        self.w("static inline void makecontext(ucontext_t* c, void (*f)(void), int n) {\n");
+        self.w("    (void)n; __maka_win_fiber_init();\n");
+        self.w("    c->fiber = CreateFiber(c->uc_stack.ss_size ? c->uc_stack.ss_size : 0, (LPFIBER_START_ROUTINE)(void*)f, NULL);\n");
+        self.w("}\n");
+        self.w("static inline int swapcontext(ucontext_t* save, ucontext_t* restore) {\n");
+        self.w("    __maka_win_fiber_init();\n");
+        self.w("    save->fiber = GetCurrentFiber();\n");
+        self.w("    SwitchToFiber(restore->fiber);\n");
+        self.w("    return 0;\n");
+        self.w("}\n");
+        self.w("#else\n");
+        self.w("#include <ucontext.h>\n");
+        self.w("#endif\n");
         self.w("maka_unit* maka_mutex_new(void) { pthread_mutex_t* m = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t)); pthread_mutex_init(m, NULL); return (maka_unit*)m; }\n");
         self.w("void maka_mutex_lock(maka_unit* m) { pthread_mutex_lock((pthread_mutex_t*)m); }\n");
         self.w("void maka_mutex_unlock(maka_unit* m) { pthread_mutex_unlock((pthread_mutex_t*)m); }\n");
@@ -403,8 +433,9 @@ impl<'a> Cx<'a> {
         //     the scheduler picks the next ready fiber.
         //   - Outside a fiber (main not currently in scheduler, OS threads,
         //     job-pool workers), sleep_ms blocks via nanosleep as before.
-        self.w("#include <ucontext.h>\n");
+        self.w("#ifndef _WIN32\n");
         self.w("#include <sys/mman.h>\n");
+        self.w("#endif\n");
         self.w("#define MAKA_FIBER_STACK_SIZE (64 * 1024)\n");
         self.w("#define MAKA_FIBER_SLAB_RESERVE (1024 * 1024) /* 1 MB VM per fiber */\n");
         self.w("#define MAKA_FIBER_GUARD_PAGE 4096\n");
@@ -494,12 +525,17 @@ impl<'a> Cx<'a> {
         self.w("static __thread int maka_epoll_fd = -1;\n");
         self.w("static __thread int64_t maka_anchor_deadline_ns = 0; /* 0 = none; otherwise scheduler caps its timeout so anchor wakes by this */\n");
         // Reactor backend selection.  Three backends:
-        //   * Linux         — epoll(7) used directly.
-        //   * macOS / *BSD  — kqueue(2), via a shim exposing the epoll API.
+        //   * Linux           — epoll(7) used directly.
+        //   * macOS / *BSD    — kqueue(2), via a shim exposing the epoll API.
         //   * Any other POSIX — poll(2) fallback (slower; rebuilds pollfd[]
         //                       from maka_fd_regs each scheduler tick).
-        // Whichever backend is selected, the rest of the reactor code is
-        // backend-agnostic: it speaks the epoll API and the shim translates.
+        //
+        // Windows is a known gap: the fiber model relies on ucontext_t
+        // (getcontext/swapcontext/makecontext) which doesn't exist on
+        // Windows.  A real port would replace those with Win32 Fibers
+        // (CreateFiber/SwitchToFiber) and the reactor with WSAPoll or IOCP.
+        // That's a multi-day refactor that needs actual Windows hardware
+        // to verify, deliberately deferred.
         self.w("#include <poll.h>\n");
         self.w("#ifdef __linux__\n");
         self.w("#include <sys/epoll.h>\n");
