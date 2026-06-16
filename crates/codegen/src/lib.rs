@@ -1086,6 +1086,9 @@ impl<'a> Cx<'a> {
         self.w("static inline int64_t __maka_signalfd_recv(int64_t fd);\n");
         self.w("static inline int64_t __maka_timerfd_create(int64_t initial_ns, int64_t interval_ns);\n");
         self.w("static inline int64_t __maka_timerfd_recv(int64_t fd);\n");
+        self.w("static inline int64_t __maka_eventfd_create(int64_t initial);\n");
+        self.w("static inline int64_t __maka_eventfd_signal(int64_t fd, int64_t n);\n");
+        self.w("static inline int64_t __maka_eventfd_recv(int64_t fd);\n");
         self.w("static inline int64_t __maka_tcp_accept_async(int64_t listen_fd);\n");
         self.w("static inline int64_t __maka_tcp_connect_v4(int64_t a, int64_t b, int64_t c, int64_t d, int64_t port);\n");
         self.w("static inline int64_t __maka_close_fd(int64_t fd);\n");
@@ -3074,6 +3077,27 @@ impl<'a> Cx<'a> {
         self.w("    }\n");
         self.w("}\n");
         self.w("#include <sys/timerfd.h>\n");
+        self.w("#include <sys/eventfd.h>\n");
+        // eventfd: kernel counter with read/write wakeups, useful for fiber
+        // and thread coordination without a full socket pair.
+        self.w("static inline int64_t __maka_eventfd_create(int64_t initial) {\n");
+        self.w("    return eventfd((unsigned int)initial, EFD_NONBLOCK | EFD_CLOEXEC);\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_eventfd_signal(int64_t fd, int64_t n) {\n");
+        self.w("    uint64_t v = (uint64_t)n;\n");
+        self.w("    ssize_t w = write((int)fd, &v, sizeof(v));\n");
+        self.w("    return (w == (ssize_t)sizeof(v)) ? 0 : -1;\n");
+        self.w("}\n");
+        self.w("static inline int64_t __maka_eventfd_recv(int64_t fd) {\n");
+        self.w("    uint64_t v;\n");
+        self.w("    while (1) {\n");
+        self.w("        ssize_t r = read((int)fd, &v, sizeof(v));\n");
+        self.w("        if (r == (ssize_t)sizeof(v)) return (int64_t)v;\n");
+        self.w("        if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { __maka_wait_fd(fd, MAKA_EV_READ); continue; }\n");
+        self.w("        if (errno == EINTR) continue;\n");
+        self.w("        return -1;\n");
+        self.w("    }\n");
+        self.w("}\n");
         self.w("static inline int64_t __maka_timerfd_create(int64_t initial_ns, int64_t interval_ns) {\n");
         self.w("    int fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);\n");
         self.w("    if (fd < 0) return -1;\n");
@@ -3097,6 +3121,9 @@ impl<'a> Cx<'a> {
         self.w("static inline int64_t __maka_signalfd_recv(int64_t fd) { (void)fd; return -1; }\n");
         self.w("static inline int64_t __maka_timerfd_create(int64_t a, int64_t b) { (void)a; (void)b; return -1; }\n");
         self.w("static inline int64_t __maka_timerfd_recv(int64_t fd) { (void)fd; return -1; }\n");
+        self.w("static inline int64_t __maka_eventfd_create(int64_t initial) { (void)initial; return -1; }\n");
+        self.w("static inline int64_t __maka_eventfd_signal(int64_t fd, int64_t n) { (void)fd; (void)n; return -1; }\n");
+        self.w("static inline int64_t __maka_eventfd_recv(int64_t fd) { (void)fd; return -1; }\n");
         self.w("#endif\n");
         self.w("static inline int64_t __maka_udp_recv_async(int64_t fd, maka_unit* buf, int64_t cap) {\n");
         self.w("    extern ssize_t recvfrom(int, void*, size_t, int, void*, __maka_socklen_t*);\n");

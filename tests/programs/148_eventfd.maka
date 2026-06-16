@@ -1,0 +1,25 @@
+// eventfd-based cross-thread wakeup: producer thread signals N times,
+// consumer fiber waits via event_recv_async and accumulates.
+import std.{event_fd_create, event_fd_signal, event_recv_async, close_fd, sleep_ms};
+
+mut int g_fd = 0;
+mut int g_total = 0;
+
+unit consumer_body() {
+    int v1 = event_recv_async(g_fd);
+    g_total = g_total + v1;
+    int v2 = event_recv_async(g_fd);
+    g_total = g_total + v2;
+}
+
+unit main() {
+    g_fd = event_fd_create(0);
+    *Thread c = spawn(unit() { consumer_body(); });
+    sleep_ms(5);
+    _ = event_fd_signal(g_fd, 3);
+    sleep_ms(5);
+    _ = event_fd_signal(g_fd, 7);
+    join(c);
+    log(g_total);    // 10
+    _ = close_fd(g_fd);
+}
