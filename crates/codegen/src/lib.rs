@@ -185,6 +185,9 @@ impl<'a> Cx<'a> {
         self.w("#include <io.h>\n");
         self.w("#include <fcntl.h>\n");
         self.w("typedef SSIZE_T ssize_t;\n");
+        // Provide POSIX pipe() in terms of mingw's _pipe so user cblocks
+        // and the runtime can both call `pipe(int[2])`.
+        self.w("static inline int pipe(int* fds) { return _pipe(fds, 4096, _O_BINARY); }\n");
         self.w("static inline long getline(char** buf, size_t* cap, FILE* f) {\n");
         self.w("    (void)cap; if (!*buf) *buf = (char*)malloc(4096);\n");
         self.w("    if (!fgets(*buf, 4096, f)) return -1;\n");
@@ -316,10 +319,46 @@ impl<'a> Cx<'a> {
         self.w("    }\n");
         self.w("    return -1;\n");
         self.w("}\n");
-        // ssize_t / read / write / close / pread / pwrite for non-socket fds use
-        // the underscore-prefixed mingw versions; for sockets winsock provides
-        // its own.  We use the lower-case names; mingw's POSIX layer makes
-        // read/write/close work on regular fds.
+        // Map POSIX errno names to winsock equivalents so the reactor's
+        // `if (errno == EAGAIN)` checks work on socket calls (which set
+        // WSAGetLastError, not errno).  errno macro gets redirected too.
+        self.w("#include <errno.h>\n");
+        self.w("#undef EAGAIN\n");
+        self.w("#undef EWOULDBLOCK\n");
+        self.w("#undef EINTR\n");
+        self.w("#undef EINPROGRESS\n");
+        self.w("#define EAGAIN      WSAEWOULDBLOCK\n");
+        self.w("#define EWOULDBLOCK WSAEWOULDBLOCK\n");
+        self.w("#define EINTR       WSAEINTR\n");
+        self.w("#define EINPROGRESS WSAEWOULDBLOCK\n");
+        self.w("#undef errno\n");
+        self.w("#define errno (WSAGetLastError())\n");
+        // Socket-aware read/write/close: on Windows sockets aren't file
+        // descriptors, so the runtime's `read(fd, ...)` calls won't work
+        // on SOCKETs.  Use recv/send/closesocket for sockets; mingw's
+        // `_read` / `_write` / `_close` for regular file fds.  We define
+        // `read`/`write`/`close` macros that try the socket path first
+        // (cheap WSAGetLastError check on failure) then fall back.
+        self.w("static inline SSIZE_T __maka_winsock_read(int fd, void* buf, size_t n) {\n");
+        self.w("    int r = recv((SOCKET)fd, (char*)buf, (int)n, 0);\n");
+        self.w("    if (r >= 0) return r;\n");
+        self.w("    if (WSAGetLastError() == WSAENOTSOCK) return (SSIZE_T)_read(fd, buf, (unsigned)n);\n");
+        self.w("    return r;\n");
+        self.w("}\n");
+        self.w("static inline SSIZE_T __maka_winsock_write(int fd, const void* buf, size_t n) {\n");
+        self.w("    int r = send((SOCKET)fd, (const char*)buf, (int)n, 0);\n");
+        self.w("    if (r >= 0) return r;\n");
+        self.w("    if (WSAGetLastError() == WSAENOTSOCK) return (SSIZE_T)_write(fd, buf, (unsigned)n);\n");
+        self.w("    return r;\n");
+        self.w("}\n");
+        self.w("static inline int __maka_winsock_close(int fd) {\n");
+        self.w("    if (closesocket((SOCKET)fd) == 0) return 0;\n");
+        self.w("    if (WSAGetLastError() == WSAENOTSOCK) return _close(fd);\n");
+        self.w("    return -1;\n");
+        self.w("}\n");
+        self.w("#define read  __maka_winsock_read\n");
+        self.w("#define write __maka_winsock_write\n");
+        self.w("#define close __maka_winsock_close\n");
         // Initialize winsock once via a GCC/mingw constructor.
         self.w("static _Atomic int __maka_wsa_inited = 0;\n");
         self.w("static inline void __maka_wsa_init(void) {\n");
@@ -329,6 +368,9 @@ impl<'a> Cx<'a> {
         self.w("    WSAStartup(MAKEWORD(2, 2), &wsa);\n");
         self.w("}\n");
         self.w("__attribute__((constructor)) static void __maka_wsa_ctor(void) { __maka_wsa_init(); }\n");
+        // Force stdout/stderr binary mode so `printf("%d\n", ...)` outputs LF
+        // (not CRLF) — matches POSIX semantics and the expected file format.
+        self.w("__attribute__((constructor)) static void __maka_bin_stdio(void) { _setmode(_fileno(stdout), _O_BINARY); _setmode(_fileno(stderr), _O_BINARY); }\n");
         // mingw's pread/pwrite are sometimes missing; provide.
         self.w("static inline ssize_t pread (int fd, void* buf, size_t n, long off) {\n");
         self.w("    HANDLE h = (HANDLE)_get_osfhandle(fd);\n");
@@ -3447,9 +3489,7 @@ impl<'a> Cx<'a> {
         // fd; the write fd is stashed and retrievable via pipe_write_fd.
         // Per-thread stash — keeps the simple "make a pipe, send it through
         // to a fiber" pattern from needing a cblock helper.
-        self.w("#ifdef _WIN32\n");
-        self.w("static inline int pipe(int* fds) { return _pipe(fds, 4096, _O_BINARY); }\n");
-        self.w("#else\n");
+        self.w("#ifndef _WIN32\n");
         self.w("extern int pipe(int*);\n");
         self.w("#endif\n");
         self.w("static __thread int __maka_last_pipe_wfd = -1;\n");
