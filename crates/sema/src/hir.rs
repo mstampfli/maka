@@ -357,6 +357,9 @@ pub enum HExprKind {
     DerefRef(Box<HExpr>),
     /// `heap value` — emit `malloc(sizeof(T)); *p = value; p` and produce a fresh heap LID.
     HeapAlloc(Box<HExpr>),
+    /// `free value` — bare-word deallocator for `raw *T` (only inside `unsafe { }`).
+    /// Codegen lowers to `free((void*)(value))`.
+    Free(Box<HExpr>),
     /// Function name used in expression position (function pointer value).
     FnRef(FuncId),
     /// Indirect call through a function pointer value.

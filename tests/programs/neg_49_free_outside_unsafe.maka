@@ -1,0 +1,14 @@
+// `free p;` must be inside `unsafe { ... }`.
+data Box { mut int v; }
+unit main() {
+    unsafe {
+        raw *Box p = alloc Box { v = 1 };
+        // step out — now `free` is no longer in unsafe context
+    }
+    unsafe {
+        raw *Box q = alloc Box { v = 2 };
+        log(q!.v);
+    }
+    raw *Box r = alloc Box { v = 3 };  // ❌ alloc into raw outside unsafe
+    free r;                              // ❌ free outside unsafe
+}

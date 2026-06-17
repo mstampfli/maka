@@ -1,0 +1,11 @@
+// Same rule with a non-null reassignment: the owner getting a fresh `alloc`
+// still invalidates aliases that pointed at the previous pointee.
+data Box { mut int v; }
+unit main() {
+    own *Box owner = alloc Box { v = 42 };
+    *Box q = owner;
+    if (q != null) {
+        owner = alloc Box { v = 99 };
+        log(q!.v);     // ❌ q's old pointee is gone; non-null proof died
+    }
+}

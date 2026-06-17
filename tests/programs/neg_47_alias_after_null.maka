@@ -1,0 +1,11 @@
+// `*T` aliases of an `own *T` are auto-NULLed in flow state when the owner is
+// reassigned (here: null-assigned).  The deref then fails the non-null proof.
+data Box { mut int v; }
+unit main() {
+    own *Box owner = alloc Box { v = 42 };
+    *Box q = owner;
+    if (q != null) {
+        owner = null;
+        log(q!.v);     // ❌ q was auto-NULLed by the owner mutation
+    }
+}

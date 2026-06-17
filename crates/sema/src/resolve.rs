@@ -1115,7 +1115,8 @@ fn substitute_expr_placeholders(e: &mut ast::Expr, impl_ty: &str) {
             substitute_expr_placeholders(lhs, impl_ty);
             substitute_expr_placeholders(rhs, impl_ty);
         }
-        Un { expr, .. } | Unwrap { expr, .. } | Ref { expr, .. } | HeapAlloc { value: expr, .. } => {
+        Un { expr, .. } | Unwrap { expr, .. } | Ref { expr, .. }
+        | HeapAlloc { value: expr, .. } | Free { value: expr, .. } => {
             substitute_expr_placeholders(expr, impl_ty);
         }
         Field { base, .. } => substitute_expr_placeholders(base, impl_ty),

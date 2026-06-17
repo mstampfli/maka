@@ -170,6 +170,9 @@ pub enum Expr {
     ArrayLit { elems: Vec<Expr>, span: Span },
     /// `heap value` — allocate `value` on the heap and produce a `*T` pointer.
     HeapAlloc { value: Box<Expr>, span: Span },
+    /// `free value` — deallocate a `raw *T`.  Sema requires the arg to be
+    /// `raw *T` AND the call site to be inside an `unsafe { ... }` block.
+    Free { value: Box<Expr>, span: Span },
     /// `Enum.Variant { f = e, ... }` — construct a tagged-enum variant value.
     /// Payload-less variants use `Field` (kept for back-compat with C-style enums).
     VariantCtor { enum_name: String, variant: String, fields: Vec<(String, Expr)>, span: Span },
@@ -221,6 +224,7 @@ impl Expr {
             | Expr::Struct { span: s, .. }
             | Expr::ArrayLit { span: s, .. }
             | Expr::HeapAlloc { span: s, .. }
+            | Expr::Free { span: s, .. }
             | Expr::VariantCtor { span: s, .. }
             | Expr::Match { span: s, .. }
             | Expr::Lambda { span: s, .. }

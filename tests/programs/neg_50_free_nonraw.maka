@@ -1,0 +1,8 @@
+// `free` only accepts `raw *T`.  Calling it on `*T` or `own *T` is rejected.
+data Box { mut int v; }
+unit main() {
+    unsafe {
+        own *Box owner = alloc Box { v = 42 };
+        free owner;    // ❌ `free` only accepts `raw *T`
+    }
+}

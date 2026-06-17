@@ -41,7 +41,7 @@ A `.maka` source file consists of:
 
 ```
 mut const constexpr unsafe inline propagate
-extern cinclude cblock rblock rdep raw own alloc
+extern cinclude cblock rblock rdep raw own alloc free
 data enum logic attr has where dyn
 if else while for in break continue match yield return
 gate transfer share thread_local module import use pub
@@ -138,31 +138,43 @@ declared with when the C side controls the pointer's lifetime.
 ### 2.3 The `alloc value` expression
 
 `alloc value` heap-allocates `value` and returns an **owning** pointer.  Its
-expression type is `own &T` and coerces into `own *T`, so the destination must
-be one of those two forms:
+expression type is `own &T` and coerces into `own *T`, so the safe-Maka
+destination must be one of those two forms:
 
 - `own *T x = alloc T { ... };` produces `own *T` (nullable owner).
 - `own &T x = alloc T { ... };` produces `own &T` (strict non-null owner).
 
-Landing an `alloc` in any non-owning slot - `*T x = alloc T { ... };`,
-`&T y = alloc T { ... };`, `raw *T z = alloc T { ... };` - is a **compile
-error**: a non-owning binding would have nothing to auto-free at scope exit,
-which would leak.  The sema error reads *"`alloc value` must land in an owning
-slot (`own *T` or `own &T`) — assigning an allocation to a non-owning `*T`
-would leak with no auto-free.  Declare the binding as `own *T` or downgrade
-explicitly later."*  This is also why there is no `free()` builtin (next
-paragraph): the only producer of Maka-managed memory is `alloc`, the only
-holder is an owner, and the owner auto-frees.
+Landing an `alloc` in `*T` or `&T` is a **compile error** — a non-owning
+binding would have nothing to auto-free at scope exit, which would leak.
+The sema error reads *"`alloc value` must land in an owning slot (`own *T`
+or `own &T`) — assigning an allocation to a non-owning `*T` would leak with
+no auto-free."*
+
+Inside an `unsafe { ... }` block one extra destination is allowed:
+
+- `raw *T x = alloc T { ... };` produces `raw *T` (manual-memory escape hatch).
+
+`raw *T` opts out of auto-free entirely.  The caller releases it explicitly
+with `free p;` (the keyword, §6.5) **inside the same `unsafe` block**.
+Outside `unsafe`, an alloc-into-`raw *T` errors with the message above
+pointing at the `unsafe` requirement.
 
 `alloc` is no longer a type modifier - writing `alloc T` in a type position is
 a compile error directing the user at `own *T` or `own &T`.
 
-There is **no `free()` builtin**.  Maka-managed allocations auto-free at scope
-exit (`own *T` and `own &T`); to release one early, assign `null` to its owner.
-For C-allocated buffers, declare an FFI shim explicitly
-(`extern "free" unit __libc_free(*T p);`) or call `free()` from inside a
-`cblock` so the deallocation goes through C, not through a builtin pointer-kind
-check.
+`free p;` is a **keyword statement** (bare-word, no parens), valid **only on
+`raw *T`** and **only inside `unsafe { ... }`**.  It lowers to a C `free`
+call and is the inverse of `alloc → raw *T`.  Outside `unsafe`, or on any
+other pointer kind, sema rejects it.
+
+For Maka-managed memory there is no `free`:
+
+- `own *T` and `own &T` auto-free at scope exit.
+- To release early, assign `null` to an `own *T` (the auto-free fires
+  immediately, the binding becomes null, and the lifetime pass invalidates
+  every `*T` / `&T` aliasing it — see §6.4).
+- For C-allocated buffers, declare an FFI shim (`extern "free" unit
+  __libc_free(*T p);`) or call `free()` from inside a `cblock`.
 
 ### 2.4 Aggregate types
 
@@ -439,18 +451,22 @@ Without a proof, the compiler rejects the deref with a message that suggests
 the appropriate guard. **There is no `MAKA_UNWRAP` runtime macro** - the
 compiler will not insert a panic on null.
 
-### 6.4 Dangling-pointer collapse + warning
+### 6.4 Downstream invalidation on owner change
 
-A `*T` cannot dangle from explicit deallocation: with `free()` removed as a
-Maka builtin, the only way to deallocate Maka-managed memory is the owner's
-auto-free at scope exit (or assigning `null` to an `own *T`), and any `*T`
-aliasing the same allocation is reachable only inside that owner's scope.
+`*T` aliases and `&T` / `&mut T` borrows that depend on an owner's pointee
+are invalidated whenever the owner's pointee changes — at scope exit, on
+re-assignment, on null-assignment, on move.  The **owner is never restricted**;
+all the cost falls on the downstream views.
 
-There remains one dangling case to handle: when a `*T` aliases a *local* and
-that local goes out of scope (without being the heap owner itself).  The
-compiler auto-NULLs the `*T` at scope exit (it would otherwise dangle).  When a
-subsequent read of `*T` observes that NULL without an explicit re-assignment on
-every code path, a flow-sensitive warning fires:
+The dispatch per alias kind:
+
+| alias kind | what happens when its owner mutates / moves / null-assigns |
+|---|---|
+| `*T` (nullable, untracked) | flow state auto-NULLs the alias; the next deref needs a fresh non-null proof, comparisons-to-null fire the silent-overwrite warning below |
+| `&T` / `&mut T` (tracked borrow) | the borrow is **poisoned**; any subsequent use is a hard compile error (`use of poisoned reference X`) |
+
+The auto-NULL for `*T` emits the same flow-sensitive warning the compiler used
+to fire for the scope-exit-only case:
 
 ```
 warning at L:C: pointer `p` was auto-nulled when its pointee went out of scope
@@ -468,14 +484,64 @@ compile error** (`poisoned`).
 
 ### 6.5 `unsafe { }`
 
-`unsafe { ... }` permits exactly two operations otherwise forbidden:
+`unsafe { ... }` permits exactly four operations otherwise forbidden:
 
 1. Casting an integer to a pointer (`usize as *T`, `int as *T`).
-2. Observing a `raw *T` (deref, field, index, narrowing-based deref).
+2. Casting a reference to `raw *T` (`&T as raw *T` — drops borrow tracking).
+3. Observing a `raw *T` (deref, field, index, narrowing-based deref).
+4. The manual-memory escape-hatch pair, **only meaningful together**:
+   - `raw *T x = alloc T { ... };` — allocate into an untracked pointer
+     (no auto-free; the binding leaves with no destructor).
+   - `free p;` — bare-word keyword statement, lowers to a C `free` call;
+     accepts only `raw *T`.
 
-Inside `unsafe`, `raw *T` behaves identically to `*T` - the forced-handling
-rule still applies (you still need narrowing to deref). `unsafe` does not turn
-off the lifetime pass; it just unlocks two specific operations.
+Inside `unsafe`, `raw *T` still has to be narrowed (forced-handling — §6.3)
+before deref.  `unsafe` does not turn off the lifetime pass; it just unlocks
+those four operations.
+
+### 6.6 Pointer-kind conversions and the `&(p!)` pattern
+
+Maka's pointer kinds (`own *T`, `own &T`, `*T`, `&T`, `&mut T`, `raw *T`) are
+**lifetime annotations** on top of the same C-level address; the data shape
+is identical across kinds.  Converting between them is therefore a no-op at
+codegen — only the type-system tag changes.
+
+The implicit-coercion table is governed by a single principle: **loosening
+flags is implicit, tightening a flag requires proof**.
+
+- *owning* can only be dropped (a non-owner cannot become an owner without
+  a phantom free-obligation).
+- *tracked* can be dropped freely (`&T → *T`, `&mut T → *T`).
+- *nullable* can be gained freely (`own &T → own *T`, `own &T → *T`).
+- *nullable* can be **dropped only with a non-null proof**, discharged by
+  the `!` operator.
+
+The dispatch for conversions to `&T` / `&mut T` (the most subtle case):
+
+| source | how to convert | why |
+|---|---|---|
+| `own *T`, `*T`, `raw *T` (nullable) | `&T b = &(src!);` — `!` discharges the null obligation, `&` produces the borrow | nullable → non-null is a tightening |
+| `own &T` (non-null, owning) | `&T b = src;` — implicit retype | already non-null, just dropping the *owning* flag |
+| `&T`, `&mut T` (non-null, tracked) | implicit reborrow / mutability-peel | already in the target shape |
+
+The non-null sources don't need `!` because there's no null obligation to
+discharge — that's the unifying rule.  `!` exists **only** to prove
+non-null; on a non-nullable source it would be meaningless and is rejected
+(`! only valid on nullable pointers`).
+
+The lifetime pass tracks alias relationships through this conversion machinery
+so the §6.4 downstream-invalidation rule fires on every kind of view, no
+matter which combination of `as`, `!`, or implicit coerce produced it.
+
+**`&` peel on Ref-typed places.**  A `&T` / `&mut T` binding reads as the
+pointee value at top level (auto-deref applies — `b.v` accesses through the
+ref).  Consistently, `&b` where `b: &T` does **not** stack to `&&T` / `*&T`;
+it gives the address `b` already stores — a `&T` (or `*T` in a pointer
+context).  This is the inverse direction of auto-deref: the same `b` is
+"value at top level" for `.v` access and "address" under `&`.  Fat-pointer
+ref kinds (`&dyn Trait`, `&[T]`) keep the no-peel behavior because their
+ref value carries extra metadata beyond the bare address; `&m` on those
+goes through the existing reborrow/coerce path.
 
 ---
 
@@ -923,7 +989,7 @@ free them. The OS only delivers C strings - any further parsing (`--port 8080`
 
 ### 14.2 Slice / array / vector length
 
-`.len` on a value of `[N]T`, `[]T`, or `[*]T` (and `&`/`heap` references to
+`.len` on a value of `[N]T`, `[]T`, or `[*]T` (and `&` / `own &` references to
 those) yields the element count as `usize`. The codegen lowers to a constant
 for fixed arrays, a struct field read for slices/vectors.
 

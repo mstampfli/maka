@@ -1347,9 +1347,18 @@ impl Parser {
             TokKind::Alloc => {
                 self.bump();
                 // `alloc value` — heap-allocates `value` and produces an owning pointer.
-                // Result type is context-typed: `own *T`, `own &T`, or `*T` per target.
+                // Result type is context-typed: `own *T`, `own &T`, or (inside
+                // `unsafe { }`) `raw *T` per target.
                 let v = self.parse_unary()?;
                 Ok(Expr::HeapAlloc { value: Box::new(v), span: start })
+            }
+            TokKind::Free => {
+                self.bump();
+                // `free value` — bare-word deallocator for `raw *T`.  Sema
+                // checks the operand is `raw *T` AND the call site is inside
+                // an `unsafe { }` block.
+                let v = self.parse_unary()?;
+                Ok(Expr::Free { value: Box::new(v), span: start })
             }
             TokKind::Transfer | TokKind::Share => {
                 let mode = if matches!(self.peek(), TokKind::Transfer) {

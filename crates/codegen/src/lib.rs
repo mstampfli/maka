@@ -297,6 +297,12 @@ impl<'a> Cx<'a> {
         // before the fd disappears.  Real definitions are emitted later
         // in the scheduler block.
         self.w("struct maka_fiber_s;\n");
+        // The typedef name `maka_fiber_t` must be visible to the Win32
+        // socket close shim (emitted soon after this block) which uses it
+        // as the field/list element type.  The full struct body is filled
+        // in much later in the scheduler block; an incomplete-type typedef
+        // here is enough for pointer use in the close shim.
+        self.w("typedef struct maka_fiber_s maka_fiber_t;\n");
         self.w("extern __thread struct maka_fiber_s* maka_fd_waiters;\n");
         self.w("extern __thread int maka_sched_inited;\n");
         self.w("static void __maka_ready_enqueue(struct maka_fiber_s* f);\n");
@@ -424,30 +430,10 @@ impl<'a> Cx<'a> {
         self.w("    if (WSAGetLastError() == WSAENOTSOCK) return (SSIZE_T)_write(fd, buf, (unsigned)n);\n");
         self.w("    return r;\n");
         self.w("}\n");
-        self.w("static inline int __maka_winsock_close(int fd) {\n");
-        // Wake local fibers parked on this fd so they don't hang forever.
-        self.w("    if (maka_sched_inited) {\n");
-        self.w("        maka_fiber_t** prev = &maka_fd_waiters;\n");
-        self.w("        while (*prev) {\n");
-        self.w("            maka_fiber_t* w = *prev;\n");
-        self.w("            if (w->waiting_fd == fd) {\n");
-        self.w("                *prev = w->next; w->next = NULL;\n");
-        self.w("                w->waiting_fd = -1; w->waiting_events = 0;\n");
-        self.w("                w->wait_deadline_ns = 0; w->wait_timed_out = 0;\n");
-        self.w("                __maka_ready_enqueue(w);\n");
-        self.w("            } else {\n");
-        self.w("                prev = &(*prev)->next;\n");
-        self.w("            }\n");
-        self.w("        }\n");
-        self.w("    }\n");
-        self.w("    /* Drop reactor registration so the fd-reg table doesn't keep\n");
-        self.w("       a stale events_mask that confuses fd recycling. */\n");
-        self.w("    __maka_fd_arm(fd, 0);\n");
-        self.w("    __maka_fd_reg_drop(fd);\n");
-        self.w("    if (closesocket((SOCKET)fd) == 0) return 0;\n");
-        self.w("    if (WSAGetLastError() == WSAENOTSOCK) return _close(fd);\n");
-        self.w("    return -1;\n");
-        self.w("}\n");
+        // Forward decl only — the body accesses maka_fiber_s fields, which
+        // aren't visible until the scheduler block much later in the file.
+        // The body is emitted there (search "__maka_winsock_close body").
+        self.w("static int __maka_winsock_close(int fd);\n");
         self.w("#define read  __maka_winsock_read\n");
         self.w("#define write __maka_winsock_write\n");
         self.w("#define close __maka_winsock_close\n");
@@ -947,6 +933,31 @@ impl<'a> Cx<'a> {
         self.w("    struct maka_fiber_s* waiters;     /* fibers blocked on this fiber */\n");
         self.w("    struct maka_fiber_s* next_waiter; /* waiter list link */\n");
         self.w("} maka_fiber_t;\n");
+        // __maka_winsock_close body (forward-declared earlier; deferred to
+        // here so it can see the full maka_fiber_s field layout).
+        self.w("#ifdef _WIN32\n");
+        self.w("static int __maka_winsock_close(int fd) {\n");
+        self.w("    if (maka_sched_inited) {\n");
+        self.w("        maka_fiber_t** prev = &maka_fd_waiters;\n");
+        self.w("        while (*prev) {\n");
+        self.w("            maka_fiber_t* w = *prev;\n");
+        self.w("            if (w->waiting_fd == fd) {\n");
+        self.w("                *prev = w->next; w->next = NULL;\n");
+        self.w("                w->waiting_fd = -1; w->waiting_events = 0;\n");
+        self.w("                w->wait_deadline_ns = 0; w->wait_timed_out = 0;\n");
+        self.w("                __maka_ready_enqueue(w);\n");
+        self.w("            } else {\n");
+        self.w("                prev = &(*prev)->next;\n");
+        self.w("            }\n");
+        self.w("        }\n");
+        self.w("    }\n");
+        self.w("    __maka_fd_arm(fd, 0);\n");
+        self.w("    __maka_fd_reg_drop(fd);\n");
+        self.w("    if (closesocket((SOCKET)fd) == 0) return 0;\n");
+        self.w("    if (WSAGetLastError() == WSAENOTSOCK) return _close(fd);\n");
+        self.w("    return -1;\n");
+        self.w("}\n");
+        self.w("#endif\n");
         // Per-pthread scheduler state, addressable from other threads.
         // remote_wake_head is the cross-thread inbox protected by remote_mu;
         // wake_pipe_w is the self-pipe write end the remote pusher pings so
@@ -4480,6 +4491,7 @@ impl<'a> Cx<'a> {
             HExprKind::ArrayToSlice { base, .. } => self.scan_expr(base),
             HExprKind::DerefRef(inner) => self.scan_expr(inner),
             HExprKind::HeapAlloc(inner) => self.scan_expr(inner),
+            HExprKind::Free(inner) => self.scan_expr(inner),
             HExprKind::CallIndirect { callee, args } => {
                 self.scan_expr(callee);
                 for a in args { self.scan_expr(a); }
@@ -5637,7 +5649,11 @@ impl<'a> Cx<'a> {
         self.w("    struct __stat64 st;\n");
         self.w("    WCHAR* wp = __maka_path_to_w(path); if (!wp) return 0;\n");
         self.w("    int sr = _wstat64(wp, &st); free(wp); if (sr != 0) return 0;\n");
-        self.w("    return (st.st_mode & _S_IFDIR) ? 1 : 0;\n");
+        // mingw-w64's `sys/stat.h` may hide both `S_IFDIR` and `_S_IFDIR`
+        // depending on which POSIX feature macros are defined.  Use the
+        // literal bit mask — it's stable in the Windows FAT/NTFS metadata
+        // layout (`0x4000`).
+        self.w("    return ((st.st_mode & 0xF000) == 0x4000) ? 1 : 0;\n");
         self.w("#else\n");
         // Use the raw mode mask instead of the S_ISDIR macro so we don't
         // depend on <sys/stat.h> being pulled in everywhere; 040000 octal is
@@ -6958,6 +6974,10 @@ impl<'a> Cx<'a> {
                 let v = self.emit_inline_expr(inline_f, inner, tag);
                 format!("(__extension__ ({{ {0}* __p = ({0}*)malloc(sizeof({0})); *__p = ({1}); __p; }}))", ic, v)
             }
+            HExprKind::Free(inner) => {
+                let s = self.emit_inline_expr(inline_f, inner, tag);
+                format!("(free((void*)({})), MAKA_UNIT)", s)
+            }
             // Everything else: fall back to ordinary emit_expr but with a dummy HFunc that holds
             // the inline locals so name lookups resolve. For simplicity, use the inline_f directly.
             _ => self.emit_expr_with_tag(inline_f, e, tag),
@@ -7976,6 +7996,10 @@ impl<'a> Cx<'a> {
                 let inner_c = self.c_type(&inner.ty);
                 let v = self.emit_expr(f, inner);
                 format!("(__extension__ ({{ {0}* __p = ({0}*)malloc(sizeof({0})); *__p = ({1}); __p; }}))", inner_c, v)
+            }
+            HExprKind::Free(inner) => {
+                let s = self.emit_expr(f, inner);
+                format!("(free((void*)({})), MAKA_UNIT)", s)
             }
             HExprKind::Match { scrutinee, arms, result_ty } => {
                 self.emit_match(f, scrutinee, arms, result_ty)

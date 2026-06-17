@@ -1,0 +1,11 @@
+// Round-trip `alloc → raw *T` and `free p;` inside `unsafe { }`.
+data Box { mut int v; }
+unit main() {
+    unsafe {
+        raw *Box p = alloc Box { v = 7 };
+        if (p != null) {
+            log(p!.v);  // 7
+            free p;
+        }
+    }
+}

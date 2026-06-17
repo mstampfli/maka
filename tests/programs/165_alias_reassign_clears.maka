@@ -1,0 +1,12 @@
+// Re-assigning the *T alias to a fresh source clears its auto-NULL state.
+// Owner mutation invalidates the alias; explicit re-assign restores it.
+data Box { mut int v; }
+unit main() {
+    own *Box a = alloc Box { v = 1 };
+    own *Box b = alloc Box { v = 2 };
+    *Box q = a;
+    if (q != null) { log(q!.v); }   // 1
+    a = null;
+    q = b;                            // explicit re-assign clears auto-NULL
+    if (q != null) { log(q!.v); }   // 2
+}

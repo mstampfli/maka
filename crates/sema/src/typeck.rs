@@ -774,10 +774,13 @@ impl<'a> TypeChecker<'a> {
                 // `alloc value`: must land in an owning slot (`own *T` or `own &T`).
                 // Letting an alloc'd pointer flow into a plain `*T` (non-owning) slot
                 // would create an untracked allocation that nobody auto-frees — a
-                // memory leak waiting to happen.
+                // memory leak waiting to happen.  Landing in `raw *T` is allowed
+                // ONLY inside `unsafe { ... }` (the manual-memory escape hatch,
+                // paired with `free p;` for teardown).
                 let inner_expected = match expected {
                     Some(HType::OwnPtr { inner, .. })
-                    | Some(HType::Heap { inner }) => Some((**inner).clone()),
+                    | Some(HType::Heap { inner })
+                    | Some(HType::RawPtr { inner, .. }) => Some((**inner).clone()),
                     _ => None,
                 };
                 let h = if let Some(ie) = inner_expected.as_ref() {
@@ -789,6 +792,18 @@ impl<'a> TypeChecker<'a> {
                 let result_ty = match expected {
                     Some(HType::OwnPtr { mutable, .. }) => HType::OwnPtr { mutable: *mutable, inner: Box::new(inner_ty) },
                     Some(HType::Heap { .. })            => HType::Heap   { inner: Box::new(inner_ty) },
+                    Some(HType::RawPtr { mutable, .. }) => {
+                        if self.in_unsafe == 0 {
+                            self.err(
+                                "`alloc` into `raw *T` is the manual-memory escape hatch and requires \
+                                 `unsafe { ... }` — landing an allocation in a `raw *T` opts out of \
+                                 the auto-free machinery, so the caller must release it explicitly \
+                                 (`free p;`) inside the same `unsafe` block.",
+                                *span,
+                            );
+                        }
+                        HType::RawPtr { mutable: *mutable, inner: Box::new(inner_ty) }
+                    }
                     Some(HType::Ptr { .. }) => {
                         self.err(
                             "`alloc value` must land in an owning slot (`own *T` or `own &T`) — \
@@ -806,6 +821,35 @@ impl<'a> TypeChecker<'a> {
                 HExpr {
                     kind: HExprKind::HeapAlloc(Box::new(h)),
                     ty: result_ty,
+                    span: *span,
+                }
+            }
+            ast::Expr::Free { value, span } => {
+                // `free value`: bare-word deallocator for `raw *T`, only inside `unsafe { }`.
+                let h = self.check_expr(value, None);
+                let ok_ty = matches!(h.ty, HType::RawPtr { .. });
+                if !ok_ty {
+                    self.err(
+                        format!(
+                            "`free` only accepts `raw *T` (the manual-memory escape hatch); got `{}`. \
+                             Maka-managed allocations (`own *T` / `own &T`) auto-free at scope exit — \
+                             assign `null` to the owner to release one early.",
+                            type_str(&h.ty),
+                        ),
+                        *span,
+                    );
+                }
+                if self.in_unsafe == 0 {
+                    self.err(
+                        "`free p;` requires `unsafe { ... }` — manual deallocation through a `raw *T` \
+                         is unsafe (the lifetime pass can't prove the pointer is still live or that \
+                         no other view aliases it).",
+                        *span,
+                    );
+                }
+                HExpr {
+                    kind: HExprKind::Free(Box::new(h)),
+                    ty: HType::Unit,
                     span: *span,
                 }
             }
@@ -1354,7 +1398,28 @@ impl<'a> TypeChecker<'a> {
         if want_mut && !place_mut {
             self.err("cannot take `&mut` to immutable storage", sp);
         }
-        let inner = h.ty.clone();
+        // Ref-peel: a place whose type is already `&T` / `&mut T` reads as the
+        // pointee value (auto-deref applies), so taking its address gives back
+        // the address it stores — NOT the address of the binding.  Emit
+        // `&(*place)` at codegen via DerefRef so the result has the runtime
+        // value of `place` itself (an address), not `&place` (address of the
+        // local that holds the address).  Consistent with how `b.v` already
+        // auto-derefs through the same Ref.
+        let (place_h, inner) = match &h.ty.clone() {
+            // Peel only for "thin" referents (plain T).  Fat-pointer kinds
+            // (`dyn Trait`, slices) carry extra metadata in the ref value;
+            // `&(*m)` doesn't round-trip for them — fall through to the
+            // existing reborrow/coerce path.
+            HType::Ref { inner, .. } if !matches!(**inner, HType::Dyn { .. } | HType::Slice { .. }) => {
+                let deref = HExpr {
+                    kind: HExprKind::DerefRef(Box::new(h.clone())),
+                    ty: (**inner).clone(),
+                    span: sp,
+                };
+                (deref, (**inner).clone())
+            }
+            _ => (h.clone(), h.ty.clone()),
+        };
         // If expected is a pointer, produce a pointer.
         let result = match expected {
             Some(HType::Ptr { mutable, .. }) => {
@@ -1363,7 +1428,7 @@ impl<'a> TypeChecker<'a> {
             }
             _ => HType::Ref { mutable: want_mut, inner: Box::new(inner) },
         };
-        HExpr { kind: HExprKind::AddrOfRef { mutable: want_mut, place: Box::new(h) }, ty: result, span: sp }
+        HExpr { kind: HExprKind::AddrOfRef { mutable: want_mut, place: Box::new(place_h) }, ty: result, span: sp }
     }
 
     fn is_place_addr_mut(&self, e: &HExpr) -> bool {
@@ -1776,28 +1841,6 @@ impl<'a> TypeChecker<'a> {
         // Built-in `free` — manual deallocation for non-owning `*T`.  Owning types
         // (`own *T`, `own &T`) are auto-freed at scope exit; calling free() on them
         // would double-free.
-        if name == "free" && qualifier.is_none() {
-            // free() was removed as a Maka-surface builtin: a *T is non-owning,
-            // so handing it a deallocator was a foot-gun — `free(downgrade)`
-            // could deallocate memory the `own *T` still believes it owns,
-            // double-freeing on scope exit (plus dangling any other alias).
-            // Maka-managed memory: let auto-free at scope exit do the job, or
-            // assign `null` to an `own *T` to release ownership early.  For
-            // C-allocated buffers, declare an `extern "free"` shim explicitly
-            // (or inline the free in a `cblock`) so the call goes through FFI
-            // rather than a builtin pointer-kind check.
-            self.err(
-                "`free` is not a Maka builtin.  Maka-managed allocations auto-free at scope exit \
-                 (`own *T` / `own &T`); to release one early assign `null` to its owner.  To free \
-                 a C-allocated buffer, declare `extern \"free\" unit __libc_free(*T p);` or call \
-                 `free()` inside a `cblock`.",
-                sp,
-            );
-            // Compilation halts at the end of sema; this placeholder never
-            // reaches codegen.  Emit LitUnit so it survives further sema
-            // passes without tripping on the call's argument shape.
-            return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
-        }
         // Built-in `spawn(closure)` / `thread(closure)` / `job(closure)` — three
         // concurrency tiers (fiber / OS-thread / work-item respectively).  All
         // three currently lower to `pthread_create`; the real fiber and job
@@ -3873,6 +3916,49 @@ impl<'a> TypeChecker<'a> {
         // own *T → *T (downgrade ownership to a non-owning view).
         if let (HType::OwnPtr { mutable: am, inner: ai }, HType::Ptr { mutable: bm, inner: bi }) = (&e.ty, target) {
             if (*am || !*bm) && type_eq(ai, bi) {
+                return HExpr { ty: target.clone(), ..e };
+            }
+        }
+        // own &T (= Heap) → *T (downgrade strict-owner to nullable view).
+        if let (HType::Heap { inner: ai }, HType::Ptr { mutable: _bm, inner: bi }) = (&e.ty, target) {
+            if type_eq(ai, bi) {
+                return HExpr { ty: target.clone(), ..e };
+            }
+        }
+        // own *T → raw *T  /  own &T → raw *T  (drop tracking; observation still
+        // requires `unsafe { }`, but the conversion itself is safe-direction).
+        if let (HType::OwnPtr { mutable: am, inner: ai }, HType::RawPtr { mutable: bm, inner: bi }) = (&e.ty, target) {
+            if (*am || !*bm) && type_eq(ai, bi) {
+                return HExpr { ty: target.clone(), ..e };
+            }
+        }
+        if let (HType::Heap { inner: ai }, HType::RawPtr { mutable: _bm, inner: bi }) = (&e.ty, target) {
+            if type_eq(ai, bi) {
+                return HExpr { ty: target.clone(), ..e };
+            }
+        }
+        // &T / &mut T → *T  (drop borrow tracking; same address, alias still
+        // depends on the borrow's source via the Q-D dep chain).
+        if let (HType::Ref { mutable: am, inner: ai }, HType::Ptr { mutable: bm, inner: bi }) = (&e.ty, target) {
+            if (*am || !*bm) && type_eq(ai, bi) {
+                return HExpr { ty: target.clone(), ..e };
+            }
+        }
+        // Note: there is intentionally NO implicit `own *T → &T` / `*T → &T`
+        // coercion.  Those sources are NULLABLE — the conversion has a null
+        // obligation to discharge — so users write the explicit form at the
+        // source site:
+        //
+        //     &Box b = &(owner!);   // unwrap (proves non-null) + borrow
+        //
+        // The unifying rule is: `!` exists only to discharge a null obligation.
+        // For non-nullable sources (own &T, &T, &mut T) the conversion to
+        // `&T` is just a retype — see the `Heap → Ref` arm below.
+        //
+        // own &T (= Heap, non-null) → &T  /  &mut T  — safe retype, no proof.
+        // Mutability check: an immutable owner can't produce `&mut T`.
+        if let (HType::Heap { inner: ai }, HType::Ref { mutable: _bm, inner: bi }) = (&e.ty, target) {
+            if type_eq(ai, bi) {
                 return HExpr { ty: target.clone(), ..e };
             }
         }

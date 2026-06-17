@@ -154,10 +154,19 @@ impl<'a> Analyzer<'a> {
         match s {
             HStmt::Let { local, init, span } => {
                 self.walk_expr(init);
-                // Compute deps for init
-                let init_deps = self.expr_deps(init);
-                let init_nonnull = self.expr_nonnull(init);
+                // Compute deps for init.  When the destination is a non-owning
+                // slot (`*T`, `&T`), also fold in the LIDs of any `own *T` /
+                // `own &T` Locals reachable through the init expression — those
+                // are the owners that the new binding is aliasing, and we need
+                // dep edges to them so the Assign-trigger / scope-exit
+                // `kill_lid` can invalidate this alias if any of them mutates.
                 let id = *local;
+                let li_ty = self.f().locals[id.0 as usize].ty.clone();
+                let mut init_deps = self.expr_deps(init);
+                if matches!(li_ty, HType::Ptr { .. } | HType::Ref { .. }) {
+                    self.collect_owner_aliases(init, &mut init_deps);
+                }
+                let init_nonnull = self.expr_nonnull(init);
                 self.state[id.0 as usize].deps = init_deps;
                 self.state[id.0 as usize].moved = false;
                 self.state[id.0 as usize].poisoned = false;
@@ -168,7 +177,6 @@ impl<'a> Analyzer<'a> {
                 declared_here.push(id);
 
                 // Move semantics: `heap T b = a;` or `own *T b = a;` moves `a`.
-                let li_ty = self.f().locals[id.0 as usize].ty.clone();
                 if matches!(li_ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
                     if let HExprKind::Local(src) = init.kind {
                         let src_ty = self.f().locals[src.0 as usize].ty.clone();
@@ -213,18 +221,39 @@ impl<'a> Analyzer<'a> {
                 if let HExprKind::Local(id) = place.kind {
                     let ty = self.f().locals[id.0 as usize].ty.clone();
                     let is_ptr = matches!(ty, HType::Ptr { .. });
+                    let is_owner = matches!(ty, HType::OwnPtr { .. } | HType::Heap { .. });
+                    // Downstream invalidation: if the LHS is an owner whose
+                    // pointee is being replaced (or null-assigned), every live
+                    // alias of the OLD pointee is now stale.  Reuse the same
+                    // kill_lid path the scope-exit case uses: `*T` aliases get
+                    // auto-NULLed in flow state (deref needs fresh proof);
+                    // `&T` borrows get poisoned (use is a compile error).
+                    // The owner itself is unconstrained — kill_lid skips its
+                    // own LID, so its state is refreshed normally below.
+                    if is_owner {
+                        let _ = self.kill_lid(id, *span);
+                    }
                     if is_ptr {
-                        let d = self.expr_deps(value);
+                        // `*T` slot: also fold in owner-aliases reachable from
+                        // the RHS so a fresh alias relationship is tracked.
+                        let mut d = self.expr_deps(value);
+                        self.collect_owner_aliases(value, &mut d);
                         let nn = self.expr_nonnull(value);
                         self.state[id.0 as usize].deps = d;
                         self.state[id.0 as usize].known_nonnull = nn;
                         self.state[id.0 as usize].narrowed_until = None;
                         self.state[id.0 as usize].auto_nulled = false;
                     } else {
-                        // For ref-shaped or borrow-bearing struct locals, refresh
-                        // the deps so subsequent kill_lid cycles target the right
-                        // source set.  Clear poison so the new value is usable.
-                        let d = self.expr_deps(value);
+                        // For ref-shaped, owner-bearing, or borrow-bearing
+                        // struct locals, refresh the deps so subsequent
+                        // kill_lid cycles target the right source set.  Clear
+                        // poison so the new value is usable.  For `&T` / `&mut T`
+                        // also fold in owner-aliases (a borrow of `head.field`
+                        // depends on the chain rooted at `head`).
+                        let mut d = self.expr_deps(value);
+                        if matches!(ty, HType::Ref { .. }) {
+                            self.collect_owner_aliases(value, &mut d);
+                        }
                         self.state[id.0 as usize].deps = d;
                         self.state[id.0 as usize].poisoned = false;
                     }
@@ -417,6 +446,7 @@ impl<'a> Analyzer<'a> {
             HExprKind::ArrayToSlice { base, .. } => self.walk_expr(base),
             HExprKind::DerefRef(inner) => self.walk_expr(inner),
             HExprKind::HeapAlloc(inner) => self.walk_expr(inner),
+            HExprKind::Free(inner) => self.walk_expr(inner),
             HExprKind::CallIndirect { callee, args } => {
                 self.walk_expr(callee);
                 for a in args { self.walk_expr(a); }
@@ -526,7 +556,7 @@ impl<'a> Analyzer<'a> {
                 for (_, fe) in fields { self.check_no_local_ref_escape(fe); }
             }
             ArrayLit(elems) => for el in elems { self.check_no_local_ref_escape(el); }
-            HeapAlloc(inner) => self.check_no_local_ref_escape(inner),
+            HeapAlloc(inner) | Free(inner) => self.check_no_local_ref_escape(inner),
             Cast { expr, .. } | CheckedCast { expr, .. } | DerefRef(expr) | DropWrite(expr)
                 | Un { expr, .. } | Unwrap { expr, .. } => self.check_no_local_ref_escape(expr),
             Bin { lhs, rhs, .. } => {
@@ -568,6 +598,29 @@ impl<'a> Analyzer<'a> {
             _ => false,
         }
     }
+    /// Walk an expression and add the LID of every `own *T` / `own &T` Local
+    /// reachable through field / index / unwrap / cast nesting to `out`.
+    /// Used by `Let` and `Assign` when the destination is a non-owning slot
+    /// (`*T`, `&T`): the new binding aliases the heap allocation rooted at
+    /// each owner LID, and `kill_lid` uses the dep edge to invalidate the
+    /// alias when the owner mutates, moves, frees, or goes out of scope.
+    fn collect_owner_aliases(&self, e: &HExpr, out: &mut HashSet<u32>) {
+        match &e.kind {
+            HExprKind::Local(id) => {
+                if matches!(self.f().locals[id.0 as usize].ty, HType::OwnPtr { .. } | HType::Heap { .. }) {
+                    out.insert(id.0);
+                }
+            }
+            HExprKind::Unwrap { expr, .. }
+            | HExprKind::Cast { expr, .. }
+            | HExprKind::CheckedCast { expr, .. }
+            | HExprKind::DropWrite(expr) => self.collect_owner_aliases(expr, out),
+            HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => self.collect_owner_aliases(base, out),
+            HExprKind::DerefRef(inner) => self.collect_owner_aliases(inner, out),
+            _ => {}
+        }
+    }
+
     fn collect_deps(&self, e: &HExpr, out: &mut HashSet<u32>) {
         match &e.kind {
             HExprKind::AddrOfRef { place, .. } => {
@@ -591,6 +644,9 @@ impl<'a> Analyzer<'a> {
             HExprKind::DerefRef(inner) => self.collect_deps(inner, out),
             HExprKind::HeapAlloc(_) => {
                 // Fresh heap LID; no deps from source. We model it as `{}`.
+            }
+            HExprKind::Free(_) => {
+                // `free p;` returns unit; deps don't propagate from the freed pointer.
             }
             HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => self.collect_deps(base, out),
             // Struct/variant literals and array literals propagate their fields'
@@ -736,6 +792,7 @@ fn fill_heap_drops(_sym: &SymTab, f: &mut HFunc) {
             HExprKind::ArrayToSlice { base, .. } => moved_locals_in_expr(base, out),
             HExprKind::DerefRef(inner) => moved_locals_in_expr(inner, out),
             HExprKind::HeapAlloc(inner) => moved_locals_in_expr(inner, out),
+            HExprKind::Free(inner) => moved_locals_in_expr(inner, out),
             HExprKind::CallIndirect { callee, args } => {
                 moved_locals_in_expr(callee, out);
                 for a in args { moved_locals_in_expr(a, out); }
@@ -938,7 +995,7 @@ fn collect_param_moves_expr(e: &HExpr, out: &mut std::collections::HashSet<Local
         HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. }
         | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr) => collect_param_moves_expr(expr, out),
         HExprKind::ArrayToSlice { base, .. } => collect_param_moves_expr(base, out),
-        HExprKind::HeapAlloc(inner) => collect_param_moves_expr(inner, out),
+        HExprKind::HeapAlloc(inner) | HExprKind::Free(inner) => collect_param_moves_expr(inner, out),
         HExprKind::CallIndirect { callee, args } => {
             collect_param_moves_expr(callee, out);
             for a in args { collect_param_moves_expr(a, out); }
