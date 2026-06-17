@@ -1,0 +1,33 @@
+// MAKA_TEST: linux-only — uses syscall(SYS_getpid) which is x86_64 Linux-specific.
+// Maka's irreducible concurrency primitives — atomic ops on integers,
+// implemented as compiler builtins lowering to C11 __atomic_* intrinsics.
+// Higher-level safe-Maka abstractions (Atomic<T>, Mutex<T>, WaitGroup,
+// Chan<T>) are built on top of these in pure Maka source.
+unit main() {
+    mut int x = 0;
+
+    // CAS: returns OLD value regardless of success/failure.
+    log(atomic_cas(&mut x, 0, 5));   // 0 — succeeded, old was 0
+    log(atomic_cas(&mut x, 0, 9));   // 5 — failed, current value is 5
+
+    // Load/store: direct atomic read/write.
+    log(atomic_load(&x));             // 5
+    atomic_store(&mut x, 100);
+    log(atomic_load(&x));             // 100
+
+    // Read-modify-write returns the OLD value.
+    log(atomic_fetch_add(&mut x, 7)); // 100, x becomes 107
+    log(atomic_fetch_sub(&mut x, 3)); // 107, x becomes 104
+    log(atomic_fetch_and(&mut x, 96));// 104, x becomes 96 (104 & 96)
+    log(atomic_fetch_or(&mut x, 3));  // 96, x becomes 99 (96 | 3)
+    log(atomic_fetch_xor(&mut x, 5)); // 99, x becomes 102 (99 ^ 5)
+    log(atomic_load(&x));             // 102
+
+    // Fence + yield are unit-typed.
+    atomic_fence(4);                  // SEQ_CST
+    thread_yield();
+
+    // syscall(N) — at minimum verify it produces a valid result.
+    // SYS_getpid (39 on x86_64 Linux); positive PID confirms it ran.
+    log(syscall(39) > 0);             // true on Linux; varies elsewhere
+}

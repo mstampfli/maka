@@ -654,11 +654,57 @@ extern unit maka_mutex_destroy(*unit m);
 Then uses them as opaque `*unit` handles. The Shareable allowlist matches by
 the user-declared struct name when applicable.
 
-### 7.4 Atomics
+### 7.4 Concurrency primitives (the irreducible base)
 
-`extern int maka_atomic_load_i64(&int p);` and the family of
-`maka_atomic_fetch_*_i64(&mut int p, int delta)` helpers are emitted in the
-prologue and may be declared via `extern`.
+The atoms Maka can't express in pure Maka itself — CPU atomic instructions,
+kernel waits/wakes, syscalls — are exposed as **compiler builtins**.  These
+are recognized by name, dispatch to the right C intrinsic in codegen, and
+are the lowest layer the rest of the concurrency story is built on.
+
+Everything else in the concurrency stack — `Atomic<T>`, `Mutex<T>`,
+`Semaphore<T>`, `RWLock<T>`, `WaitGroup`, `Once`, `Chan<T>`, condition
+variables, etc. — is **pure Maka source** built on top of these builtins.
+The stdlib reads like Maka, not like FFI.
+
+| builtin | signature | C lowering |
+|---|---|---|
+| `atomic_cas` | `<T: int> atomic_cas(&mut T p, T expected, T new) -> T` | `__atomic_compare_exchange_n(p, &expected, new, false, SEQ_CST, SEQ_CST)`; returns the old value either way |
+| `atomic_load` | `<T: int> atomic_load(&T p) -> T` | `__atomic_load_n(p, SEQ_CST)` |
+| `atomic_store` | `<T: int> atomic_store(&mut T p, T v)` | `__atomic_store_n(p, v, SEQ_CST)` |
+| `atomic_fetch_add` | `<T: int> atomic_fetch_add(&mut T p, T delta) -> T` | `__atomic_fetch_add(p, delta, SEQ_CST)`; returns old value |
+| `atomic_fetch_sub` | `<T: int>` ditto | `__atomic_fetch_sub` |
+| `atomic_fetch_and` | `<T: int>` ditto | `__atomic_fetch_and` |
+| `atomic_fetch_or`  | `<T: int>` ditto | `__atomic_fetch_or` |
+| `atomic_fetch_xor` | `<T: int>` ditto | `__atomic_fetch_xor` |
+| `atomic_fence` | `atomic_fence(int order)` | `__atomic_thread_fence(order_map(order))` where order: 1=acquire, 2=release, 3=acq_rel, 4=seq_cst |
+| `futex_wait` | `futex_wait(&int addr, int expected) -> int` | Linux: `syscall(SYS_futex, addr, FUTEX_WAIT, expected, ...)`. Windows: `WaitOnAddress`. Darwin: spin-yield fallback. |
+| `futex_wake` | `futex_wake(&int addr, int n) -> int` | Linux: `syscall(SYS_futex, addr, FUTEX_WAKE, n, ...)`. Windows: `WakeByAddress{Single,All}`. Darwin: no-op. |
+| `thread_yield` | `thread_yield()` | POSIX: `sched_yield()`. Win: `SwitchToThread`. |
+| `syscall` | `syscall(int n, int a1..a6) -> int` | POSIX: `syscall(n, a1..a6)`. Win: returns -1 with `ENOSYS`. |
+
+All thirteen are recognized by their bare names with no qualifier (same
+recognition pattern as `log` / `panic` / `spawn` / `join`).  All accept
+`int` and `i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64` as the `T` for the
+atomic family; codegen dispatches on the argument type at the call site.
+
+**Why this small list and not just `atomic_cas`?**  Mathematically `atomic_cas`
+alone suffices to derive every other atomic op via CAS-loops.  But on x86
+a CAS-loop atomic load is ~30 cycles versus 1 for a native aligned read;
+similarly for add/sub/and/or/xor versus `lock xadd`/`lock add`/etc.  The
+direct builtins let codegen emit the single-instruction form when one
+exists.  The fence is necessary on weak-memory architectures (ARM, RISC-V)
+where individual ops aren't sufficient to enforce ordering across multiple
+locations.
+
+**No more direct `extern` atomic / pthread helpers in user code.**  The
+previous shape (`extern int maka_atomic_load_i64(&int p);` etc.) is
+deprecated and goes away when the stdlib's `Atomic<T>` / `Mutex<T>` types
+land — those will be pure Maka over these builtins.
+
+**Future perf primitives** (not implemented; added when measurements show
+they matter): `atomic_load_relaxed` / `acquire`, `atomic_store_relaxed` /
+`release`, and per-order variants of `fetch_*` for tighter memory
+orderings than SEQ_CST.
 
 ---
 

@@ -552,6 +552,65 @@ impl<'a> Cx<'a> {
         self.w("void maka_spinlock_unlock(maka_unit* s) { pthread_spin_unlock((pthread_spinlock_t*)s); }\n");
         self.w("void maka_spinlock_destroy(maka_unit* s) { pthread_spin_destroy((pthread_spinlock_t*)s); free(s); }\n");
         self.w("#endif\n");
+        // ===== Maka primitive runtime helpers =====
+        // futex_wait / futex_wake — direct kernel-wait/wake-on-address.
+        //   Linux:   syscall(SYS_futex, ...)
+        //   Windows: WaitOnAddress / WakeByAddressSingle (Vista+)
+        //   macOS:   __ulock_wait / __ulock_wake (private but stable since 10.12)
+        // thread_yield — sched_yield on POSIX / SwitchToThread on Win.
+        // syscall — generic kernel call with up to 6 args (variadic shim).
+        self.w("#ifdef __linux__\n");
+        self.w("#include <linux/futex.h>\n");
+        self.w("#include <sys/syscall.h>\n");
+        self.w("#include <unistd.h>\n");
+        self.w("#include <sched.h>\n");
+        self.w("static int __maka_futex_wait(const int* addr, int expected) {\n");
+        self.w("    return (int)syscall(SYS_futex, (int*)addr, FUTEX_WAIT, expected, NULL, NULL, 0);\n");
+        self.w("}\n");
+        self.w("static int __maka_futex_wake(const int* addr, int n) {\n");
+        self.w("    return (int)syscall(SYS_futex, (int*)addr, FUTEX_WAKE, n, NULL, NULL, 0);\n");
+        self.w("}\n");
+        self.w("static void __maka_thread_yield(void) { sched_yield(); }\n");
+        self.w("static long __maka_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6) {\n");
+        self.w("    return syscall(n, a1, a2, a3, a4, a5, a6);\n");
+        self.w("}\n");
+        self.w("#elif defined(_WIN32)\n");
+        self.w("static int __maka_futex_wait(const int* addr, int expected) {\n");
+        self.w("    int local = expected;\n");
+        self.w("    return WaitOnAddress((volatile void*)addr, &local, sizeof(int), INFINITE) ? 0 : -1;\n");
+        self.w("}\n");
+        self.w("static int __maka_futex_wake(const int* addr, int n) {\n");
+        self.w("    if (n <= 1) { WakeByAddressSingle((void*)addr); } else { WakeByAddressAll((void*)addr); }\n");
+        self.w("    return 0;\n");
+        self.w("}\n");
+        self.w("static void __maka_thread_yield(void) { SwitchToThread(); }\n");
+        self.w("static long __maka_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6) {\n");
+        // Windows has no unified syscall surface; this is a stub that just
+        // returns -1 with errno set to ENOSYS.  Users targeting Windows
+        // should reach for the typed Win32 APIs directly, not raw syscalls.
+        self.w("    (void)n;(void)a1;(void)a2;(void)a3;(void)a4;(void)a5;(void)a6; errno = ENOSYS; return -1;\n");
+        self.w("}\n");
+        self.w("#else\n");
+        // Darwin/BSD — fall back to a spin-yield emulation for futex (no
+        // kernel address-waits in the public API on Darwin); sched_yield()
+        // exists on every POSIX so use it for yield.
+        self.w("#include <sched.h>\n");
+        self.w("#include <sys/syscall.h>\n");
+        self.w("#include <unistd.h>\n");
+        self.w("static int __maka_futex_wait(const int* addr, int expected) {\n");
+        // Polling fallback — checks every 1 ms until *addr != expected.  Not
+        // ideal but correct.  Future: __ulock_wait on Darwin.
+        self.w("    while (__atomic_load_n(addr, __ATOMIC_SEQ_CST) == expected) {\n");
+        self.w("        struct timespec ts = { 0, 1000000 }; nanosleep(&ts, NULL);\n");
+        self.w("    }\n");
+        self.w("    return 0;\n");
+        self.w("}\n");
+        self.w("static int __maka_futex_wake(const int* addr, int n) { (void)addr; (void)n; return 0; }\n");
+        self.w("static void __maka_thread_yield(void) { sched_yield(); }\n");
+        self.w("static long __maka_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6) {\n");
+        self.w("    return syscall(n, a1, a2, a3, a4, a5, a6);\n");
+        self.w("}\n");
+        self.w("#endif\n");
         // Channel: a simple unbounded queue of int64_t protected by a mutex + condvar.
         self.w("typedef struct maka_chan_node_t { maka_int v; struct maka_chan_node_t* next; } maka_chan_node_t;\n");
         self.w("typedef struct { pthread_mutex_t m; pthread_cond_t c; maka_chan_node_t* head; maka_chan_node_t* tail; maka_int count; int closed; int waiters; pthread_cond_t drained_cv; } maka_channel_t;\n");
@@ -7597,6 +7656,113 @@ impl<'a> Cx<'a> {
                         );
                     }
                     return "(Slice_str){0}".into();
+                }
+                // ===== Concurrency primitives (irreducible base) =====
+                // atomic_cas(&mut T p, T expected, T new) -> T (returns old).
+                // __atomic_compare_exchange_n updates *expected to *p on
+                // failure; either way `__exp` ends up holding the OLD value.
+                if callee.0 == u32::MAX - 45 {
+                    if args.len() == 3 {
+                        let p = self.emit_expr(f, &args[0]);
+                        let exp = self.emit_expr(f, &args[1]);
+                        let new = self.emit_expr(f, &args[2]);
+                        let ty = self.c_type(&args[2].ty);
+                        return format!(
+                            "(__extension__ ({{ {ty} __exp = ({exp}); \
+                             __atomic_compare_exchange_n({p}, &__exp, ({new}), 0, \
+                             __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); __exp; }}))",
+                            ty = ty, p = p, exp = exp, new = new
+                        );
+                    }
+                    return "0".into();
+                }
+                // atomic_load(&const T p) -> T
+                if callee.0 == u32::MAX - 46 {
+                    if let Some(a) = args.first() {
+                        let p = self.emit_expr(f, a);
+                        return format!("__atomic_load_n(({}), __ATOMIC_SEQ_CST)", p);
+                    }
+                    return "0".into();
+                }
+                // atomic_store(&mut T p, T v)
+                if callee.0 == u32::MAX - 47 {
+                    if args.len() == 2 {
+                        let p = self.emit_expr(f, &args[0]);
+                        let v = self.emit_expr(f, &args[1]);
+                        return format!(
+                            "(__atomic_store_n(({}), ({}), __ATOMIC_SEQ_CST), MAKA_UNIT)",
+                            p, v
+                        );
+                    }
+                    return "MAKA_UNIT".into();
+                }
+                // atomic_fetch_add / sub / and / or / xor — all the same shape.
+                if let Some(c_op) = match callee.0 {
+                    v if v == u32::MAX - 48 => Some("__atomic_fetch_add"),
+                    v if v == u32::MAX - 49 => Some("__atomic_fetch_sub"),
+                    v if v == u32::MAX - 50 => Some("__atomic_fetch_and"),
+                    v if v == u32::MAX - 51 => Some("__atomic_fetch_or"),
+                    v if v == u32::MAX - 52 => Some("__atomic_fetch_xor"),
+                    _ => None,
+                } {
+                    if args.len() == 2 {
+                        let p = self.emit_expr(f, &args[0]);
+                        let v = self.emit_expr(f, &args[1]);
+                        return format!("{}(({}), ({}), __ATOMIC_SEQ_CST)", c_op, p, v);
+                    }
+                    return "0".into();
+                }
+                // atomic_fence(int order)
+                if callee.0 == u32::MAX - 53 {
+                    if let Some(a) = args.first() {
+                        let o = self.emit_expr(f, a);
+                        // Map Maka order to __ATOMIC_* via a small dispatch.
+                        return format!(
+                            "(__atomic_thread_fence((({}) == 1) ? __ATOMIC_ACQUIRE : \
+                                                    (({}) == 2) ? __ATOMIC_RELEASE : \
+                                                    (({}) == 3) ? __ATOMIC_ACQ_REL : \
+                                                                  __ATOMIC_SEQ_CST), MAKA_UNIT)",
+                            o, o, o
+                        );
+                    }
+                    return "MAKA_UNIT".into();
+                }
+                // futex_wait(&const int addr, int expected) -> int
+                if callee.0 == u32::MAX - 54 {
+                    if args.len() == 2 {
+                        let p = self.emit_expr(f, &args[0]);
+                        let v = self.emit_expr(f, &args[1]);
+                        return format!("(int64_t)__maka_futex_wait((const int*)({}), (int)({}))", p, v);
+                    }
+                    return "0".into();
+                }
+                // futex_wake(&const int addr, int n) -> int
+                if callee.0 == u32::MAX - 55 {
+                    if args.len() == 2 {
+                        let p = self.emit_expr(f, &args[0]);
+                        let n = self.emit_expr(f, &args[1]);
+                        return format!("(int64_t)__maka_futex_wake((const int*)({}), (int)({}))", p, n);
+                    }
+                    return "0".into();
+                }
+                // thread_yield()
+                if callee.0 == u32::MAX - 56 {
+                    return "(__maka_thread_yield(), MAKA_UNIT)".into();
+                }
+                // syscall(n, a1..a6) -> int — variadic, missing args = 0.
+                if callee.0 == u32::MAX - 57 {
+                    let mut parts: Vec<String> = (0..7).map(|i| {
+                        if let Some(a) = args.get(i) {
+                            format!("(long)({})", self.emit_expr(f, a))
+                        } else {
+                            "0L".to_string()
+                        }
+                    }).collect();
+                    let n = parts.remove(0);
+                    return format!(
+                        "(int64_t)__maka_syscall({}, {})",
+                        n, parts.join(", ")
+                    );
                 }
                 // par_filter_bytes(in, n, item_sz, &mut out_n, pred)
                 if callee.0 == u32::MAX - 41 {

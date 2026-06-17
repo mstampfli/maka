@@ -2013,6 +2013,166 @@ impl<'a> TypeChecker<'a> {
             );
             return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
         }
+        // ===================================================================
+        // Concurrency primitives (the "irreducible base").
+        //
+        // These are the operations Maka can't express in pure Maka — atomic
+        // memory ops, thread blocking/waking, memory fences, syscalls.  The
+        // stdlib's `Atomic<T>`, `Mutex<T>`, `WaitGroup`, `Chan<T>`, `Once`,
+        // and friends are written in pure Maka source on top of these.
+        //
+        // The CAS primitive alone is enough to derive `atomic_load` / `store`
+        // / `fetch_add` / `fetch_sub` / `fetch_and` / `fetch_or` / `fetch_xor`
+        // via CAS-loops — but each of those is provided as a direct builtin
+        // for performance (on x86 they collapse to a single instruction;
+        // CAS-looped equivalents waste ~30 cycles per call).
+        // ===================================================================
+        if (name == "atomic_cas"
+            || name == "atomic_load"
+            || name == "atomic_store"
+            || name == "atomic_fetch_add"
+            || name == "atomic_fetch_sub"
+            || name == "atomic_fetch_and"
+            || name == "atomic_fetch_or"
+            || name == "atomic_fetch_xor"
+            || name == "atomic_fence"
+            || name == "futex_wait"
+            || name == "futex_wake"
+            || name == "thread_yield"
+            || name == "syscall") && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            // Helper: pull the inner integer type out of a `&T` / `&mut T` / `&const T`.
+            let inner_int = |e: &HExpr| -> Option<HType> {
+                match &e.ty {
+                    HType::Ref { inner, .. } => {
+                        if matches!(**inner, HType::Int | HType::SizedInt { .. }) {
+                            Some((**inner).clone())
+                        } else { None }
+                    }
+                    _ => None,
+                }
+            };
+            let int_t = |t: &HType| matches!(t, HType::Int | HType::SizedInt { .. });
+
+            match name.as_str() {
+                "atomic_cas" => {
+                    // atomic_cas(&mut T p, T expected, T new) -> T  (returns old value).
+                    if hargs.len() != 3 {
+                        self.err("`atomic_cas` expects 3 args: `&mut T`, `T`, `T`", sp);
+                    }
+                    let t = hargs.first().and_then(inner_int).unwrap_or(HType::Int);
+                    if !int_t(&t) {
+                        self.err(format!("`atomic_cas`: first arg must be `&mut T` where T is an integer; got `{}`", hargs.first().map(|h| type_str(&h.ty)).unwrap_or_default()), sp);
+                    }
+                    return HExpr {
+                        kind: HExprKind::Call { callee: FuncId(u32::MAX - 45), args: hargs },
+                        ty: t,
+                        span: sp,
+                    };
+                }
+                "atomic_load" => {
+                    // atomic_load(&const T p) -> T
+                    if hargs.len() != 1 {
+                        self.err("`atomic_load` expects 1 arg: `&const T`", sp);
+                    }
+                    let t = hargs.first().and_then(inner_int).unwrap_or(HType::Int);
+                    return HExpr {
+                        kind: HExprKind::Call { callee: FuncId(u32::MAX - 46), args: hargs },
+                        ty: t,
+                        span: sp,
+                    };
+                }
+                "atomic_store" => {
+                    // atomic_store(&mut T p, T v)
+                    if hargs.len() != 2 {
+                        self.err("`atomic_store` expects 2 args: `&mut T`, `T`", sp);
+                    }
+                    return HExpr {
+                        kind: HExprKind::Call { callee: FuncId(u32::MAX - 47), args: hargs },
+                        ty: HType::Unit,
+                        span: sp,
+                    };
+                }
+                "atomic_fetch_add" | "atomic_fetch_sub" | "atomic_fetch_and"
+                | "atomic_fetch_or" | "atomic_fetch_xor" => {
+                    // atomic_fetch_*(&mut T p, T delta) -> T  (returns old value)
+                    if hargs.len() != 2 {
+                        self.err(format!("`{}` expects 2 args: `&mut T`, `T`", name), sp);
+                    }
+                    let t = hargs.first().and_then(inner_int).unwrap_or(HType::Int);
+                    let fid = match name.as_str() {
+                        "atomic_fetch_add" => u32::MAX - 48,
+                        "atomic_fetch_sub" => u32::MAX - 49,
+                        "atomic_fetch_and" => u32::MAX - 50,
+                        "atomic_fetch_or"  => u32::MAX - 51,
+                        _                  => u32::MAX - 52,    // xor
+                    };
+                    return HExpr {
+                        kind: HExprKind::Call { callee: FuncId(fid), args: hargs },
+                        ty: t,
+                        span: sp,
+                    };
+                }
+                "atomic_fence" => {
+                    // atomic_fence(int order).  Order: 1=acquire, 2=release,
+                    // 3=acq_rel, 4=seq_cst (matches C11 __ATOMIC_* enum).
+                    if hargs.len() != 1 {
+                        self.err("`atomic_fence` expects 1 arg: `int` (memory order)", sp);
+                    }
+                    return HExpr {
+                        kind: HExprKind::Call { callee: FuncId(u32::MAX - 53), args: hargs },
+                        ty: HType::Unit,
+                        span: sp,
+                    };
+                }
+                "futex_wait" => {
+                    // futex_wait(&const int addr, int expected) -> int
+                    if hargs.len() != 2 {
+                        self.err("`futex_wait` expects 2 args: `&const int`, `int`", sp);
+                    }
+                    return HExpr {
+                        kind: HExprKind::Call { callee: FuncId(u32::MAX - 54), args: hargs },
+                        ty: HType::Int,
+                        span: sp,
+                    };
+                }
+                "futex_wake" => {
+                    // futex_wake(&const int addr, int n) -> int
+                    if hargs.len() != 2 {
+                        self.err("`futex_wake` expects 2 args: `&const int`, `int`", sp);
+                    }
+                    return HExpr {
+                        kind: HExprKind::Call { callee: FuncId(u32::MAX - 55), args: hargs },
+                        ty: HType::Int,
+                        span: sp,
+                    };
+                }
+                "thread_yield" => {
+                    // thread_yield() — sched_yield equivalent.
+                    if !hargs.is_empty() {
+                        self.err("`thread_yield` takes no arguments", sp);
+                    }
+                    return HExpr {
+                        kind: HExprKind::Call { callee: FuncId(u32::MAX - 56), args: hargs },
+                        ty: HType::Unit,
+                        span: sp,
+                    };
+                }
+                "syscall" => {
+                    // syscall(int n, int a1..a6) -> int.  All args are int;
+                    // missing args codegen to 0.
+                    if hargs.is_empty() || hargs.len() > 7 {
+                        self.err("`syscall` expects 1..7 args (syscall number + up to 6 int args)", sp);
+                    }
+                    return HExpr {
+                        kind: HExprKind::Call { callee: FuncId(u32::MAX - 57), args: hargs },
+                        ty: HType::Int,
+                        span: sp,
+                    };
+                }
+                _ => unreachable!(),
+            }
+        }
         // Built-in `detach(*Thread)` — caller opts out of join; runtime auto-
         // reaps the handle when the fiber/thread/job completes.
         if name == "detach" && qualifier.is_none() {
