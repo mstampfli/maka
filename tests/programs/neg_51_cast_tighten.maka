@@ -1,0 +1,8 @@
+// `as &T` from a nullable source is rejected — the cast doesn't carry the
+// non-null proof that the `&T` contract requires.  Use `&(p!)` instead.
+data Box { mut int v; }
+unit main() {
+    own *Box owner = alloc Box { v = 1 };
+    &Box b = owner as &Box;   // ❌ tightening without null proof
+    log(b.v);
+}

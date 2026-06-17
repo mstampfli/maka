@@ -7197,6 +7197,13 @@ impl<'a> Cx<'a> {
                         return;
                     }
                 }
+                // `alloc value` directly: HeapAlloc already emits a `T*` —
+                // assign the pointer, don't re-alloc and deref-assign.
+                if matches!(init.kind, HExprKind::HeapAlloc(_)) {
+                    let s = self.emit_expr(f, init);
+                    self.wl(&format!("{}* {} = {};", self.c_type(inner), name, s));
+                    return;
+                }
                 // New allocation: value expression of type `T` lifted into heap slot.
                 let value_s = self.emit_expr(f, init);
                 self.wl(&format!("{}* {} = ({}*)malloc(sizeof({}));", self.c_type(inner), name, self.c_type(inner), self.c_type(inner)));

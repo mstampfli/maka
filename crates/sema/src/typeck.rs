@@ -3107,9 +3107,12 @@ impl<'a> TypeChecker<'a> {
             return self.check_to_dyn(h, traits.clone(), checked, sp);
         }
 
-        // Heap and reference targets are not valid cast targets (other than dyn handled above).
-        if matches!(to, HType::Heap { .. } | HType::Ref { .. }) {
-            self.err("cannot cast to this type", sp);
+        // `own &T` (Heap) is never a valid cast target — synthesizing an
+        // owning binding from somewhere else would create a phantom free
+        // obligation.  `&T` targets are handled per-arm by classify_cast
+        // (only allowed from `own &T`; nullable sources must use `&(p!)`).
+        if matches!(to, HType::Heap { .. }) {
+            self.err("cannot cast to `own &T` — owning bindings come only from `alloc` or moves", sp);
         }
         // Bool ↔ int forbidden per §7.4
         let from = &h.ty;
@@ -3233,6 +3236,52 @@ impl<'a> TypeChecker<'a> {
                 // own *T and own &T can also expose their address (no ownership transfer).
                 (OwnPtr { .. }, SizedInt { bits: 0, .. }) | (OwnPtr { .. }, Int) => CastKind::Reinterpret,
                 (Heap { .. }, SizedInt { bits: 0, .. }) | (Heap { .. }, Int) => CastKind::Reinterpret,
+                // Explicit pointer-kind casts that mirror the safe-direction
+                // implicit coercions in `check_expr_coerce` (loosening: drop
+                // owning, drop tracking, drop non-null).  All are codegen
+                // no-ops; the cast is purely a re-tag.  Tightening directions
+                // (e.g. `*T as &T`) are intentionally NOT here — they need
+                // a null proof, written `&(p!)`.
+                (OwnPtr { .. }, Ptr { .. }) => {
+                    if let (OwnPtr { mutable: am, inner: ai }, Ptr { mutable: bm, inner: bi }) = (from, to) {
+                        if !(*am || !*bm) || !type_eq(ai, bi) {
+                            self.err(format!("invalid cast: {:?} as {:?}", from, to), sp);
+                        }
+                    }
+                    CastKind::Reinterpret
+                }
+                (OwnPtr { .. }, RawPtr { .. }) => {
+                    if let (OwnPtr { mutable: am, inner: ai }, RawPtr { mutable: bm, inner: bi }) = (from, to) {
+                        if !(*am || !*bm) || !type_eq(ai, bi) {
+                            self.err(format!("invalid cast: {:?} as {:?}", from, to), sp);
+                        }
+                    }
+                    CastKind::Reinterpret
+                }
+                (Heap { .. }, Ptr { .. }) => {
+                    if let (Heap { inner: ai }, Ptr { mutable: _, inner: bi }) = (from, to) {
+                        if !type_eq(ai, bi) {
+                            self.err(format!("invalid cast: {:?} as {:?}", from, to), sp);
+                        }
+                    }
+                    CastKind::Reinterpret
+                }
+                (Heap { .. }, RawPtr { .. }) => {
+                    if let (Heap { inner: ai }, RawPtr { mutable: _, inner: bi }) = (from, to) {
+                        if !type_eq(ai, bi) {
+                            self.err(format!("invalid cast: {:?} as {:?}", from, to), sp);
+                        }
+                    }
+                    CastKind::Reinterpret
+                }
+                (Heap { .. }, Ref { .. }) => {
+                    if let (Heap { inner: ai }, Ref { mutable: _, inner: bi }) = (from, to) {
+                        if !type_eq(ai, bi) {
+                            self.err(format!("invalid cast: {:?} as {:?}", from, to), sp);
+                        }
+                    }
+                    CastKind::Reinterpret
+                }
                 (SizedInt { bits: 0, .. }, Ptr { .. }) | (Int, Ptr { .. }) => {
                     if self.in_unsafe == 0 {
                         self.err(

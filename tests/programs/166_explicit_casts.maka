@@ -1,0 +1,19 @@
+// Explicit `as` casts for the safe-direction pointer-kind conversions.
+// Codegen no-ops: the bytes are the same address, just re-tagged.
+data Box { mut int v; }
+
+unit show(own &Box h) {
+    // own &T → &T  via explicit cast (Heap is already non-null).
+    &Box b = h as &Box;
+    log(b.v);   // 99
+}
+
+unit main() {
+    own *Box owner = alloc Box { v = 42 };
+    // own *T → *T explicit cast.
+    *Box q = owner as *Box;
+    log(q!.v);  // 42
+
+    own &Box h = alloc Box { v = 99 };
+    show(h);
+}
