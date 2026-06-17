@@ -1,6 +1,8 @@
+// MAKA_TEST: linux-only
 // signalfd: a fiber waits asynchronously for SIGUSR1; main raises the
 // signal after a short delay.  Verifies that signalfd reads yield via
-// the reactor like any other fd.
+// the reactor like any other fd.  Linux-only — SIGUSR1 doesn't exist
+// on Windows and signalfd is a Linux syscall.
 import std.{signal_fd_open, signal_recv_async, sleep_ms};
 
 cblock "

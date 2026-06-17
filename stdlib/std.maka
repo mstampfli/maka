@@ -329,6 +329,19 @@ pub unit      chan_float_destroy(FloatChan c)        { __chan_bytes_destroy(c.h)
 // Callable's code/env at the call site, just like `once_do` and the
 // par_* family.  Returns a freshly-malloc'd buffer of n * out_sz bytes;
 // free yourself when done.
+//
+// Idiomatic usage from a Maka caller (the user-facing "generic par_map"):
+//   *mut unit out = par_map_bytes(in_ptr, n, sizeof_T, sizeof_U,
+//                                 unit(*mut unit a, *mut unit b) { body(a, b); });
+// where `a` is the T element and `b` is where the U result is written.
+// Wrapping byte pointers in your own typed accessors keeps this
+// type-safe without the compiler needing monomorphized generics.
+//
+// Convenience wrappers for the most common cases:
+//   par_map_int   — Slice<int>   -> Slice<int>
+//   par_map_float — Slice<float> -> Slice<float>
+// All three (par_map_bytes, par_map_int, par_map_float) live in the
+// codegen prologue; this stdlib file does not need to redeclare them.
 
 pub *unit atomic_new   (int v)                              { return __atomic_new(v); }
 // `atomic_get` / `atomic_set` instead of load/store to avoid clashing with
@@ -351,3 +364,170 @@ pub unit  atomic_destroy(*unit a)                           { __atomic_destroy(a
 //
 // These are wired in sema/typeck.rs as name-recognized builtins; the
 // runtime entries live in the codegen prologue.
+
+// =====================================================================
+// Time + sleep — high-resolution monotonic clock + sleep helpers.
+// =====================================================================
+extern "__maka_now_ns" int __now_ns();
+extern "__maka_now_ms" int __now_ms();
+pub int  now_ns()                  { return __now_ns(); }
+pub int  now_ms()                  { return __now_ms(); }
+pub unit sleep_ns(int nanos)       { __sleep_ns(nanos); }
+pub unit sleep_until_ns(int wake_at_ns) {
+    int now = __now_ns();
+    if (wake_at_ns > now) { __sleep_ns(wake_at_ns - now); }
+}
+
+// =====================================================================
+// RwLock — pthread_rwlock_t.  read_lock for many readers, write_lock for
+// exclusive access.  Same lifetime model as Mutex.
+// =====================================================================
+extern "maka_rwlock_new"        *unit __rwlock_new();
+extern "maka_rwlock_read_lock"  unit  __rwlock_read_lock (*unit r);
+extern "maka_rwlock_write_lock" unit  __rwlock_write_lock(*unit r);
+extern "maka_rwlock_unlock"     unit  __rwlock_unlock    (*unit r);
+extern "maka_rwlock_destroy"    unit  __rwlock_destroy   (*unit r);
+pub *unit rwlock_new()                       { return __rwlock_new(); }
+pub unit  rwlock_read_lock (*unit r)         { __rwlock_read_lock(r); }
+pub unit  rwlock_write_lock(*unit r)         { __rwlock_write_lock(r); }
+pub unit  rwlock_unlock    (*unit r)         { __rwlock_unlock(r); }
+pub unit  rwlock_destroy   (*unit r)         { __rwlock_destroy(r); }
+
+// =====================================================================
+// Atomics for non-int payloads — bool packs as 0/1, ptr round-trips
+// through intptr_t.  Both reuse the i64 atomic under the hood, so
+// operations are SEQ_CST.
+// =====================================================================
+extern "__maka_atomic_bool_new" *unit __atomic_bool_new(int v);
+extern "__maka_atomic_bool_get" int   __atomic_bool_get(*unit a);
+extern "__maka_atomic_bool_set" unit  __atomic_bool_set(*unit a, int v);
+extern "__maka_atomic_ptr_new"  *unit __atomic_ptr_new (*unit p);
+extern "__maka_atomic_ptr_get"  *unit __atomic_ptr_get (*unit a);
+extern "__maka_atomic_ptr_set"  unit  __atomic_ptr_set (*unit a, *unit p);
+pub *unit atomic_bool_new(bool v)               { if (v) { return __atomic_bool_new(1); } else { return __atomic_bool_new(0); } }
+pub bool  atomic_bool_get(*unit a)              { return __atomic_bool_get(a) != 0; }
+pub unit  atomic_bool_set(*unit a, bool v)      { if (v) { __atomic_bool_set(a, 1); } else { __atomic_bool_set(a, 0); } }
+pub *unit atomic_ptr_new(*unit p)               { return __atomic_ptr_new(p); }
+pub *unit atomic_ptr_get(*unit a)               { return __atomic_ptr_get(a); }
+pub unit  atomic_ptr_set(*unit a, *unit p)      { __atomic_ptr_set(a, p); }
+
+// =====================================================================
+// Filesystem ops — minimal cross-platform set built on the file_open /
+// file_read_async / file_write_async tier.  All return 0 on success and
+// -1 on error (POSIX convention); file_size returns the size or -1.
+// =====================================================================
+extern "__maka_rt_file_unlink"   int __file_unlink  (string path);
+extern "__maka_rt_file_rename"   int __file_rename  (string from, string to);
+extern "__maka_rt_file_mkdir"    int __file_mkdir   (string path, int mode);
+extern "__maka_rt_file_size"     int __file_size    (string path);
+extern "__maka_rt_file_sync"     int __file_sync    (int fd);
+extern "__maka_rt_file_truncate" int __file_truncate(int fd, int len);
+pub int file_unlink  (string path)          { return __file_unlink(path); }
+pub int file_rename  (string from, string to) { return __file_rename(from, to); }
+pub int file_mkdir   (string path, int mode){ return __file_mkdir(path, mode); }
+pub int file_size    (string path)          { return __file_size(path); }
+pub int file_sync    (int fd)               { return __file_sync(fd); }
+pub int file_truncate(int fd, int len)      { return __file_truncate(fd, len); }
+
+// =====================================================================
+// Filesystem queries + environment + process control.
+// =====================================================================
+extern "__maka_rt_file_exists"  int  __file_exists (string path);
+extern "__maka_rt_file_is_dir"  int  __file_is_dir (string path);
+extern "__maka_rt_env_get"      string __env_get_raw(string name);
+extern "__maka_rt_process_exit" unit __process_exit(int code);
+pub bool file_exists (string path)  { return __file_exists(path) != 0; }
+pub bool file_is_dir (string path)  { return __file_is_dir(path) != 0; }
+pub string env_get   (string name)  { return __env_get_raw(name); }
+pub unit   process_exit(int code)   { __process_exit(code); }
+
+// =====================================================================
+// String conversions + search.
+// =====================================================================
+extern "__maka_rt_str_to_int"   int    __str_to_int (string s);
+extern "__maka_rt_int_to_str"   string __int_to_str (int n);
+extern "__maka_rt_str_find"     int    __str_find   (string s, string needle);
+pub int    str_to_int(string s)            { return __str_to_int(s); }
+pub string int_to_str(int n)               { return __int_to_str(n); }
+pub int    str_find  (string s, string needle) { return __str_find(s, needle); }
+
+// =====================================================================
+// Random — xorshift64* per-thread, seeded from monotonic clock + stack
+// address on first use.  Not cryptographically secure.
+// =====================================================================
+extern "__maka_rt_random_int"   int   __random_int  (int lo, int hi);
+extern "__maka_rt_random_float" float __random_float();
+pub int   random_int  (int lo, int hi) { return __random_int(lo, hi); }
+pub float random_float()               { return __random_float(); }
+
+// =====================================================================
+// Channel non-blocking receive (int).
+// =====================================================================
+extern "__maka_rt_chan_try_recv_int"   int __chan_try_recv_int_raw  (*unit h, &mut int out);
+extern "__maka_rt_chan_try_recv_float" int __chan_try_recv_float_raw(*unit h, &mut float out);
+pub int chan_try_recv_int  (*unit h, &mut int out)   { return __chan_try_recv_int_raw(h, out); }
+pub int chan_try_recv_float(*unit h, &mut float out) { return __chan_try_recv_float_raw(h, out); }
+
+// =====================================================================
+// Process: env_set, args.
+// =====================================================================
+extern "__maka_rt_env_set"     int    __env_set   (string name, string value);
+extern "__maka_rt_args_count"  int    __args_count();
+extern "__maka_rt_arg_at"      string __arg_at    (int i);
+pub int    env_set   (string name, string value) { return __env_set(name, value); }
+pub int    args_count()                          { return __args_count(); }
+pub string arg_at    (int i)                     { return __arg_at(i); }
+
+// =====================================================================
+// TCP convenience: connect by hostname, TCP_NODELAY toggle.
+// =====================================================================
+extern "__maka_rt_tcp_connect_host" int __tcp_connect_host(string host, int port);
+extern "__maka_rt_tcp_set_nodelay"  int __tcp_set_nodelay (int fd, int on);
+pub int tcp_connect    (string host, int port) { return __tcp_connect_host(host, port); }
+pub int tcp_set_nodelay(int fd, bool on) { if (on) { return __tcp_set_nodelay(fd, 1); } else { return __tcp_set_nodelay(fd, 0); } }
+
+// =====================================================================
+// Random bytes (xorshift64*, non-cryptographic).
+// =====================================================================
+extern "__maka_rt_random_bytes" int __random_bytes_raw(*mut unit buf, int len);
+pub int random_bytes(*mut unit buf, int len) { return __random_bytes_raw(buf, len); }
+
+// =====================================================================
+// More string + filesystem helpers.
+// =====================================================================
+extern "__maka_rt_str_substring"   string __str_substring  (string s, int start, int len);
+extern "__maka_rt_file_mtime_ns"   int    __file_mtime_ns  (string path);
+extern "__maka_rt_str_starts_with" int    __str_starts_with(string s, string prefix);
+extern "__maka_rt_str_ends_with"   int    __str_ends_with  (string s, string suffix);
+extern "__maka_rt_str_to_upper"    string __str_to_upper   (string s);
+extern "__maka_rt_str_to_lower"    string __str_to_lower   (string s);
+extern "__maka_rt_str_trim"        string __str_trim       (string s);
+extern "__maka_rt_str_replace"     string __str_replace    (string s, string from, string to);
+pub string str_substring  (string s, int start, int len) { return __str_substring(s, start, len); }
+pub int    file_mtime_ns  (string path)                  { return __file_mtime_ns(path); }
+pub bool   str_starts_with(string s, string prefix)      { return __str_starts_with(s, prefix) != 0; }
+pub bool   str_ends_with  (string s, string suffix)      { return __str_ends_with  (s, suffix) != 0; }
+pub string str_to_upper   (string s)                     { return __str_to_upper(s); }
+pub string str_to_lower   (string s)                     { return __str_to_lower(s); }
+pub string str_trim       (string s)                     { return __str_trim(s); }
+pub string str_replace    (string s, string from, string to) { return __str_replace(s, from, to); }
+
+// =====================================================================
+// Process control + file admin + UDP recvfrom.
+// =====================================================================
+extern "__maka_rt_process_id"    int    __process_id();
+extern "__maka_rt_env_remove"    int    __env_remove(string name);
+extern "__maka_rt_process_run"   int    __process_run(int argc, &string argv);
+extern "__maka_rt_file_copy"     int    __file_copy   (string src, string dst);
+extern "__maka_rt_file_chmod"    int    __file_chmod  (string path, int mode);
+extern "__maka_rt_file_realpath" string __file_realpath(string path);
+extern "__maka_rt_udp_recv_from" int    __udp_recv_from(int fd, *mut unit buf, int cap, &mut int peer_v4, &mut int peer_port);
+pub int    process_id    ()                       { return __process_id(); }
+pub int    env_remove    (string name)            { return __env_remove(name); }
+pub int    process_run   (int argc, &string argv) { return __process_run(argc, argv); }
+pub int    file_copy     (string src, string dst) { return __file_copy(src, dst); }
+pub int    file_chmod    (string path, int mode)  { return __file_chmod(path, mode); }
+pub string file_realpath (string path)            { return __file_realpath(path); }
+pub int    udp_recv_from (int fd, *mut unit buf, int cap, &mut int peer_v4, &mut int peer_port) {
+    return __udp_recv_from(fd, buf, cap, peer_v4, peer_port);
+}

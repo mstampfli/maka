@@ -1,0 +1,48 @@
+// Race-resistant unix-socket round-trip: the connect side spins waiting for
+// the listener.  On Windows that exercises the path → port table retry loop;
+// on POSIX the listener simply binds first (no retry needed there) by virtue
+// of the client yielding via sleep_ms before its first connect attempt.
+import std.{
+    unix_listen, unix_connect, tcp_accept_async,
+    read_async, write_async, close_fd, sleep_ms,
+};
+
+cblock "
+    static maka_unit* __mk_buf(void)     { static unsigned char b[8]; return (maka_unit*)b; }
+    static maka_unit* __mk_msg(void)     { static unsigned char m[4] = {'R','A','C','E'}; return (maka_unit*)m; }
+    static int        __mk_buf_at(int i) { return (int)((unsigned char*)__mk_buf())[i]; }
+    static const char* __mk_path(void)   { return \"/tmp/maka_unix_race_test\"; }
+";
+extern *unit __mk_buf();
+extern *unit __mk_msg();
+extern i32   __mk_buf_at(i32 i);
+extern string __mk_path();
+
+mut int g_listen = 0;
+
+unit client_body() {
+    sleep_ms(30);                                 // let the listener bind first
+    int s = unix_connect(__mk_path());
+    _ = write_async(s, __mk_msg() as *mut unit, 4);
+    int n = read_async(s, __mk_buf() as *mut unit, 4);
+    log(n);                                       // 4
+    log(__mk_buf_at(0 as i32) as int);            // 82 'R'
+    log(__mk_buf_at(3 as i32) as int);            // 69 'E'
+    _ = close_fd(s);
+}
+
+unit server_body() {
+    int cfd = tcp_accept_async(g_listen);
+    int n = read_async(cfd, __mk_buf() as *mut unit, 8);
+    _ = write_async(cfd, __mk_buf() as *mut unit, n);
+    _ = close_fd(cfd);
+}
+
+unit main() {
+    g_listen = unix_listen(__mk_path(), 4);
+    *Thread srv = spawn(unit() { server_body(); });
+    *Thread c   = spawn(unit() { client_body(); });
+    join(srv);
+    join(c);
+    _ = close_fd(g_listen);
+}

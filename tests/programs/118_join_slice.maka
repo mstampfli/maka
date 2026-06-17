@@ -6,10 +6,12 @@ import std.{sleep_ms};
 unit short_sleep(int ms) { sleep_ms(ms); }
 
 unit main() {
+    // Sleep gaps are wide enough (50 ms) to survive Windows' default
+    // 15.6 ms timer granularity without reordering.
     [3]*Thread handles = [
-        spawn(unit() { short_sleep(30); log(1); }),
-        spawn(unit() { short_sleep(10); log(2); }),
-        spawn(unit() { short_sleep(20); log(3); }),
+        spawn(unit() { short_sleep(150); log(1); }),
+        spawn(unit() { short_sleep(50);  log(2); }),
+        spawn(unit() { short_sleep(100); log(3); }),
     ];
     []*Thread s = handles;
     join(s);

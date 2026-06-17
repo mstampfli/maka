@@ -3,8 +3,9 @@
 import std.sleep_ms;
 
 unit main() {
-    *Thread t = spawn(unit() { sleep_ms(20); });
+    // Sleep gaps wide enough to survive Windows' ~15.6 ms timer resolution.
+    *Thread t = spawn(unit() { sleep_ms(50); });
     if (try_join(t)) { log(1); } else { log(0); }     // 0 — not done yet
-    sleep_ms(40);
+    sleep_ms(150);
     if (try_join(t)) { log(1); } else { log(0); }     // 1 — done now
 }

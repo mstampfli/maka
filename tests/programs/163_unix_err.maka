@@ -1,0 +1,14 @@
+// Validates unix_connect error path: connect to a path that has no listener.
+// On Windows that exercises the path → port lookup failure (200 retries then
+// -1); on POSIX it's a direct ENOENT.  Both must report -1 cleanly, not hang.
+import std.unix_connect;
+
+cblock "
+    static const char* __mk_path(void) { return \"/tmp/maka_no_such_listener_xyz\"; }
+";
+extern string __mk_path();
+
+unit main() {
+    int s = unix_connect(__mk_path());
+    log(s);    // -1
+}

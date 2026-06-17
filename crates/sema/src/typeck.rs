@@ -2333,6 +2333,153 @@ impl<'a> TypeChecker<'a> {
                 span: sp,
             };
         }
+        // file_listdir(path) -> []string.  Compiler builtin since the runtime
+        // returns the array + count via an out-pointer and we need to wrap
+        // it into a Slice_str literal at the call site.
+        if name == "file_listdir" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 1 {
+                self.err("file_listdir expects (string path)", sp);
+            } else if !matches!(hargs[0].ty, HType::Str) {
+                self.err(format!("file_listdir: arg must be string, got `{}`", type_str(&hargs[0].ty)), sp);
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 43), args: hargs },
+                ty: HType::Slice { mutable: false, elem: Box::new(HType::Str) },
+                span: sp,
+            };
+        }
+        // str_split(s, sep) -> []string.  Same compiler-builtin trick.
+        if name == "str_split" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 2 {
+                self.err("str_split expects (string s, string sep)", sp);
+            } else if !matches!(hargs[0].ty, HType::Str) || !matches!(hargs[1].ty, HType::Str) {
+                self.err("str_split: both args must be string", sp);
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 44), args: hargs },
+                ty: HType::Slice { mutable: false, elem: Box::new(HType::Str) },
+                span: sp,
+            };
+        }
+        // par_filter_bytes(*mut unit in, int n, int item_sz, &mut int out_n, bool(*unit) pred)
+        // -> *mut unit.  Same shape as par_map_bytes but for filtering.
+        if name == "par_filter_bytes" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 5 {
+                self.err("par_filter_bytes expects (*mut unit in, int n, int item_sz, &mut int out_n, bool(*unit) pred)", sp);
+            } else {
+                let body = &hargs[4];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Bool) && params.len() == 1);
+                if !ok_body {
+                    self.err(format!("par_filter_bytes pred must be `bool(*mut unit)`, got `{}`", type_str(&body.ty)), sp);
+                }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 41), args: hargs },
+                ty: HType::Ptr { mutable: true, inner: Box::new(HType::Unit) },
+                span: sp,
+            };
+        }
+        // par_scan_bytes(*mut unit in, int n, int item_sz, unit(*unit acc, *unit cur, *unit out) combine)
+        // -> *mut unit.  Generic inclusive scan over arbitrary-sized items.
+        if name == "par_scan_bytes" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 4 {
+                self.err("par_scan_bytes expects (*mut unit in, int n, int item_sz, unit(*unit acc, *unit cur, *unit out) combine)", sp);
+            } else {
+                let body = &hargs[3];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Unit) && params.len() == 3);
+                if !ok_body {
+                    self.err(format!("par_scan_bytes combine must be `unit(*mut unit, *mut unit, *mut unit)`, got `{}`", type_str(&body.ty)), sp);
+                }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 42), args: hargs },
+                ty: HType::Ptr { mutable: true, inner: Box::new(HType::Unit) },
+                span: sp,
+            };
+        }
+        // par_filter_float(slice, pred) — bool(float) predicate over []float.
+        if name == "par_filter_float" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 2 {
+                self.err("par_filter_float expects ([]float slice, bool(float) pred)", sp);
+            } else {
+                let is_slice = matches!(&hargs[0].ty,
+                    HType::Slice { elem, .. } if matches!(**elem, HType::Float)) ||
+                    matches!(&hargs[0].ty, HType::Ref { inner, .. } if matches!(inner.as_ref(),
+                        HType::Slice { elem, .. } if matches!(**elem, HType::Float)));
+                let body = &hargs[1];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Bool) && params.len() == 1 && matches!(params[0], HType::Float));
+                if !is_slice { self.err(format!("par_filter_float: first arg must be `[]float`, got `{}`", type_str(&hargs[0].ty)), sp); }
+                if !ok_body { self.err(format!("par_filter_float pred must be `bool(float)`, got `{}`", type_str(&body.ty)), sp); }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 39), args: hargs },
+                ty: HType::Slice { mutable: false, elem: Box::new(HType::Float) },
+                span: sp,
+            };
+        }
+        // par_scan_float(slice, combine) — inclusive prefix scan over []float.
+        if name == "par_scan_float" && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 2 {
+                self.err("par_scan_float expects ([]float slice, float(float, float) combine)", sp);
+            } else {
+                let is_slice = matches!(&hargs[0].ty,
+                    HType::Slice { elem, .. } if matches!(**elem, HType::Float)) ||
+                    matches!(&hargs[0].ty, HType::Ref { inner, .. } if matches!(inner.as_ref(),
+                        HType::Slice { elem, .. } if matches!(**elem, HType::Float)));
+                let body = &hargs[1];
+                let body_inner = match &body.ty {
+                    HType::FnPtr { .. } => Some(&body.ty),
+                    HType::Heap { inner } => Some(inner.as_ref()),
+                    HType::Ptr { inner, .. } => Some(inner.as_ref()),
+                    HType::OwnPtr { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let ok_body = matches!(body_inner,
+                    Some(HType::FnPtr { ret, params })
+                        if matches!(**ret, HType::Float) && params.len() == 2 &&
+                            matches!(params[0], HType::Float) && matches!(params[1], HType::Float));
+                if !is_slice { self.err(format!("par_scan_float: first arg must be `[]float`, got `{}`", type_str(&hargs[0].ty)), sp); }
+                if !ok_body { self.err(format!("par_scan_float combine must be `float(float, float)`, got `{}`", type_str(&body.ty)), sp); }
+            }
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 40), args: hargs },
+                ty: HType::Slice { mutable: false, elem: Box::new(HType::Float) },
+                span: sp,
+            };
+        }
         // par_scan_int(slice, combine) — inclusive prefix scan with associative combine.
         if name == "par_scan_int" && qualifier.is_none() {
             let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();

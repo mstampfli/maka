@@ -1,0 +1,38 @@
+// Validates the Windows pread/pwrite chunking + EOF semantics: writes 4 MB,
+// reads it back, checks the first/last bytes and that the byte count exactly
+// matches.  Exercises the loop in our pread/pwrite shims that previously
+// could truncate large buffers (DWORD cast) or report -1 on EOF.
+import std.{file_open, file_read_async, file_write_async, close_fd};
+
+cblock "
+    #include <string.h>
+    enum { N = 4*1024*1024 };
+    static unsigned char wbuf[N];
+    static unsigned char rbuf[N];
+    static maka_unit* __mk_wbuf(void){ for (int i=0;i<N;i++) wbuf[i]=(unsigned char)(i*73+5); return (maka_unit*)wbuf; }
+    static maka_unit* __mk_rbuf(void){ return (maka_unit*)rbuf; }
+    static int __mk_n(void){ return N; }
+    static int __mk_byte(maka_unit* p, int i){ return (int)((unsigned char*)p)[i]; }
+    static int __mk_match(void){ return memcmp(wbuf, rbuf, N) == 0 ? 1 : 0; }
+";
+extern *unit __mk_wbuf();
+extern *unit __mk_rbuf();
+extern i32   __mk_n();
+extern i32   __mk_byte(*unit p, i32 i);
+extern i32   __mk_match();
+
+unit main() {
+    int n = __mk_n() as int;
+    int wfd = file_open("/tmp/maka_pread_chunk_test", 577, 420);
+    int wr  = file_write_async(wfd, __mk_wbuf() as *mut unit, n, 0);
+    log(wr);                                      // n
+    _ = close_fd(wfd);
+
+    int rfd = file_open("/tmp/maka_pread_chunk_test", 0, 0);
+    int rd  = file_read_async(rfd, __mk_rbuf() as *mut unit, n, 0);
+    log(rd);                                      // n
+    log(__mk_match() as int);                     // 1
+    log(__mk_byte(__mk_rbuf() as *unit, 0 as i32) as int);     // 5
+    log(__mk_byte(__mk_rbuf() as *unit, (n - 1) as i32) as int); // (n-1)*73+5 mod 256
+    _ = close_fd(rfd);
+}
