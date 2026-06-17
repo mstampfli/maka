@@ -1256,7 +1256,7 @@ impl<'a> TypeChecker<'a> {
                 if matches!(n.as_str(),
                     "Mutex" | "RwLock" | "Spinlock" | "Channel" | "AtomicI8" | "AtomicI16"
                     | "AtomicI32" | "AtomicI64" | "AtomicU8" | "AtomicU16" | "AtomicU32"
-                    | "AtomicU64" | "AtomicBool" | "AtomicPtr" | "ThreadHandle"
+                    | "AtomicU64" | "AtomicBool" | "AtomicPtr" | "Thread"
                     | "Atomic" | "WaitGroup" | "Once" | "IntChan" | "FloatChan" | "ByteChan"
                     | "TlsConn") {
                     return true;
@@ -2049,8 +2049,9 @@ impl<'a> TypeChecker<'a> {
         //
         // These are the operations Maka can't express in pure Maka — atomic
         // memory ops, thread blocking/waking, memory fences, syscalls.  The
-        // stdlib's `Atomic<T>`, `Mutex<T>`, `WaitGroup`, `Chan<T>`, `Once`,
-        // and friends are written in pure Maka source on top of these.
+        // stdlib's `Atomic`, `Mutex`, `RwLock`, `WaitGroup`, `Once`, the
+        // `*Chan` family, and friends are written in pure Maka source on
+        // top of these.
         //
         // The CAS primitive alone is enough to derive `atomic_load` / `store`
         // / `fetch_add` / `fetch_sub` / `fetch_and` / `fetch_or` / `fetch_xor`

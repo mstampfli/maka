@@ -503,7 +503,7 @@ compile error** (`poisoned`).
 
 Inside `unsafe`, `raw *T` still has to be narrowed (forced-handling — §6.3)
 before deref.  `unsafe` does not turn off the lifetime pass; it just unlocks
-those four operations.
+those five operations.
 
 ### 6.6 Pointer-kind conversions and the `&(p!)` pattern
 
@@ -608,6 +608,8 @@ analogous to the `transfer` / `share` rule for `gate` (§7.1):
   by-value moves ownership into the thread (transfer semantics).
 - **By-value capture of a Shareable type** (per the Shareable bound in §7.1)
   is allowed — the value is copied into the thread's env (share semantics).
+- **Bare `unit` capture** is allowed — `unit` has no runtime representation,
+  so there's nothing to share or transfer.
 - **Borrow capture** (`[&x]` / `[&mut x]`) is **rejected** — the borrow's
   lifetime is tied to the caller's scope, but the thread can outlive that
   scope, so the borrow would dangle or race.
@@ -643,17 +645,18 @@ either wrap each spawn body's return in a common `enum` and pass a
 homogeneous slice, or spawn each handle separately and await each into
 its own typed variable.  No `JoinN<T1, T2, ...>` heterogeneous structs.
 
-These ship as part of the real runtime; not yet wired in this MVP.
+All of the above are wired into the runtime as compiler builtins; see
+`CONCURRENCY.md` for usage examples and the implementation status table.
 
 `Thread` is a built-in opaque type (recognized by name; backed by `pthread_t`
 in the generated C). It is Shareable.
 
 ### 7.3 Sync primitives (typed handles)
 
-`Mutex`, `RwLock`, `WaitGroup`, `Once`, `Atomic`, the `Chan` family, and
-`TlsConn` are exposed as typed opaque handles in the stdlib — a `data`
-declaration wrapping a single `*unit` field that holds the raw runtime
-pointer:
+`Mutex`, `RwLock`, `WaitGroup`, `Once`, `Atomic`, `AtomicBool`, `AtomicPtr`,
+the `Chan` family (`IntChan` / `FloatChan` / `ByteChan`), and `TlsConn` are
+exposed as typed opaque handles in the stdlib — a `data` declaration
+wrapping a single `*unit` field that holds the raw runtime pointer:
 
 ```maka
 pub data Mutex { *unit h; }
@@ -669,9 +672,11 @@ pub unit  mutex_destroy(Mutex m)   { __fmutex_destroy(m.h); }
 ```
 
 The wrapper is named-Shareable (the type checker's Shareable allowlist
-matches `Mutex`, `Atomic`, `WaitGroup`, `Once`, `IntChan`, `FloatChan`,
-`ByteChan`, `RwLock`, `TlsConn` by name).  User code captures the typed
-handle into spawn closures by value; the raw `*unit` it holds never
+matches `Mutex`, `RwLock`, `Spinlock`, `Channel`, `Atomic`, `AtomicBool`,
+`AtomicPtr`, the sized `AtomicI{8,16,32,64}` / `AtomicU{8,16,32,64}`
+variants, `WaitGroup`, `Once`, `IntChan`, `FloatChan`, `ByteChan`,
+`TlsConn`, and `Thread` by name).  User code captures the typed handle
+into spawn closures by value; the raw `*unit` it holds never
 escapes the stdlib.  This replaces the original FFI-style `*unit`-only
 sync surface, which is no longer part of the public stdlib API.
 
@@ -682,10 +687,12 @@ kernel waits/wakes, syscalls — are exposed as **compiler builtins**.  These
 are recognized by name, dispatch to the right C intrinsic in codegen, and
 are the lowest layer the rest of the concurrency story is built on.
 
-Everything else in the concurrency stack — `Atomic<T>`, `Mutex<T>`,
-`Semaphore<T>`, `RWLock<T>`, `WaitGroup`, `Once`, `Chan<T>`, condition
-variables, etc. — is **pure Maka source** built on top of these builtins.
-The stdlib reads like Maka, not like FFI.
+Everything else in the concurrency stack — `Atomic`, `AtomicBool`,
+`AtomicPtr`, `Mutex`, `RwLock`, `WaitGroup`, `Once`, the `*Chan` family
+(`IntChan` / `FloatChan` / `ByteChan`), etc. — is **pure Maka source**
+built on top of these builtins.  The stdlib reads like Maka, not like
+FFI.  These are non-generic typed handles wrapping a single `*unit`
+field — see §7.3.
 
 | builtin | signature | C lowering |
 |---|---|---|
@@ -698,10 +705,10 @@ The stdlib reads like Maka, not like FFI.
 | `atomic_fetch_or`  | `<T: int>` ditto | `__atomic_fetch_or` |
 | `atomic_fetch_xor` | `<T: int>` ditto | `__atomic_fetch_xor` |
 | `atomic_fence` | `atomic_fence(int order)` | `__atomic_thread_fence(order_map(order))` where order: 1=acquire, 2=release, 3=acq_rel, 4=seq_cst |
-| `futex_wait` | `futex_wait(&int addr, int expected) -> int` | Linux: `syscall(SYS_futex, addr, FUTEX_WAIT, expected, ...)`. Windows: `WaitOnAddress`. Darwin: spin-yield fallback. |
-| `futex_wake` | `futex_wake(&int addr, int n) -> int` | Linux: `syscall(SYS_futex, addr, FUTEX_WAKE, n, ...)`. Windows: `WakeByAddress{Single,All}`. Darwin: no-op. |
+| `futex_wait` | `futex_wait(&const int addr, int expected) -> int` | Linux: `syscall(SYS_futex, addr, FUTEX_WAIT, expected, ...)`. Windows: `WaitOnAddress`. Darwin: spin-yield fallback. |
+| `futex_wake` | `futex_wake(&const int addr, int n) -> int` | Linux: `syscall(SYS_futex, addr, FUTEX_WAKE, n, ...)`. Windows: `WakeByAddress{Single,All}`. Darwin: no-op. |
 | `thread_yield` | `thread_yield()` | POSIX: `sched_yield()`. Win: `SwitchToThread`. |
-| `syscall` | `syscall(int n, int a1..a6) -> int` | POSIX: `syscall(n, a1..a6)`. Win: returns -1 with `ENOSYS`. |
+| `syscall` | `syscall(int n, int a1..a6) -> int` | POSIX: `syscall(n, a1..a6)`. Win: returns -1 (errno is left untouched — the Win32 prologue `#define`s it to a function-call macro, not an lvalue). |
 
 All thirteen are recognized by their bare names with no qualifier (same
 recognition pattern as `log` / `panic` / `spawn` / `join`).  All accept
@@ -719,8 +726,8 @@ locations.
 
 **No more direct `extern` atomic / pthread helpers in user code.**  The
 previous shape (`extern int maka_atomic_load_i64(&int p);` etc.) is
-deprecated and goes away when the stdlib's `Atomic<T>` / `Mutex<T>` types
-land — those will be pure Maka over these builtins.
+gone — the stdlib now exposes typed handles (`Atomic`, `Mutex`, `RwLock`,
+…) as pure Maka wrappers over these builtins.  See §7.3.
 
 **Future perf primitives** (not implemented; added when measurements show
 they matter): `atomic_load_relaxed` / `acquire`, `atomic_store_relaxed` /
@@ -789,6 +796,12 @@ caller.
 Lambdas without captures are lifted to top-level functions at AST level. With
 captures, they are compiled to a synthesized env struct + a lifted function;
 the closure value is a fat pointer `Callable_<KEY> { code, env }`.
+
+Lambdas inherit the **lexical `unsafe { }` scope** of their call site: a
+lambda body written inside `unsafe { }` may use the operations §6.5 unlocks
+(e.g. mention `*unit`).  The lambda-lift threads the `unsafe` state through
+to the synthetic top-level function so the type checker sees the same
+unsafe context the lambda was lexically written in.
 
 ---
 
