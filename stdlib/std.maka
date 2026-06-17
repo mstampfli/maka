@@ -1,9 +1,9 @@
 // Maka standard library.
 //
 // Imported on demand: `import std.{Option, Result, str_len, str_eq};`
-// (or any subset).  Genuine compiler builtins (log, panic, free, spawn,
-// join, read_line, read_int, `+` on strings, `.len` on slices) live in
-// the codegen crate and are not declared here; they're always in scope.
+// (or any subset).  Genuine compiler builtins (log, panic, spawn, join,
+// read_line, read_int, `+` on strings, `.len` on slices) live in the
+// codegen crate and are not declared here; they're always in scope.
 //
 // One exception: `Option<T>` is also looked up by the `for x in
 // user_iterator` desugaring even when not explicitly imported, since

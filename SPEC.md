@@ -55,7 +55,7 @@ Built-in type names that are also reserved: `int` `float` `bool` `char` `unit`
 `string` `i8 i16 i32 i64 u8 u16 u32 u64 isize usize` `f32 f64` `Thread`.
 
 Built-in function names (callable like normal functions, recognized by typeck):
-`log` `free` `panic` `spawn` `join`.
+`log` `panic` `spawn` `join`.
 
 ### 1.5 Operators
 
@@ -145,9 +145,12 @@ type is **context-typed** by the destination slot:
 `alloc` is no longer a type modifier - writing `alloc T` in a type position is
 a compile error directing the user at `own *T` or `own &T`.
 
-`free(p)` is the built-in deallocator for `*T`. Calling `free` on an `own *T` or
-`own &T` is unnecessary (compiler frees automatically) but not currently
-rejected.
+There is **no `free()` builtin**.  Maka-managed allocations auto-free at scope
+exit (`own *T` and `own &T`); to release one early, assign `null` to its owner.
+For C-allocated buffers, declare an FFI shim explicitly
+(`extern "free" unit __libc_free(*T p);`) or call `free()` from inside a
+`cblock` so the deallocation goes through C, not through a builtin pointer-kind
+check.
 
 ### 2.4 Aggregate types
 
@@ -426,8 +429,14 @@ compiler will not insert a panic on null.
 
 ### 6.4 Dangling-pointer collapse + warning
 
-If a `*T` aliases a local and that local goes out of scope, the compiler
-auto-NULLs the `*T` at scope exit (it would otherwise dangle). When a
+A `*T` cannot dangle from explicit deallocation: with `free()` removed as a
+Maka builtin, the only way to deallocate Maka-managed memory is the owner's
+auto-free at scope exit (or assigning `null` to an `own *T`), and any `*T`
+aliasing the same allocation is reachable only inside that owner's scope.
+
+There remains one dangling case to handle: when a `*T` aliases a *local* and
+that local goes out of scope (without being the heap owner itself).  The
+compiler auto-NULLs the `*T` at scope exit (it would otherwise dangle).  When a
 subsequent read of `*T` observes that NULL without an explicit re-assignment on
 every code path, a flow-sensitive warning fires:
 

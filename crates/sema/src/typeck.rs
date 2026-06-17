@@ -1777,35 +1777,26 @@ impl<'a> TypeChecker<'a> {
         // (`own *T`, `own &T`) are auto-freed at scope exit; calling free() on them
         // would double-free.
         if name == "free" && qualifier.is_none() {
-            let mut hargs = Vec::new();
-            for a in args { hargs.push(self.check_expr(a, None)); }
-            if let Some(a) = hargs.first() {
-                match &a.ty {
-                    HType::Ptr { .. } => {}
-                    HType::OwnPtr { .. } => {
-                        self.err(
-                            "free() on `own *T` would double-free — the compiler auto-frees it at scope exit. \
-                             Either let it drop, or assign `null` to release ownership early.",
-                            sp,
-                        );
-                    }
-                    HType::Heap { .. } => {
-                        self.err(
-                            "free() on `own &T` would double-free — it is auto-freed at scope exit. \
-                             Move or return it instead of calling free().",
-                            sp,
-                        );
-                    }
-                    _ => {
-                        self.err("free() expects a pointer (`*T` or `*const T`)", sp);
-                    }
-                }
-            }
-            return HExpr {
-                kind: HExprKind::Call { callee: FuncId(u32::MAX - 1), args: hargs },
-                ty: HType::Unit,
-                span: sp,
-            };
+            // free() was removed as a Maka-surface builtin: a *T is non-owning,
+            // so handing it a deallocator was a foot-gun — `free(downgrade)`
+            // could deallocate memory the `own *T` still believes it owns,
+            // double-freeing on scope exit (plus dangling any other alias).
+            // Maka-managed memory: let auto-free at scope exit do the job, or
+            // assign `null` to an `own *T` to release ownership early.  For
+            // C-allocated buffers, declare an `extern "free"` shim explicitly
+            // (or inline the free in a `cblock`) so the call goes through FFI
+            // rather than a builtin pointer-kind check.
+            self.err(
+                "`free` is not a Maka builtin.  Maka-managed allocations auto-free at scope exit \
+                 (`own *T` / `own &T`); to release one early assign `null` to its owner.  To free \
+                 a C-allocated buffer, declare `extern \"free\" unit __libc_free(*T p);` or call \
+                 `free()` inside a `cblock`.",
+                sp,
+            );
+            // Compilation halts at the end of sema; this placeholder never
+            // reaches codegen.  Emit LitUnit so it survives further sema
+            // passes without tripping on the call's argument shape.
+            return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
         }
         // Built-in `spawn(closure)` / `thread(closure)` / `job(closure)` — three
         // concurrency tiers (fiber / OS-thread / work-item respectively).  All

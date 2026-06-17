@@ -1,8 +1,9 @@
 // Stage 2D: `Vec<T>` (for primitive T) mirrors as `__MakaVec_<T>` — a
 // `(ptr, len, cap)` C-ABI struct.  The shim copies elements into a
-// `libc::malloc`'d buffer so Maka can free the bytes with `free(v.ptr)`
-// after use.  Maka users can pass the struct back to a Rust function
-// to inspect or transform; element-by-element access from pure Maka
+// `libc::malloc`'d buffer; Maka users typically pass the struct back
+// to a Rust helper that owns the drop, or define an FFI shim
+// (`extern "free" unit ...`) for explicit teardown — `free` is not a
+// Maka surface builtin.  Element-by-element access from pure Maka
 // uses raw pointer arithmetic under `unsafe`.
 rblock "
     pub fn make_squares(n: i64) -> Vec<i64> {

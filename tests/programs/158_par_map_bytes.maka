@@ -17,12 +17,14 @@ cblock "
         int64_t* p = (int64_t*)in_item;
         *(int64_t*)out_item = p[0] + p[1];
     }
+    static void __mk_free_buf(maka_unit* p) { free(p); }
 ";
 extern *unit __mk_input();
 extern i32   __mk_pair_size();
 extern i32   __mk_int_size();
 extern int   __mk_out_at(*unit p, i32 i);
 extern unit  __mk_pair_sum(*mut unit in_item, *mut unit out_item);
+extern unit  __mk_free_buf(*mut unit p);
 
 unit main() {
     *mut unit input  = __mk_input() as *mut unit;
@@ -36,5 +38,5 @@ unit main() {
     log(__mk_out_at(out as *unit, 1 as i32));   // 7
     log(__mk_out_at(out as *unit, 2 as i32));   // 11
     log(__mk_out_at(out as *unit, 3 as i32));   // 15
-    free(out);
+    __mk_free_buf(out);  // C-allocated buffer: free via FFI shim, not Maka builtin
 }

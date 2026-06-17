@@ -2,7 +2,6 @@
 unit consume(*int p) { log(p!); }
 
 unit main() {
-    *int p = alloc 5;
+    own *int p = alloc 5;
     consume(share p);   // *T (mutable ptr) is NOT Shareable
-    free(p);
 }
