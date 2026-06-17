@@ -7,7 +7,7 @@
 // Integration test for spawn + accept + read/write + WaitGroup +
 // Atomic + detach + cooperative scheduler under TCP load.
 
-import std.{
+import std.{ Atomic, Mutex, WaitGroup, Once, 
     tcp_listen, tcp_accept_async, tcp_connect_v4, close_fd,
     read_async, write_async,
     atomic_new, atomic_get, atomic_add, atomic_destroy,
@@ -52,7 +52,7 @@ extern *unit __mk_request (*mut i32 out_len);
 mut int g_listen_fd = 0;
 mut int g_port      = 0;
 
-unit serve_one(int cfd, *unit ok_count, *unit wg) {
+unit serve_one(int cfd, Atomic ok_count, WaitGroup wg) {
     *unit buf = __mk_alloc_buf();
     // Read until "\r\n\r\n" or buffer fills.
     mut int total = 0;
@@ -74,7 +74,7 @@ unit serve_one(int cfd, *unit ok_count, *unit wg) {
     wg_done(wg);
 }
 
-unit server_body(int n_conns, *unit ok_count, *unit wg) {
+unit server_body(int n_conns, Atomic ok_count, WaitGroup wg) {
     for (int i in 0..n_conns) {
         int cfd = tcp_accept_async(g_listen_fd);
         *Thread t = spawn(unit() [cfd, ok_count, wg] { serve_one(cfd, ok_count, wg); });
@@ -82,7 +82,7 @@ unit server_body(int n_conns, *unit ok_count, *unit wg) {
     }
 }
 
-unit client_one(*unit ok_count, *unit wg) {
+unit client_one(Atomic ok_count, WaitGroup wg) {
     int s = tcp_connect_v4(127, 0, 0, 1, g_port);
     if (s >= 0) {
         mut i32 qlen = 0;
@@ -104,10 +104,10 @@ unit main() {
     g_port = 39811;
     g_listen_fd = tcp_listen(g_port, 256);
 
-    *unit srv_ok = atomic_new(0);
-    *unit cli_ok = atomic_new(0);
-    *unit srv_wg = wg_new();
-    *unit cli_wg = wg_new();
+    Atomic    srv_ok = atomic_new(0);
+    Atomic    cli_ok = atomic_new(0);
+    WaitGroup srv_wg = wg_new();
+    WaitGroup cli_wg = wg_new();
 
     wg_add(srv_wg, N);
     *Thread srv = spawn(unit() [N, srv_ok, srv_wg] {

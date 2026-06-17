@@ -6,15 +6,15 @@
 // Verifies the global pool queue + worker drain loop + per-worker
 // scheduler initialization.
 
-import std.{
+import std.{ Atomic, Mutex, WaitGroup, Once, 
     atomic_new, atomic_get, atomic_add, atomic_destroy,
     wg_new, wg_add, wg_done, wg_wait, wg_destroy,
     sleep_us,
 };
 
 unit main() {
-    *unit a  = atomic_new(0);
-    *unit wg = wg_new();
+    Atomic    a = atomic_new(0);
+    WaitGroup wg = wg_new();
     int N = 200;
     wg_add(wg, N);
     for (int i in 0..N) {

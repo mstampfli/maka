@@ -5,7 +5,7 @@
 // Exercises: per-fd waiter list, fiber scheduler under load, atomic
 // counter coordination, WaitGroup, multi-fiber wait_fd, accept_async.
 
-import std.{
+import std.{ Atomic, Mutex, WaitGroup, Once, 
     tcp_listen, tcp_accept_async, tcp_connect_v4, close_fd,
     read_async, write_async,
     atomic_new, atomic_get, atomic_add, atomic_destroy,
@@ -25,7 +25,7 @@ extern unit  __mk_free_buf(*unit buf);
 
 mut int g_port = 0;
 
-unit serve_one(int cfd, *unit ok_count, *unit wg) {
+unit serve_one(int cfd, Atomic ok_count, WaitGroup wg) {
     *unit buf = __mk_alloc_buf();
     int n = read_async(cfd, buf, 4);
     if (n == 4) {
@@ -37,7 +37,7 @@ unit serve_one(int cfd, *unit ok_count, *unit wg) {
     wg_done(wg);
 }
 
-unit server_body(int listen_fd, int n_conns, *unit ok_count, *unit wg) {
+unit server_body(int listen_fd, int n_conns, Atomic ok_count, WaitGroup wg) {
     for (int i in 0..n_conns) {
         int cfd = tcp_accept_async(listen_fd);
         *Thread t = spawn(unit() [cfd, ok_count, wg] { serve_one(cfd, ok_count, wg); });
@@ -45,7 +45,7 @@ unit server_body(int listen_fd, int n_conns, *unit ok_count, *unit wg) {
     }
 }
 
-unit client_one(int port, *unit ok_count, *unit wg) {
+unit client_one(int port, Atomic ok_count, WaitGroup wg) {
     int s = tcp_connect_v4(127, 0, 0, 1, port);
     if (s >= 0) {
         _ = write_async(s, __mk_msg() as *mut unit, 4);
@@ -65,10 +65,10 @@ unit main() {
     g_port = 39119;
     int listen_fd = tcp_listen(g_port, 256);
 
-    *unit srv_ok = atomic_new(0);
-    *unit cli_ok = atomic_new(0);
-    *unit srv_wg = wg_new();
-    *unit cli_wg = wg_new();
+    Atomic    srv_ok = atomic_new(0);
+    Atomic    cli_ok = atomic_new(0);
+    WaitGroup srv_wg = wg_new();
+    WaitGroup cli_wg = wg_new();
 
     wg_add(srv_wg, N);
     *Thread server = spawn(unit() [listen_fd, N, srv_ok, srv_wg] {

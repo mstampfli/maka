@@ -3,6 +3,7 @@
 // increment a non-atomic counter, run once_do, and signal the wait group.
 
 import std.{
+    Atomic, Mutex, WaitGroup, Once,
     atomic_new, atomic_get, atomic_add, atomic_destroy,
     mutex_new, mutex_lock, mutex_unlock, mutex_destroy,
     wg_new, wg_add, wg_done, wg_wait, wg_destroy,
@@ -13,10 +14,10 @@ mut int once_runs = 0;
 mut int locked_counter = 0;
 
 unit main() {
-    *unit a  = atomic_new(0);
-    *unit mu = mutex_new();
-    *unit wg = wg_new();
-    *unit o  = once_new();
+    Atomic    a  = atomic_new(0);
+    Mutex     mu = mutex_new();
+    WaitGroup wg = wg_new();
+    Once      o  = once_new();
 
     int N = 16;
     wg_add(wg, N);

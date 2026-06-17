@@ -1227,7 +1227,8 @@ impl<'a> TypeChecker<'a> {
                 if matches!(n.as_str(),
                     "Mutex" | "RwLock" | "Spinlock" | "Channel" | "AtomicI8" | "AtomicI16"
                     | "AtomicI32" | "AtomicI64" | "AtomicU8" | "AtomicU16" | "AtomicU32"
-                    | "AtomicU64" | "AtomicBool" | "AtomicPtr" | "ThreadHandle") {
+                    | "AtomicU64" | "AtomicBool" | "AtomicPtr" | "ThreadHandle"
+                    | "Atomic" | "WaitGroup" | "Once" | "IntChan" | "FloatChan") {
                     return true;
                 }
                 // Auto-derive: all fields must be Shareable.
@@ -2367,9 +2368,28 @@ impl<'a> TypeChecker<'a> {
         // (the runtime entry takes raw void pointers, avoiding a C type mismatch
         // with the synthesized Callable_unit_ struct).
         if name == "once_do" && qualifier.is_none() {
-            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            let mut hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            // Accept either the legacy `*unit` handle or the typed `Once`
+            // struct from the stdlib; for the latter, auto-extract `.h`.
+            if let Some(first) = hargs.first_mut() {
+                if let HType::Struct(id) = &first.ty {
+                    let info = self.sym.struct_info(*id);
+                    if info.name == "Once" {
+                        let span = first.span;
+                        let field_idx = info.fields.iter().position(|f| f.name == "h").unwrap_or(0);
+                        let field_ty = info.fields.get(field_idx).map(|f| f.ty.clone())
+                            .unwrap_or(HType::Ptr { mutable: true, inner: Box::new(HType::Unit) });
+                        let base = first.clone();
+                        *first = HExpr {
+                            kind: HExprKind::Field { base: Box::new(base), field: field_idx },
+                            ty: field_ty,
+                            span,
+                        };
+                    }
+                }
+            }
             if hargs.len() != 2 {
-                self.err("once_do expects (`*unit o`, `unit() init`)", sp);
+                self.err("once_do expects (`Once o` or `*unit o`, `unit() init`)", sp);
             } else {
                 let body = &hargs[1];
                 let body_inner = match &body.ty {

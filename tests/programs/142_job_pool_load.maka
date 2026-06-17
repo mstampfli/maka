@@ -2,11 +2,11 @@
 // each does an atomic increment.  Verifies the Chase-Lev work-stealing
 // deques distribute load across all worker threads.
 
-import std.{atomic_new, atomic_get, atomic_add, atomic_destroy};
+import std.{ Atomic, Mutex, WaitGroup, Once, atomic_new, atomic_get, atomic_add, atomic_destroy};
 
 mut int g_counter = 0;
 unit main() {
-    *unit a = atomic_new(0);
+    Atomic    a = atomic_new(0);
     int N = 100000;
     par_for_range(0, N, unit(int i) [a] {
         _ = atomic_add(a, 1);

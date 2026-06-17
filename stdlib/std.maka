@@ -246,43 +246,62 @@ pub int  write_async    (int fd, *mut unit buf, int len)   { return __write_asyn
 // Outside a fiber they fall back to pthread-style blocking, so the same
 // calls work from any tier.
 
+// === Concurrency primitives — typed handle wrappers ===
+// The C runtime allocates these as opaque pthread-/atomic-backed state
+// and returns `void*`; we wrap each in a tiny Maka struct so the type
+// system distinguishes Atomic / Mutex / WaitGroup / Once at the user
+// surface even though the internal handle is `*unit`.
+
+// === Mutex<T>-style fiber-aware mutex ===
+pub data Mutex { *unit h; }
 extern "maka_fmutex_new"     *unit __fmutex_new();
-extern "maka_fmutex_lock"    unit  __fmutex_lock(*unit m);
-extern "maka_fmutex_unlock"  unit  __fmutex_unlock(*unit m);
-extern "maka_fmutex_destroy" unit  __fmutex_destroy(*unit m);
+extern "maka_fmutex_lock"    unit                    __fmutex_lock(*unit m);
+extern "maka_fmutex_unlock"  unit                    __fmutex_unlock(*unit m);
+extern "maka_fmutex_destroy" unit                    __fmutex_destroy(*unit m);
 
-pub *unit mutex_new()                      { return __fmutex_new(); }
-pub unit  mutex_lock   (*unit m)           { __fmutex_lock(m); }
-pub unit  mutex_unlock (*unit m)           { __fmutex_unlock(m); }
-pub unit  mutex_destroy(*unit m)           { __fmutex_destroy(m); }
+pub Mutex mutex_new()                  { Mutex m = { h = __fmutex_new() }; return m; }
+pub unit  mutex_lock   (Mutex m)       { __fmutex_lock(m.h); }
+pub unit  mutex_unlock (Mutex m)       { __fmutex_unlock(m.h); }
+pub unit  mutex_destroy(Mutex m)       { __fmutex_destroy(m.h); }
 
+// === WaitGroup ===
+pub data WaitGroup { *unit h; }
 extern "maka_wg_new"     *unit __wg_new();
-extern "maka_wg_add"     unit  __wg_add(*unit w, int n);
-extern "maka_wg_done"    unit  __wg_done(*unit w);
-extern "maka_wg_wait"    unit  __wg_wait(*unit w);
-extern "maka_wg_destroy" unit  __wg_destroy(*unit w);
+extern "maka_wg_add"     unit                 __wg_add(*unit w, int n);
+extern "maka_wg_done"    unit                 __wg_done(*unit w);
+extern "maka_wg_wait"    unit                 __wg_wait(*unit w);
+extern "maka_wg_destroy" unit                 __wg_destroy(*unit w);
 
-pub *unit wg_new()                          { return __wg_new(); }
-pub unit  wg_add    (*unit w, int n)        { __wg_add(w, n); }
-pub unit  wg_done   (*unit w)               { __wg_done(w); }
-pub unit  wg_wait   (*unit w)               { __wg_wait(w); }
-pub unit  wg_destroy(*unit w)               { __wg_destroy(w); }
+pub WaitGroup wg_new()                          { WaitGroup w = { h = __wg_new() }; return w; }
+pub unit      wg_add    (WaitGroup w, int n)    { __wg_add(w.h, n); }
+pub unit      wg_done   (WaitGroup w)           { __wg_done(w.h); }
+pub unit      wg_wait   (WaitGroup w)           { __wg_wait(w.h); }
+pub unit      wg_destroy(WaitGroup w)           { __wg_destroy(w.h); }
 
+// === Once ===
+pub data Once { *unit h; }
 extern "maka_once_new"     *unit __once_new();
-extern "maka_once_destroy" unit  __once_destroy(*unit o);
+extern "maka_once_destroy" unit                   __once_destroy(*unit o);
 
-pub *unit once_new()                            { return __once_new(); }
-pub unit  once_destroy(*unit o)                 { __once_destroy(o); }
-// `once_do(o, init)` is a compiler builtin — it splits the `unit()` Callable
-// into code+env at the call site so the runtime entry can take two plain
-// pointers (avoids a C type-mismatch with the synthesized Callable_unit_).
+pub Once once_new()                              { Once o = { h = __once_new() }; return o; }
+pub unit once_destroy(Once o)                    { __once_destroy(o.h); }
+// `once_do(o, init)` is a compiler builtin — see typeck dispatch.
 
+// === Atomic<int> ===
+pub data Atomic { *unit h; }
 extern "maka_atomic_i64_new"     *unit __atomic_new(int v);
-extern "maka_atomic_i64_load"    int   __atomic_load(*unit a);
-extern "maka_atomic_i64_store"   unit  __atomic_store(*unit a, int v);
-extern "maka_atomic_i64_add"     int   __atomic_add(*unit a, int delta);
-extern "maka_atomic_i64_cas"     int   __atomic_cas(*unit a, int expected, int desired);
-extern "maka_atomic_i64_destroy" unit  __atomic_destroy(*unit a);
+extern "maka_atomic_i64_load"    int                      __atomic_load(*unit a);
+extern "maka_atomic_i64_store"   unit                     __atomic_store(*unit a, int v);
+extern "maka_atomic_i64_add"     int                      __atomic_add(*unit a, int delta);
+extern "maka_atomic_i64_cas"     int                      __atomic_cas_raw(*unit a, int expected, int desired);
+extern "maka_atomic_i64_destroy" unit                     __atomic_destroy(*unit a);
+
+pub Atomic atomic_new(int v)                            { Atomic a = { h = __atomic_new(v) }; return a; }
+pub int    atomic_get(Atomic a)                          { return __atomic_load(a.h); }
+pub unit   atomic_set(Atomic a, int v)                   { __atomic_store(a.h, v); }
+pub int    atomic_add(Atomic a, int delta)               { return __atomic_add(a.h, delta); }
+pub int    atomic_compare_swap(Atomic a, int e, int d)   { return __atomic_cas_raw(a.h, e, d); }
+pub unit   atomic_destroy(Atomic a)                      { __atomic_destroy(a.h); }
 
 // Byte-channel: variable-size items, set per channel via item_size.  Use
 // these to build typed channels in user code — wrap the *unit handle in a
@@ -343,14 +362,8 @@ pub unit      chan_float_destroy(FloatChan c)        { __chan_bytes_destroy(c.h)
 // All three (par_map_bytes, par_map_int, par_map_float) live in the
 // codegen prologue; this stdlib file does not need to redeclare them.
 
-pub *unit atomic_new   (int v)                              { return __atomic_new(v); }
-// `atomic_get` / `atomic_set` instead of load/store to avoid clashing with
-// the C11 <stdatomic.h> macros of those names.
-pub int   atomic_get   (*unit a)                            { return __atomic_load(a); }
-pub unit  atomic_set   (*unit a, int v)                     { __atomic_store(a, v); }
-pub int   atomic_add   (*unit a, int delta)                 { return __atomic_add(a, delta); }
-pub bool  atomic_cas   (*unit a, int expected, int desired) { return __atomic_cas(a, expected, desired) != 0; }
-pub unit  atomic_destroy(*unit a)                           { __atomic_destroy(a); }
+// (Old *unit-based atomic_* wrappers have been replaced by the typed
+// Atomic struct + free-function API earlier in this file.)
 
 // par_for_range and par_reduce_int are compiler builtins (like `spawn`):
 //   par_for_range(start, end, body)
