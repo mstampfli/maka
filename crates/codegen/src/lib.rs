@@ -575,6 +575,9 @@ impl<'a> Cx<'a> {
         self.w("    return syscall(n, a1, a2, a3, a4, a5, a6);\n");
         self.w("}\n");
         self.w("#elif defined(_WIN32)\n");
+        // WaitOnAddress + WakeByAddress live in Synchronization.lib (mingw
+        // also auto-links via this comment).
+        self.w("#pragma comment(lib, \"Synchronization.lib\")\n");
         self.w("static int __maka_futex_wait(const int* addr, int expected) {\n");
         self.w("    int local = expected;\n");
         self.w("    return WaitOnAddress((volatile void*)addr, &local, sizeof(int), INFINITE) ? 0 : -1;\n");
@@ -585,10 +588,12 @@ impl<'a> Cx<'a> {
         self.w("}\n");
         self.w("static void __maka_thread_yield(void) { SwitchToThread(); }\n");
         self.w("static long __maka_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6) {\n");
-        // Windows has no unified syscall surface; this is a stub that just
-        // returns -1 with errno set to ENOSYS.  Users targeting Windows
-        // should reach for the typed Win32 APIs directly, not raw syscalls.
-        self.w("    (void)n;(void)a1;(void)a2;(void)a3;(void)a4;(void)a5;(void)a6; errno = ENOSYS; return -1;\n");
+        // Windows has no unified syscall surface; this is a stub.  Returns
+        // -1; we don't touch errno because the Win32 codegen earlier in this
+        // prologue #defines errno to a function-call macro (not an lvalue).
+        // Users targeting Windows should reach for the typed Win32 APIs
+        // directly, not raw syscalls.
+        self.w("    (void)n;(void)a1;(void)a2;(void)a3;(void)a4;(void)a5;(void)a6; return -1;\n");
         self.w("}\n");
         self.w("#else\n");
         // Darwin/BSD — fall back to a spin-yield emulation for futex (no

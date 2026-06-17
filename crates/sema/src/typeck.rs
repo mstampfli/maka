@@ -131,14 +131,6 @@ impl<'a> TypeChecker<'a> {
             if matches!(ty, HType::OwnPtr { .. } | HType::Heap { .. }) {
                 continue;
             }
-            // (a') stdlib opaque-handle convention: `*unit` is the universal
-            // handle for atomics, waitgroups, mutexes, channels, etc. — all
-            // of which are thread-safe by design.  Until the stdlib evolves
-            // to return precisely-typed handles (Atomic<T>, WaitGroup, etc.),
-            // treat `*unit` as a cross-thread-safe handle at spawn boundaries.
-            if matches!(ty, HType::Ptr { inner, .. } if matches!(**inner, HType::Unit)) {
-                continue;
-            }
             // Borrows are the most common foot-gun; specific diagnostic.
             if matches!(ty, HType::Ref { .. }) {
                 self.err(
@@ -1228,7 +1220,8 @@ impl<'a> TypeChecker<'a> {
                     "Mutex" | "RwLock" | "Spinlock" | "Channel" | "AtomicI8" | "AtomicI16"
                     | "AtomicI32" | "AtomicI64" | "AtomicU8" | "AtomicU16" | "AtomicU32"
                     | "AtomicU64" | "AtomicBool" | "AtomicPtr" | "ThreadHandle"
-                    | "Atomic" | "WaitGroup" | "Once" | "IntChan" | "FloatChan") {
+                    | "Atomic" | "WaitGroup" | "Once" | "IntChan" | "FloatChan" | "ByteChan"
+                    | "RwLock" | "TlsConn" | "AtomicBool" | "AtomicPtr") {
                     return true;
                 }
                 // Auto-derive: all fields must be Shareable.

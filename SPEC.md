@@ -608,10 +608,14 @@ analogous to the `transfer` / `share` rule for `gate` (§7.1):
 - **Non-Shareable non-owning capture** (`*T`, `raw *T`, mutable slices, etc.)
   is **rejected** — the pointee lifetime is the caller's owner's, with the
   same lifetime hazard.
-- **`*unit` is allowed** — the stdlib opaque-handle convention for atomics,
-  waitgroups, mutexes, and channels, all of which are thread-safe by design.
-  This is a temporary carve-out; the long-term fix is for the stdlib to
-  return precisely-typed handles (`Atomic<T>`, `WaitGroup`, etc.).
+- **`*unit` is rejected** like any other non-Shareable pointer.  The
+  stdlib exposes its concurrency primitives as typed opaque-handle wrappers
+  (`Atomic`, `Mutex`, `WaitGroup`, `Once`, `RwLock`, `IntChan`, `FloatChan`,
+  `ByteChan`, `TlsConn`) which are in the Shareable allowlist by name.
+  User code captures the typed handle into a spawn closure; the raw `*unit`
+  the wrapper holds never escapes the stdlib.  (Earlier drafts of this spec
+  allowed a `*unit` carve-out at spawn boundaries — the carve-out was
+  dropped once the stdlib typed-handle migration landed.)
 
 The fiber tier (`spawn`) runs on the same thread as the caller, so
 captures are unrestricted — borrows are fine because the fiber's
@@ -638,21 +642,32 @@ These ship as part of the real runtime; not yet wired in this MVP.
 `Thread` is a built-in opaque type (recognized by name; backed by `pthread_t`
 in the generated C). It is Shareable.
 
-### 7.3 Sync primitives via FFI
+### 7.3 Sync primitives (typed handles)
 
-`Mutex`, `RwLock`, `Spinlock`, and `Channel` are exposed through `extern`
-declarations of pthread-backed helpers automatically emitted in the codegen
-prologue. The user declares:
+`Mutex`, `RwLock`, `WaitGroup`, `Once`, `Atomic`, the `Chan` family, and
+`TlsConn` are exposed as typed opaque handles in the stdlib — a `data`
+declaration wrapping a single `*unit` field that holds the raw runtime
+pointer:
 
 ```maka
-extern *unit maka_mutex_new();
-extern unit maka_mutex_lock(*unit m);
-extern unit maka_mutex_unlock(*unit m);
-extern unit maka_mutex_destroy(*unit m);
+pub data Mutex { *unit h; }
+extern "maka_fmutex_new"     *unit __fmutex_new();
+extern "maka_fmutex_lock"    unit  __fmutex_lock(*unit m);
+extern "maka_fmutex_unlock"  unit  __fmutex_unlock(*unit m);
+extern "maka_fmutex_destroy" unit  __fmutex_destroy(*unit m);
+
+pub Mutex mutex_new()              { Mutex m = { h = __fmutex_new() }; return m; }
+pub unit  mutex_lock(Mutex m)      { __fmutex_lock(m.h); }
+pub unit  mutex_unlock(Mutex m)    { __fmutex_unlock(m.h); }
+pub unit  mutex_destroy(Mutex m)   { __fmutex_destroy(m.h); }
 ```
 
-Then uses them as opaque `*unit` handles. The Shareable allowlist matches by
-the user-declared struct name when applicable.
+The wrapper is named-Shareable (the type checker's Shareable allowlist
+matches `Mutex`, `Atomic`, `WaitGroup`, `Once`, `IntChan`, `FloatChan`,
+`ByteChan`, `RwLock`, `TlsConn` by name).  User code captures the typed
+handle into spawn closures by value; the raw `*unit` it holds never
+escapes the stdlib.  This replaces the original FFI-style `*unit`-only
+sync surface, which is no longer part of the public stdlib API.
 
 ### 7.4 Concurrency primitives (the irreducible base)
 
@@ -759,10 +774,11 @@ matches).
 **Cross-thread capture restriction**: spawn-tier closures passed to
 `thread`, `job`, or `spawn_pool` are further constrained — borrow captures
 (`[&x]` / `[&mut x]`) are rejected outright, and non-borrow captures must
-be of an owning type, a Shareable type, or the stdlib opaque-handle
-convention `*unit`.  See §7.2 for the full rule and rationale.  The
-fiber tier (`spawn`) keeps the unrestricted closure semantics — same
-thread, lifetime bounded by caller.
+be of an owning type or a Shareable type (the stdlib's typed concurrency
+handles — `Atomic`, `Mutex`, `WaitGroup`, etc. — are named-Shareable).
+See §7.2 for the full rule and rationale.  The fiber tier (`spawn`) keeps
+the unrestricted closure semantics — same thread, lifetime bounded by
+caller.
 
 Lambdas without captures are lifted to top-level functions at AST level. With
 captures, they are compiled to a synthesized env struct + a lifted function;

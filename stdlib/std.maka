@@ -92,13 +92,14 @@ extern "__maka_tls_read"        int  __tls_read(*unit ssl, *mut unit buf, int ca
 extern "__maka_tls_write"       int  __tls_write(*unit ssl, *mut unit buf, int len);
 extern "__maka_tls_close"       unit __tls_close(*unit ssl);
 
-pub int   tls_server_init(string cert_pem_path, string key_pem_path) { return __tls_server_init(cert_pem_path, key_pem_path); }
-pub *unit tls_server_accept(int client_fd)                            { return __tls_server_accept_new(client_fd); }
-pub *unit tls_client_new(int fd, string hostname)               { return __tls_client_new(fd, hostname); }
-pub int   tls_handshake (*unit ssl)                              { return __tls_handshake(ssl); }
-pub int   tls_read      (*unit ssl, *mut unit buf, int cap)      { return __tls_read(ssl, buf, cap); }
-pub int   tls_write     (*unit ssl, *mut unit buf, int len)      { return __tls_write(ssl, buf, len); }
-pub unit  tls_close     (*unit ssl)                              { __tls_close(ssl); }
+pub data TlsConn { *unit ssl; }
+pub int     tls_server_init  (string cert_pem_path, string key_pem_path) { return __tls_server_init(cert_pem_path, key_pem_path); }
+pub TlsConn tls_server_accept(int client_fd)                              { TlsConn c = { ssl = __tls_server_accept_new(client_fd) }; return c; }
+pub TlsConn tls_client_new   (int fd, string hostname)                    { TlsConn c = { ssl = __tls_client_new(fd, hostname) }; return c; }
+pub int     tls_handshake    (TlsConn c)                                  { return __tls_handshake(c.ssl); }
+pub int     tls_read         (TlsConn c, *mut unit buf, int cap)          { return __tls_read(c.ssl, buf, cap); }
+pub int     tls_write        (TlsConn c, *mut unit buf, int len)          { return __tls_write(c.ssl, buf, len); }
+pub unit    tls_close        (TlsConn c)                                  { __tls_close(c.ssl); }
 
 // Unix domain sockets — pathname-based IPC.  Same stream semantics as TCP,
 // so accept_async / read_async / write_async / close_fd work on the
@@ -316,12 +317,13 @@ extern "maka_chan_bytes_count"   int   __chan_bytes_count(*unit ch);
 extern "maka_chan_bytes_close"   unit  __chan_bytes_close(*unit ch);
 extern "maka_chan_bytes_destroy" unit  __chan_bytes_destroy(*unit ch);
 
-pub *unit chan_bytes_new    (int item_size)              { return __chan_bytes_new(item_size); }
-pub unit  chan_bytes_send   (*unit ch, *unit src)        { __chan_bytes_send(ch, src); }
-pub unit  chan_bytes_recv   (*unit ch, *unit dst)        { __chan_bytes_recv(ch, dst); }
-pub int   chan_bytes_count  (*unit ch)                   { return __chan_bytes_count(ch); }
-pub unit  chan_bytes_close  (*unit ch)                   { __chan_bytes_close(ch); }
-pub unit  chan_bytes_destroy(*unit ch)                   { __chan_bytes_destroy(ch); }
+pub data ByteChan { *unit h; }
+pub ByteChan chan_bytes_new    (int item_size)              { ByteChan c = { h = __chan_bytes_new(item_size) }; return c; }
+pub unit     chan_bytes_send   (ByteChan ch, *mut unit src) { __chan_bytes_send(ch.h, src as *unit); }
+pub unit     chan_bytes_recv   (ByteChan ch, *mut unit dst) { __chan_bytes_recv(ch.h, dst as *unit); }
+pub int      chan_bytes_count  (ByteChan ch)                { return __chan_bytes_count(ch.h); }
+pub unit     chan_bytes_close  (ByteChan ch)                { __chan_bytes_close(ch.h); }
+pub unit     chan_bytes_destroy(ByteChan ch)                { __chan_bytes_destroy(ch.h); }
 
 // Typed int channel — the common case, no need for users to wrap
 // chan_bytes themselves.  Item size is 8 (one i64).
@@ -395,16 +397,17 @@ pub unit sleep_until_ns(int wake_at_ns) {
 // RwLock — pthread_rwlock_t.  read_lock for many readers, write_lock for
 // exclusive access.  Same lifetime model as Mutex.
 // =====================================================================
+pub data RwLock { *unit h; }
 extern "maka_rwlock_new"        *unit __rwlock_new();
 extern "maka_rwlock_read_lock"  unit  __rwlock_read_lock (*unit r);
 extern "maka_rwlock_write_lock" unit  __rwlock_write_lock(*unit r);
 extern "maka_rwlock_unlock"     unit  __rwlock_unlock    (*unit r);
 extern "maka_rwlock_destroy"    unit  __rwlock_destroy   (*unit r);
-pub *unit rwlock_new()                       { return __rwlock_new(); }
-pub unit  rwlock_read_lock (*unit r)         { __rwlock_read_lock(r); }
-pub unit  rwlock_write_lock(*unit r)         { __rwlock_write_lock(r); }
-pub unit  rwlock_unlock    (*unit r)         { __rwlock_unlock(r); }
-pub unit  rwlock_destroy   (*unit r)         { __rwlock_destroy(r); }
+pub RwLock rwlock_new()                       { RwLock r = { h = __rwlock_new() }; return r; }
+pub unit   rwlock_read_lock (RwLock r)         { __rwlock_read_lock(r.h); }
+pub unit   rwlock_write_lock(RwLock r)         { __rwlock_write_lock(r.h); }
+pub unit   rwlock_unlock    (RwLock r)         { __rwlock_unlock(r.h); }
+pub unit   rwlock_destroy   (RwLock r)         { __rwlock_destroy(r.h); }
 
 // =====================================================================
 // Atomics for non-int payloads — bool packs as 0/1, ptr round-trips
@@ -417,12 +420,20 @@ extern "__maka_atomic_bool_set" unit  __atomic_bool_set(*unit a, int v);
 extern "__maka_atomic_ptr_new"  *unit __atomic_ptr_new (*unit p);
 extern "__maka_atomic_ptr_get"  *unit __atomic_ptr_get (*unit a);
 extern "__maka_atomic_ptr_set"  unit  __atomic_ptr_set (*unit a, *unit p);
-pub *unit atomic_bool_new(bool v)               { if (v) { return __atomic_bool_new(1); } else { return __atomic_bool_new(0); } }
-pub bool  atomic_bool_get(*unit a)              { return __atomic_bool_get(a) != 0; }
-pub unit  atomic_bool_set(*unit a, bool v)      { if (v) { __atomic_bool_set(a, 1); } else { __atomic_bool_set(a, 0); } }
-pub *unit atomic_ptr_new(*unit p)               { return __atomic_ptr_new(p); }
-pub *unit atomic_ptr_get(*unit a)               { return __atomic_ptr_get(a); }
-pub unit  atomic_ptr_set(*unit a, *unit p)      { __atomic_ptr_set(a, p); }
+pub data AtomicBool { *unit h; }
+pub AtomicBool atomic_bool_new(bool v) {
+    mut int iv = 0;
+    if (v) { iv = 1; }
+    AtomicBool a = { h = __atomic_bool_new(iv) };
+    return a;
+}
+pub bool atomic_bool_get(AtomicBool a)         { return __atomic_bool_get(a.h) != 0; }
+pub unit atomic_bool_set(AtomicBool a, bool v) { if (v) { __atomic_bool_set(a.h, 1); } else { __atomic_bool_set(a.h, 0); } }
+
+pub data AtomicPtr { *unit h; }
+pub AtomicPtr atomic_ptr_new(*unit p)            { AtomicPtr a = { h = __atomic_ptr_new(p) }; return a; }
+pub *unit     atomic_ptr_get(AtomicPtr a)        { return __atomic_ptr_get(a.h); }
+pub unit      atomic_ptr_set(AtomicPtr a, *unit p) { __atomic_ptr_set(a.h, p); }
 
 // =====================================================================
 // Filesystem ops — minimal cross-platform set built on the file_open /
@@ -478,8 +489,8 @@ pub float random_float()               { return __random_float(); }
 // =====================================================================
 extern "__maka_rt_chan_try_recv_int"   int __chan_try_recv_int_raw  (*unit h, &mut int out);
 extern "__maka_rt_chan_try_recv_float" int __chan_try_recv_float_raw(*unit h, &mut float out);
-pub int chan_try_recv_int  (*unit h, &mut int out)   { return __chan_try_recv_int_raw(h, out); }
-pub int chan_try_recv_float(*unit h, &mut float out) { return __chan_try_recv_float_raw(h, out); }
+pub int chan_try_recv_int  (IntChan c,   &mut int out)   { return __chan_try_recv_int_raw  (c.h, out); }
+pub int chan_try_recv_float(FloatChan c, &mut float out) { return __chan_try_recv_float_raw(c.h, out); }
 
 // =====================================================================
 // Process: env_set, args.

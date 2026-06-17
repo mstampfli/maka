@@ -57,7 +57,7 @@ for src in tests/programs/*.maka; do
     sema_out=$("$MAKAC" "$src" $cflags --emit-c -o "$cfile" 2>&1)
 
     # Cross-compile.
-    if ! cmd.exe /c "$GCC_WIN -O0 -w $(echo $cfile | sed 's|/mnt/c|C:|; s|/|\\\\|g')$extra_c_win -o $exe_w -lpthread -lws2_32 -lwinmm$extra_link_libs" 2>/dev/null; then
+    if ! cmd.exe /c "$GCC_WIN -O0 -w $(echo $cfile | sed 's|/mnt/c|C:|; s|/|\\\\|g')$extra_c_win -o $exe_w -lpthread -lws2_32 -lwinmm -lSynchronization$extra_link_libs" 2>/dev/null; then
         :
     fi
     if [ ! -f "$exe_p" ]; then
