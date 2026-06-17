@@ -106,8 +106,11 @@ transferred via assignment. It is non-null by construction and accessed without
 `!`. The legacy keyword `heap` has been removed; write `own &T` instead.
 
 `*T` is the flexible escape valve: nullable, untracked, freely rebindable.
-Linked-list `next` pointers, optional struct fields, function returns where the
-caller manages free - all `*T`.
+Linked-list `next` pointers, optional struct fields, downgrades of `own *T` for
+read-only views - all `*T`.  `*T` does **not** own; it cannot be `alloc`'d into
+directly, and there is no `free()` builtin you can call on it - either the owner
+auto-frees it at its scope exit, or you go through an FFI shim for C-allocated
+memory.
 
 `raw *T` is **never shareable**, **never auto-derefs**, and its observation
 (deref, field access through it, index, narrowing) requires the use site to be
@@ -134,13 +137,22 @@ declared with when the C side controls the pointer's lifetime.
 
 ### 2.3 The `alloc value` expression
 
-`alloc value` heap-allocates `value` and returns an owning pointer. The result
-type is **context-typed** by the destination slot:
+`alloc value` heap-allocates `value` and returns an **owning** pointer.  Its
+expression type is `own &T` and coerces into `own *T`, so the destination must
+be one of those two forms:
 
-- `own *T x = alloc T { ... };` produces `own *T`.
-- `own &T x = alloc T { ... };` produces `own &T`.
-- `*T x = alloc T { ... };` produces `*T` (no ownership tracking; caller must
-  `free()` manually).
+- `own *T x = alloc T { ... };` produces `own *T` (nullable owner).
+- `own &T x = alloc T { ... };` produces `own &T` (strict non-null owner).
+
+Landing an `alloc` in any non-owning slot - `*T x = alloc T { ... };`,
+`&T y = alloc T { ... };`, `raw *T z = alloc T { ... };` - is a **compile
+error**: a non-owning binding would have nothing to auto-free at scope exit,
+which would leak.  The sema error reads *"`alloc value` must land in an owning
+slot (`own *T` or `own &T`) — assigning an allocation to a non-owning `*T`
+would leak with no auto-free.  Declare the binding as `own *T` or downgrade
+explicitly later."*  This is also why there is no `free()` builtin (next
+paragraph): the only producer of Maka-managed memory is `alloc`, the only
+holder is an owner, and the owner auto-frees.
 
 `alloc` is no longer a type modifier - writing `alloc T` in a type position is
 a compile error directing the user at `own *T` or `own &T`.
@@ -782,7 +794,7 @@ matching import in the caller's file or be in the same module. Without
 imports, no cross-module symbols are visible (calls fail with the
 "must be imported" diagnostic).
 
-Names of built-in functions (`log`, `free`, `panic`, `spawn`, `join`) are
+Names of built-in functions (`log`, `panic`, `spawn`, `join`) are
 always visible and require no import.
 
 ### 11.5 `use ModPath.Type.Attr;` - explicit `has` propagation
@@ -846,7 +858,6 @@ pthread wrappers.
 | name | FuncId | signature | notes |
 |---|---|---|---|
 | `log` | `u32::MAX` | `unit log(T x)` | accepts any single arg; auto-derefs primitive refs; auto-coerces `own *char` to `string` |
-| `free` | `u32::MAX - 1` | `unit free(*T p)` | non-owning `*T` only; rejects `own *T` / `own &T` (would double-free) |
 | `panic` | `u32::MAX - 2` | `unit panic(string msg)` | prints to stderr, calls `abort()` |
 | `spawn` | `u32::MAX - 3` | `*Thread spawn(unit() closure)` | accepts bare or alloc'd closure |
 | `join` | `u32::MAX - 4` | `unit join(*Thread t)` | blocks; reclaims handle |
@@ -885,8 +896,8 @@ Currently provided by `stdlib/std.maka`:
 - `str_eq(string, string) -> bool` - byte-equal comparison.
 
 Genuine compiler builtins (always in scope, never declared in Maka source):
-`log`, `panic`, `free`, `spawn`, `join`, `read_line`, `read_int`, `+` on
-strings, and `.len` on slices / arrays / vectors.
+`log`, `panic`, `spawn`, `join`, `read_line`, `read_int`, `+` on strings,
+and `.len` on slices / arrays / vectors.
 
 One ergonomic exception: the `for x in user_iterator` desugaring references
 `Option<T>`, so the compiler injects a synthetic `import std.Option;` for

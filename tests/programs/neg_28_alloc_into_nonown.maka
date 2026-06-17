@@ -1,0 +1,9 @@
+// `alloc value` must land in an owning slot (`own *T` or `own &T`).  Landing
+// it in a non-owning `*T` would leak: there's no auto-free for the binding and
+// (as of the `free` removal) no way to free it manually either.
+data Box { mut int v; }
+
+unit main() {
+    *Box p = alloc Box { v = 1 };   // ❌ alloc into non-owning *T
+    if (p != null) { log(p!.v); }
+}
