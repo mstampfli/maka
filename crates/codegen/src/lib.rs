@@ -4959,9 +4959,11 @@ impl<'a> Cx<'a> {
         self.w("#else\n");
         self.w("#define __MAKA_SO_ERROR    SO_ERROR\n");
         self.w("#endif\n");
-        // tcp_listen binds to 127.0.0.1 — safer default that doesn't trip the
-        // Windows firewall prompt on every fresh binary.  For public servers
-        // that need to accept external connections, use tcp_listen_any below.
+        // tcp_listen binds INADDR_ANY (0.0.0.0) — accepts on every interface.
+        // On Windows the firewall prompts the first time a binary calls this
+        // (allow once and it's remembered).  Same behavior as tcp_listen_any;
+        // the two are kept as separate names for source-compat with code that
+        // already used either spelling.
         self.w("static inline int64_t __maka_tcp_listen(int64_t port, int64_t backlog) {\n");
         self.w("    int s = socket(__MAKA_AF_INET, __MAKA_SOCK_STREAM, 0);\n");
         self.w("    if (s < 0) return -1;\n");
@@ -4969,7 +4971,7 @@ impl<'a> Cx<'a> {
         self.w("    setsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_REUSEADDR, &one, sizeof(one));\n");
         self.w("    struct sockaddr_in sa; memset(&sa, 0, sizeof(sa)); __MAKA_SA_LEN_INIT(sa);\n");
         self.w("    sa.sin_family = __MAKA_AF_INET;\n");
-        self.w("    sa.sin_addr.s_addr = htonl(0x7F000001u);   /* 127.0.0.1 */\n");
+        self.w("    sa.sin_addr.s_addr = htonl(__MAKA_INADDR_ANY);   /* 0.0.0.0 */\n");
         self.w("    sa.sin_port = htons((unsigned short)port);\n");
         self.w("    if (bind(s, (struct sockaddr*)&sa, sizeof(sa)) != 0) { close(s); return -1; }\n");
         self.w("    if (listen(s, (int)backlog) != 0) { close(s); return -1; }\n");

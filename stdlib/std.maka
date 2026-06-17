@@ -203,8 +203,8 @@ pub int udp_recv_async(int fd, *mut unit buf, int cap)                 { return 
 
 // TCP helpers.  All sockets are returned in non-blocking mode so the
 // reactor primitives (wait_fd, read_async, write_async) work directly.
-// tcp_listen binds 127.0.0.1 — safer default; Windows firewall stays quiet.
-// Use tcp_listen_any when you need to accept from external interfaces.
+// tcp_listen binds INADDR_ANY (0.0.0.0) — accepts on every interface.
+// tcp_listen_any is kept as an alias; both bind the same address.
 pub int tcp_listen      (int port, int backlog)         { return __tcp_listen(port, backlog); }
 pub int tcp_listen_any  (int port, int backlog)         { return __tcp_listen_any(port, backlog); }
 pub int tcp_accept_async(int listen_fd)                  { return __tcp_accept(listen_fd); }
