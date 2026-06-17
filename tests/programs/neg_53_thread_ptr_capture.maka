@@ -1,0 +1,10 @@
+// Capturing a `*T` view at a spawn-tier boundary is rejected — the view's
+// pointee is the caller's owner, whose lifetime may end while the thread
+// is still running.  Owning bindings (`own *T`) must move (transfer).
+data Box { int v; }
+unit main() {
+    own *Box owner = alloc Box { v = 1 };
+    *Box view = owner;
+    *Thread t = thread(unit() [view] { _ = view!.v; });
+    join(t);
+}

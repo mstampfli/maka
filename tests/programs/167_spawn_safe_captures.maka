@@ -1,0 +1,21 @@
+// Spawn-tier closures with safe capture modes:
+//   - by-value of an owning type (move = transfer semantics)
+//   - by-value of a Shareable atomic handle (`*unit` opaque handle)
+import std.{ atomic_new, atomic_get, atomic_add, atomic_destroy };
+
+data Box { int v; }
+
+unit main() {
+    own *Box b = alloc Box { v = 42 };
+    *unit a    = atomic_new(0);
+
+    // [b]: moves the owner into the thread (transfer).
+    // [a]: copies the opaque atomic handle (share).
+    *Thread t = thread(unit() [b, a] {
+        _ = atomic_add(a, b!.v);
+    });
+    join(t);
+
+    log(atomic_get(a));    // 42
+    atomic_destroy(a);
+}

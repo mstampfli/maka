@@ -110,13 +110,59 @@ impl<'a> TypeChecker<'a> {
                 _ => return,
             }
         };
+        // Spawn-tier rule: every captured value must be safe to cross a
+        // thread boundary.  Three classes are allowed:
+        //
+        //   (a) owning types (`own *T`, `own &T`) — by-value capture moves
+        //       ownership to the thread (transfer semantics).
+        //   (b) Shareable types (per is_shareable) — by-value copy / share.
+        //   (c) Unit.
+        //
+        // Borrowed references (`&T`, `&mut T`) and non-Shareable pointers
+        // (`*T`, `raw *T`, mutable slices) are rejected — their pointee
+        // lifetime is tied to the caller's scope, and the thread can
+        // outlive that scope.  This is the spawn-tier analogue of the
+        // gate / transfer / share check (§7.1) — gate is just inlined
+        // into the spawn-tier handler instead of being explicit.
         for v in env_values {
-            if matches!(&v.ty, HType::Ref { .. }) {
+            let ty = &v.ty;
+            if matches!(ty, HType::Unit) { continue; }
+            // (a) owning types — capture by value moves ownership.
+            if matches!(ty, HType::OwnPtr { .. } | HType::Heap { .. }) {
+                continue;
+            }
+            // (a') stdlib opaque-handle convention: `*unit` is the universal
+            // handle for atomics, waitgroups, mutexes, channels, etc. — all
+            // of which are thread-safe by design.  Until the stdlib evolves
+            // to return precisely-typed handles (Atomic<T>, WaitGroup, etc.),
+            // treat `*unit` as a cross-thread-safe handle at spawn boundaries.
+            if matches!(ty, HType::Ptr { inner, .. } if matches!(**inner, HType::Unit)) {
+                continue;
+            }
+            // Borrows are the most common foot-gun; specific diagnostic.
+            if matches!(ty, HType::Ref { .. }) {
                 self.err(
                     format!(
-                        "`{}` captures a borrowed reference (`{}`), which can't cross a thread boundary safely. \
-                         Capture by value (drop the `&`), `transfer` ownership across a `gate`, or use a `*Thread`-safe handle.",
-                        tier, type_str(&v.ty)
+                        "`{0}` captures a borrowed reference (`{1}`) which can't cross a thread \
+                         boundary — the borrow's lifetime is tied to this scope but the thread can \
+                         outlive it.  Capture by value `[name]` (moves ownership for `own *T` / \
+                         `own &T`, copies Shareable values), or restructure to pass an `own *T`.",
+                        tier, type_str(ty)
+                    ),
+                    sp,
+                );
+                continue;
+            }
+            // (b) anything else must be Shareable.
+            if !self.is_shareable(ty) {
+                self.err(
+                    format!(
+                        "`{0}` captures a value of type `{1}` which is not Shareable and can't \
+                         cross a thread boundary — its pointee lifetime is unknown to the lifetime \
+                         pass.  Capture an owning binding (`own *T` / `own &T`) so ownership \
+                         transfers, or use a Shareable handle (e.g. an atomic, a `Mutex`, or \
+                         `&const T` where `T: Shareable`).",
+                        tier, type_str(ty)
                     ),
                     sp,
                 );

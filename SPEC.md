@@ -594,6 +594,29 @@ parallelism).  `spawn` is the fiber tier (ergonomic concurrent IO).
 `job` is the work-stealing pool tier (parallel compute fanout).  See
 `CONCURRENCY.md` for the full design and decision tree.
 
+**Cross-thread capture rule** — `thread`, `job`, and `spawn_pool` cross
+a thread boundary.  Their closure captures are checked at the call site,
+analogous to the `transfer` / `share` rule for `gate` (§7.1):
+
+- **By-value capture of an owning type** (`own *T` / `own &T`) is allowed —
+  by-value moves ownership into the thread (transfer semantics).
+- **By-value capture of a Shareable type** (per the Shareable bound in §7.1)
+  is allowed — the value is copied into the thread's env (share semantics).
+- **Borrow capture** (`[&x]` / `[&mut x]`) is **rejected** — the borrow's
+  lifetime is tied to the caller's scope, but the thread can outlive that
+  scope, so the borrow would dangle or race.
+- **Non-Shareable non-owning capture** (`*T`, `raw *T`, mutable slices, etc.)
+  is **rejected** — the pointee lifetime is the caller's owner's, with the
+  same lifetime hazard.
+- **`*unit` is allowed** — the stdlib opaque-handle convention for atomics,
+  waitgroups, mutexes, and channels, all of which are thread-safe by design.
+  This is a temporary carve-out; the long-term fix is for the stdlib to
+  return precisely-typed handles (`Atomic<T>`, `WaitGroup`, etc.).
+
+The fiber tier (`spawn`) runs on the same thread as the caller, so
+captures are unrestricted — borrows are fine because the fiber's
+lifetime is bounded by its caller.
+
 **Implementation status**: all three are currently `pthread_create`-backed.
 The real fiber runtime (slab pool + scheduler + epoll reactor) and the
 real job runtime (work-stealing pool) replace the backings without
@@ -686,6 +709,14 @@ The **lambda-escape rule**: a closure with non-empty captures that escapes the
 spawning frame (returned by value, stored in `spawn`, etc.) requires its env to
 be heap-allocated. Use `alloc unit() [...] { ... }` (or whatever signature
 matches).
+
+**Cross-thread capture restriction**: spawn-tier closures passed to
+`thread`, `job`, or `spawn_pool` are further constrained — borrow captures
+(`[&x]` / `[&mut x]`) are rejected outright, and non-borrow captures must
+be of an owning type, a Shareable type, or the stdlib opaque-handle
+convention `*unit`.  See §7.2 for the full rule and rationale.  The
+fiber tier (`spawn`) keeps the unrestricted closure semantics — same
+thread, lifetime bounded by caller.
 
 Lambdas without captures are lifted to top-level functions at AST level. With
 captures, they are compiled to a synthesized env struct + a lifted function;
