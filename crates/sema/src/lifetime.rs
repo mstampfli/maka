@@ -1,8 +1,11 @@
 //! Lifetime/deps + move tracking pass on HIR.
 //!
-//! Implements §11: LIDs, deps sets, poisoning of strong references,
-//! null-collapse for `*T`, move tracking for `heap T`, pointer narrowing,
-//! and heap-drop insertion at scope boundaries (returns and block exit).
+//! Implements SPEC §6 (Lifetime and ownership): move semantics (§6.1),
+//! auto-free at scope exit (§6.2), forced handling for `*T` deref (§6.3),
+//! downstream invalidation on owner change (§6.4) via the kill_lid path —
+//! deps sets, null-collapse for `*T` aliases, poisoning of `&T` borrows,
+//! pointer narrowing — and heap-drop insertion at scope boundaries
+//! (returns and block exit).
 //!
 //! Diagnostics produced here are reported alongside type errors.
 
@@ -15,7 +18,7 @@ use std::collections::HashSet;
 #[derive(Debug, Clone)]
 struct LocalState {
     /// `live` for stack values (the LID is the local itself); for heap bindings,
-    /// `live`/`moved` per §11.7.
+    /// `live`/`moved` per §6.1 (move semantics on owning types).
     moved: bool,
     /// For reference-like locals (`&T`, `*T`, `[]T`), the set of LIDs in deps.
     deps: HashSet<u32>,
