@@ -26,13 +26,15 @@ extern unit  __mk_free_buf(*unit buf);
 mut int g_port = 0;
 
 unit serve_one(int cfd, Atomic ok_count, WaitGroup wg) {
-    *unit buf = __mk_alloc_buf();
-    int n = read_async(cfd, buf, 4);
-    if (n == 4) {
-        _ = write_async(cfd, buf, 4);
-        _ = atomic_add(ok_count, 1);
+    unsafe {
+        *unit buf = __mk_alloc_buf();
+        int n = read_async(cfd, buf, 4);
+        if (n == 4) {
+            _ = write_async(cfd, buf, 4);
+            _ = atomic_add(ok_count, 1);
+        }
+        __mk_free_buf(buf);
     }
-    __mk_free_buf(buf);
     _ = close_fd(cfd);
     wg_done(wg);
 }
@@ -48,13 +50,15 @@ unit server_body(int listen_fd, int n_conns, Atomic ok_count, WaitGroup wg) {
 unit client_one(int port, Atomic ok_count, WaitGroup wg) {
     int s = tcp_connect_v4(127, 0, 0, 1, port);
     if (s >= 0) {
-        _ = write_async(s, __mk_msg() as *mut unit, 4);
-        *unit buf = __mk_alloc_buf();
-        int n = read_async(s, buf, 4);
-        if (n == 4 && __mk_first_byte(buf) as int == 80) {
-            _ = atomic_add(ok_count, 1);
+        unsafe {
+            _ = write_async(s, __mk_msg() as *mut unit, 4);
+            *unit buf = __mk_alloc_buf();
+            int n = read_async(s, buf, 4);
+            if (n == 4 && __mk_first_byte(buf) as int == 80) {
+                _ = atomic_add(ok_count, 1);
+            }
+            __mk_free_buf(buf);
         }
-        __mk_free_buf(buf);
         _ = close_fd(s);
     }
     wg_done(wg);

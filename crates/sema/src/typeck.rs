@@ -94,6 +94,29 @@ impl<'a> TypeChecker<'a> {
         Self::new_with_logic(sym, None)
     }
 
+    /// Reject `*unit` (the untyped opaque pointer) anywhere it would surface
+    /// in safe user code — fn signatures, let bindings, struct fields.
+    /// `*unit` is only meaningful at the FFI boundary, so it stays allowed
+    /// in (a) the stdlib module, where typed handles wrap a single `*unit`
+    /// field, (b) `extern` declarations, and (c) `unsafe { }` blocks for
+    /// the same reason `raw *T` is.  Mutable `*mut unit` is still allowed
+    /// everywhere — it's the canonical byte-buffer type for I/O until proper
+    /// slice-of-byte lands.
+    fn ban_unit_ptr_in_user_code(&mut self, ty: &HType, where_: &str, sp: Span) {
+        if self.in_unsafe > 0 { return; }
+        if self.cur_module.as_slice() == ["std".to_string()].as_slice() { return; }
+        if matches!(ty, HType::Ptr { inner, .. } if matches!(**inner, HType::Unit)) {
+            self.err(
+                format!(
+                    "`*unit` is not allowed in safe code ({0}); use a typed handle (e.g. `Mutex`, \
+                     `Atomic`, `TlsConn`) from the stdlib, or wrap the use in an `unsafe {{ }}` block",
+                    where_
+                ),
+                sp,
+            );
+        }
+    }
+
     /// Reject captures that can't safely cross a thread boundary when used
     /// with `thread()` / `job()` / `spawn_pool()`.  v1: borrowed references
     /// (`&T`, `&mut T`) are tied to a scope on the spawning thread; the
@@ -281,11 +304,24 @@ impl<'a> TypeChecker<'a> {
         self.cur_has_imports = self.sym.func_sig(fid).has_imports.clone();
         self.cur_where_bounds = self.sym.func_sig(fid).where_bounds.clone();
 
+        // Lifted no-capture lambdas inherit the unsafe scope of their lexical
+        // call site, but the lifted top-level function loses that context.
+        // The AST-level lift encodes the call-site `unsafe { }` state in the
+        // synthetic name (`__lambda_unsafe_N` vs `__lambda_N`) so we can
+        // either skip or apply the `*unit` ban accordingly.
+        let lifted_in_unsafe = f.name.starts_with("__lambda_unsafe_");
+        if !lifted_in_unsafe {
+            self.ban_unit_ptr_in_user_code(&self.cur_ret.clone(), "function return type", f.span);
+        }
+
         self.enter_scope();
         let mut param_ids = Vec::new();
         for p in &f.params {
             let raw = resolve_type_in(self.sym, &p.ty, &f.type_params, &mut self.errors);
             let ty = raw.subst(&self.subst);
+            if !lifted_in_unsafe {
+                self.ban_unit_ptr_in_user_code(&ty, "function parameter", p.span);
+            }
             // Owning params (both `own &T`/Heap and `own *T`/OwnPtr) carry
             // ownership in from the caller — storage=Heap so the lifetime pass
             // auto-frees them at function scope-exit unless the callee moves
@@ -442,6 +478,7 @@ impl<'a> TypeChecker<'a> {
         let cur_module = self.cur_module.clone();
         let cur_imports = self.cur_imports.clone();
         check_type_visibility(self.sym, &declared, &cur_module, &cur_imports, span, &mut self.errors);
+        self.ban_unit_ptr_in_user_code(&declared, "let binding type", span);
         // If the user declared `string` but the initializer produces an owning
         // value (e.g. `string + string` → `own *char`, `read_line()` → `own *char`),
         // bind the slot AS the owning type so the lifetime pass auto-frees it.
@@ -1221,7 +1258,7 @@ impl<'a> TypeChecker<'a> {
                     | "AtomicI32" | "AtomicI64" | "AtomicU8" | "AtomicU16" | "AtomicU32"
                     | "AtomicU64" | "AtomicBool" | "AtomicPtr" | "ThreadHandle"
                     | "Atomic" | "WaitGroup" | "Once" | "IntChan" | "FloatChan" | "ByteChan"
-                    | "RwLock" | "TlsConn" | "AtomicBool" | "AtomicPtr") {
+                    | "TlsConn") {
                     return true;
                 }
                 // Auto-derive: all fields must be Shareable.
@@ -3610,6 +3647,8 @@ impl<'a> TypeChecker<'a> {
         sub.cur_imports = self.cur_imports.clone();
         sub.cur_has_imports = self.cur_has_imports.clone();
         sub.cur_where_bounds = self.cur_where_bounds.clone();
+        // Lambda body is lexically inside the caller's `unsafe { }` scope (if any).
+        sub.in_unsafe = self.in_unsafe;
         sub.enter_scope();
 
         // First param: the env reference.

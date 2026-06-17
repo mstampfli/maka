@@ -484,7 +484,7 @@ compile error** (`poisoned`).
 
 ### 6.5 `unsafe { }`
 
-`unsafe { ... }` permits exactly four operations otherwise forbidden:
+`unsafe { ... }` permits exactly five operations otherwise forbidden:
 
 1. Casting an integer to a pointer (`usize as *T`, `int as *T`).
 2. Casting a reference to `raw *T` (`&T as raw *T` — drops borrow tracking).
@@ -494,6 +494,12 @@ compile error** (`poisoned`).
      (no auto-free; the binding leaves with no destructor).
    - `free p;` — bare-word keyword statement, lowers to a C `free` call;
      accepts only `raw *T`.
+5. Mentioning `*unit` (the untyped opaque pointer) in a let binding,
+   function parameter, or return type.  In safe code `*unit` is rejected
+   outright — typed handles from the stdlib (`Atomic`, `Mutex`,
+   `TlsConn`, etc.) carry the runtime handle.  Inside `unsafe { }` the
+   bare `*unit` is allowed for raw FFI plumbing.  `*unit` also remains
+   allowed in `extern` declarations and inside `cblock`.
 
 Inside `unsafe`, `raw *T` still has to be narrowed (forced-handling — §6.3)
 before deref.  `unsafe` does not turn off the lifetime pass; it just unlocks

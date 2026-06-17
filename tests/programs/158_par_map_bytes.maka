@@ -27,16 +27,18 @@ extern unit  __mk_pair_sum(*mut unit in_item, *mut unit out_item);
 extern unit  __mk_free_buf(*mut unit p);
 
 unit main() {
-    *mut unit input  = __mk_input() as *mut unit;
-    int n = 4;
-    int in_sz  = __mk_pair_size() as int;
-    int out_sz = __mk_int_size () as int;
+    unsafe {
+        *mut unit input  = __mk_input() as *mut unit;
+        int n = 4;
+        int in_sz  = __mk_pair_size() as int;
+        int out_sz = __mk_int_size () as int;
 
-    *mut unit out = par_map_bytes(input, n, in_sz, out_sz, unit(*mut unit a, *mut unit b) { __mk_pair_sum(a, b); });
+        *mut unit out = par_map_bytes(input, n, in_sz, out_sz, unit(*mut unit a, *mut unit b) { __mk_pair_sum(a, b); });
 
-    log(__mk_out_at(out as *unit, 0 as i32));   // 3
-    log(__mk_out_at(out as *unit, 1 as i32));   // 7
-    log(__mk_out_at(out as *unit, 2 as i32));   // 11
-    log(__mk_out_at(out as *unit, 3 as i32));   // 15
-    __mk_free_buf(out);  // C-allocated buffer: free via FFI shim, not Maka builtin
+        log(__mk_out_at(out as *unit, 0 as i32));   // 3
+        log(__mk_out_at(out as *unit, 1 as i32));   // 7
+        log(__mk_out_at(out as *unit, 2 as i32));   // 11
+        log(__mk_out_at(out as *unit, 3 as i32));   // 15
+        __mk_free_buf(out);  // C-allocated buffer: free via FFI shim, not Maka builtin
+    }
 }

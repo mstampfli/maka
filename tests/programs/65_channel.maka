@@ -1,4 +1,6 @@
-// D11 — Channel<int> via the pthread-backed stdlib helpers.
+// D11 — Channel<int> + RwLock + Spinlock via the pthread-backed runtime,
+// reached through the raw extern surface.  *unit is banned in safe code,
+// so the raw-handle bindings live inside `unsafe { }`.
 extern *unit maka_channel_new();
 extern unit maka_channel_send(*unit ch, int v);
 extern int  maka_channel_recv(*unit ch);
@@ -14,25 +16,27 @@ extern unit maka_spinlock_unlock(*unit s);
 extern unit maka_spinlock_destroy(*unit s);
 
 unit main() {
-    *unit ch = maka_channel_new();
-    maka_channel_send(ch, 7);
-    maka_channel_send(ch, 42);
-    log(maka_channel_recv(ch));   // 7
-    log(maka_channel_recv(ch));   // 42
-    maka_channel_destroy(ch);
+    unsafe {
+        *unit ch = maka_channel_new();
+        maka_channel_send(ch, 7);
+        maka_channel_send(ch, 42);
+        log(maka_channel_recv(ch));   // 7
+        log(maka_channel_recv(ch));   // 42
+        maka_channel_destroy(ch);
 
-    *unit rw = maka_rwlock_new();
-    maka_rwlock_read_lock(rw);
-    log("read");
-    maka_rwlock_unlock(rw);
-    maka_rwlock_write_lock(rw);
-    log("write");
-    maka_rwlock_unlock(rw);
-    maka_rwlock_destroy(rw);
+        *unit rw = maka_rwlock_new();
+        maka_rwlock_read_lock(rw);
+        log("read");
+        maka_rwlock_unlock(rw);
+        maka_rwlock_write_lock(rw);
+        log("write");
+        maka_rwlock_unlock(rw);
+        maka_rwlock_destroy(rw);
 
-    *unit sp = maka_spinlock_new();
-    maka_spinlock_lock(sp);
-    log("spin");
-    maka_spinlock_unlock(sp);
-    maka_spinlock_destroy(sp);
+        *unit sp = maka_spinlock_new();
+        maka_spinlock_lock(sp);
+        log("spin");
+        maka_spinlock_unlock(sp);
+        maka_spinlock_destroy(sp);
+    }
 }

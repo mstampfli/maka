@@ -57,11 +57,11 @@ fn lambda_lift(mut m: maka_ast::Module) -> maka_ast::Module {
         let mut bucket: Vec<maka_ast::FuncDecl> = Vec::new();
         match item {
             maka_ast::Item::Func(f) => {
-                lift_block(&mut f.body, &mut counter, &mut bucket);
+                lift_block(&mut f.body, &mut counter, &mut bucket, false);
             }
             maka_ast::Item::Logic(l) => {
                 for f in &mut l.funcs {
-                    lift_block(&mut f.body, &mut counter, &mut bucket);
+                    lift_block(&mut f.body, &mut counter, &mut bucket, false);
                 }
             }
             _ => {}
@@ -80,92 +80,99 @@ fn lambda_lift(mut m: maka_ast::Module) -> maka_ast::Module {
     m
 }
 
-fn lift_block(b: &mut maka_ast::Block, counter: &mut u32, out: &mut Vec<maka_ast::FuncDecl>) {
-    for s in &mut b.stmts { lift_stmt(s, counter, out); }
+fn lift_block(b: &mut maka_ast::Block, counter: &mut u32, out: &mut Vec<maka_ast::FuncDecl>, in_unsafe: bool) {
+    for s in &mut b.stmts { lift_stmt(s, counter, out, in_unsafe); }
 }
 
-fn lift_stmt(s: &mut maka_ast::Stmt, counter: &mut u32, out: &mut Vec<maka_ast::FuncDecl>) {
+fn lift_stmt(s: &mut maka_ast::Stmt, counter: &mut u32, out: &mut Vec<maka_ast::FuncDecl>, in_unsafe: bool) {
     use maka_ast::Stmt::*;
     match s {
-        Let { init, .. } => lift_expr(init, counter, out),
-        Assign { place, value, .. } => { lift_expr(place, counter, out); lift_expr(value, counter, out); }
-        ExprStmt(e, _) => lift_expr(e, counter, out),
-        Return(Some(e), _) => lift_expr(e, counter, out),
+        Let { init, .. } => lift_expr(init, counter, out, in_unsafe),
+        Assign { place, value, .. } => { lift_expr(place, counter, out, in_unsafe); lift_expr(value, counter, out, in_unsafe); }
+        ExprStmt(e, _) => lift_expr(e, counter, out, in_unsafe),
+        Return(Some(e), _) => lift_expr(e, counter, out, in_unsafe),
         Return(None, _) => {}
         If { cond, then_block, else_block, .. } => {
-            lift_expr(cond, counter, out);
-            lift_block(then_block, counter, out);
-            if let Some(b) = else_block { lift_block(b, counter, out); }
+            lift_expr(cond, counter, out, in_unsafe);
+            lift_block(then_block, counter, out, in_unsafe);
+            if let Some(b) = else_block { lift_block(b, counter, out, in_unsafe); }
         }
-        While { cond, body, .. } => { lift_expr(cond, counter, out); lift_block(body, counter, out); }
-        Block(b) | Unsafe(b, _) => lift_block(b, counter, out),
+        While { cond, body, .. } => { lift_expr(cond, counter, out, in_unsafe); lift_block(body, counter, out, in_unsafe); }
+        Block(b) => lift_block(b, counter, out, in_unsafe),
+        Unsafe(b, _) => lift_block(b, counter, out, /*in_unsafe*/ true),
         Match { scrutinee, arms, .. } => {
-            lift_expr(scrutinee, counter, out);
+            lift_expr(scrutinee, counter, out, in_unsafe);
             for a in arms {
-                if let Some(g) = &mut a.guard { lift_expr(g, counter, out); }
+                if let Some(g) = &mut a.guard { lift_expr(g, counter, out, in_unsafe); }
                 match &mut a.body {
-                    maka_ast::ArmBody::Expr(e) => lift_expr(e, counter, out),
-                    maka_ast::ArmBody::Block(b) => lift_block(b, counter, out),
+                    maka_ast::ArmBody::Expr(e) => lift_expr(e, counter, out, in_unsafe),
+                    maka_ast::ArmBody::Block(b) => lift_block(b, counter, out, in_unsafe),
                 }
             }
         }
-        Yield(e, _) => lift_expr(e, counter, out),
-        Propagate(opt, _) => if let Some(e) = opt { lift_expr(e, counter, out); },
+        Yield(e, _) => lift_expr(e, counter, out, in_unsafe),
+        Propagate(opt, _) => if let Some(e) = opt { lift_expr(e, counter, out, in_unsafe); },
         ForEach { src, body, .. } => {
-            lift_expr(src, counter, out);
-            lift_block(body, counter, out);
+            lift_expr(src, counter, out, in_unsafe);
+            lift_block(body, counter, out, in_unsafe);
         }
         ForRange { start, end, body, .. } => {
-            lift_expr(start, counter, out);
-            lift_expr(end, counter, out);
-            lift_block(body, counter, out);
+            lift_expr(start, counter, out, in_unsafe);
+            lift_expr(end, counter, out, in_unsafe);
+            lift_block(body, counter, out, in_unsafe);
         }
         Break(_) | Continue(_) => {}
     }
 }
 
-fn lift_expr(e: &mut maka_ast::Expr, counter: &mut u32, out: &mut Vec<maka_ast::FuncDecl>) {
+fn lift_expr(e: &mut maka_ast::Expr, counter: &mut u32, out: &mut Vec<maka_ast::FuncDecl>, in_unsafe: bool) {
     // Post-order: lift children first.
     match e {
-        maka_ast::Expr::Bin { lhs, rhs, .. } => { lift_expr(lhs, counter, out); lift_expr(rhs, counter, out); }
-        maka_ast::Expr::Un { expr, .. } => lift_expr(expr, counter, out),
-        maka_ast::Expr::Unwrap { expr, .. } => lift_expr(expr, counter, out),
-        maka_ast::Expr::Ref { expr, .. } => lift_expr(expr, counter, out),
-        maka_ast::Expr::Field { base, .. } => lift_expr(base, counter, out),
-        maka_ast::Expr::Index { base, idx, .. } => { lift_expr(base, counter, out); lift_expr(idx, counter, out); }
+        maka_ast::Expr::Bin { lhs, rhs, .. } => { lift_expr(lhs, counter, out, in_unsafe); lift_expr(rhs, counter, out, in_unsafe); }
+        maka_ast::Expr::Un { expr, .. } => lift_expr(expr, counter, out, in_unsafe),
+        maka_ast::Expr::Unwrap { expr, .. } => lift_expr(expr, counter, out, in_unsafe),
+        maka_ast::Expr::Ref { expr, .. } => lift_expr(expr, counter, out, in_unsafe),
+        maka_ast::Expr::Field { base, .. } => lift_expr(base, counter, out, in_unsafe),
+        maka_ast::Expr::Index { base, idx, .. } => { lift_expr(base, counter, out, in_unsafe); lift_expr(idx, counter, out, in_unsafe); }
         maka_ast::Expr::Call { callee, args, .. } => {
-            lift_expr(callee, counter, out);
-            for a in args { lift_expr(a, counter, out); }
+            lift_expr(callee, counter, out, in_unsafe);
+            for a in args { lift_expr(a, counter, out, in_unsafe); }
         }
-        maka_ast::Expr::Cast { expr, .. } | maka_ast::Expr::CheckedCast { expr, .. } => lift_expr(expr, counter, out),
-        maka_ast::Expr::Struct { fields, .. } => for (_, fe) in fields { lift_expr(fe, counter, out); },
-        maka_ast::Expr::VariantCtor { fields, .. } => for (_, fe) in fields { lift_expr(fe, counter, out); },
-        maka_ast::Expr::ArrayLit { elems, .. } => for ee in elems { lift_expr(ee, counter, out); },
-        maka_ast::Expr::HeapAlloc { value, .. } => lift_expr(value, counter, out),
+        maka_ast::Expr::Cast { expr, .. } | maka_ast::Expr::CheckedCast { expr, .. } => lift_expr(expr, counter, out, in_unsafe),
+        maka_ast::Expr::Struct { fields, .. } => for (_, fe) in fields { lift_expr(fe, counter, out, in_unsafe); },
+        maka_ast::Expr::VariantCtor { fields, .. } => for (_, fe) in fields { lift_expr(fe, counter, out, in_unsafe); },
+        maka_ast::Expr::ArrayLit { elems, .. } => for ee in elems { lift_expr(ee, counter, out, in_unsafe); },
+        maka_ast::Expr::HeapAlloc { value, .. } => lift_expr(value, counter, out, in_unsafe),
         maka_ast::Expr::Match { scrutinee, arms, .. } => {
-            lift_expr(scrutinee, counter, out);
+            lift_expr(scrutinee, counter, out, in_unsafe);
             for a in arms {
-                if let Some(g) = &mut a.guard { lift_expr(g, counter, out); }
+                if let Some(g) = &mut a.guard { lift_expr(g, counter, out, in_unsafe); }
                 match &mut a.body {
-                    maka_ast::ArmBody::Expr(e) => lift_expr(e, counter, out),
-                    maka_ast::ArmBody::Block(b) => lift_block(b, counter, out),
+                    maka_ast::ArmBody::Expr(e) => lift_expr(e, counter, out, in_unsafe),
+                    maka_ast::ArmBody::Block(b) => lift_block(b, counter, out, in_unsafe),
                 }
             }
         }
         maka_ast::Expr::WallMod { expr, .. } => {
-            lift_expr(expr, counter, out);
+            lift_expr(expr, counter, out, in_unsafe);
         }
         maka_ast::Expr::Lambda { ret, params, captures, body, span } => {
             // Lift body's children first.
             match body {
-                maka_ast::LambdaBody::Block(b) => lift_block(b, counter, out),
-                maka_ast::LambdaBody::Expr(e) => lift_expr(e, counter, out),
+                maka_ast::LambdaBody::Block(b) => lift_block(b, counter, out, in_unsafe),
+                maka_ast::LambdaBody::Expr(e) => lift_expr(e, counter, out, in_unsafe),
             }
             // Capturing lambdas are handled at sema time (need types of captures).
             if !captures.is_empty() { return; }
             let id = *counter;
             *counter += 1;
-            let name = format!("__lambda_{}", id);
+            // Encode the lift-time unsafe context into the synthetic name so
+            // check_func can decide whether to apply the `*unit` ban or not.
+            let name = if in_unsafe {
+                format!("__lambda_unsafe_{}", id)
+            } else {
+                format!("__lambda_{}", id)
+            };
             let block = match body {
                 maka_ast::LambdaBody::Block(b) => b.clone(),
                 maka_ast::LambdaBody::Expr(e) => maka_ast::Block {
