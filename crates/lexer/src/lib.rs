@@ -81,8 +81,7 @@ pub enum TokKind {
     Else,
     While,
     Return,
-    As,        // bare `as`
-    AsCheck,   // `as?` (no whitespace between)
+    As,        // `as` — the cast operator (target's nullability decides whether the cast can fail)
     Unit,      // the keyword `unit`
     Type,      // the keyword `type` — used in `attr { type Name; }` and `has { type Name = T; }`
     ColonColon,// `::` — path separator for `T::Slot` assoc-type paths
@@ -283,17 +282,7 @@ impl<'a> Lexer<'a> {
                 "null" => TokKind::Null,
                 "unit" => TokKind::Unit,
                 "type" => TokKind::Type,
-                "as" => {
-                    // detect `as?` only if `?` follows immediately
-                    if self.peek(0) == b'?' {
-                        self.bump();
-                        return Ok(Token {
-                            kind: TokKind::AsCheck,
-                            span: self.span_from(start, sline, scol),
-                        });
-                    }
-                    TokKind::As
-                }
+                "as" => TokKind::As,
                 "_" => TokKind::Underscore,
                 _ => TokKind::Ident(text.to_string()),
             };
@@ -362,7 +351,7 @@ impl<'a> Lexer<'a> {
                     b'.' => TokKind::Dot,
                     b':' => TokKind::Colon,
                     b'?' => return Err(LexError {
-                        msg: "'?' is not part of the language (v1.2 removed it). Use *T / null / `as?` instead.".into(),
+                        msg: "'?' is not part of the language; nullability lives in the type (`*T`), not in a sigil. For a cast that can fail, write `expr as *Type` — the result is nullable and you get `null` on failure.".into(),
                         span: self.span_from(start, sline, scol),
                     }),
                     other => return Err(LexError {
@@ -556,9 +545,10 @@ mod tests {
         assert!(matches!(t[3], TokKind::Null));
     }
     #[test]
-    fn as_check() {
-        let t = lex("x as? T");
-        assert!(matches!(t[1], TokKind::AsCheck));
+    fn as_question_rejected() {
+        // `as?` no longer exists — `?` is rejected everywhere.  Fallible
+        // casts spell themselves as `expr as *T` (target nullability says it).
+        assert!(Lexer::new("x as? T").tokenize().is_err());
     }
     #[test]
     fn question_rejected() {

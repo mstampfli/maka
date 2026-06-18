@@ -61,8 +61,8 @@ Built-in function names (callable like normal functions, recognized by typeck):
 
 Arithmetic: `+ - * / %`. Bitwise: `& | ^ << >>`. Comparison: `== != < <= > >=`.
 Logical: `&& ||`. Assignment: `= += -= *= /= %=`. Unary: `- ! &` (and `&mut`).
-Postfix: `!` (pointer unwrap). Field: `.`. Index: `[]`. Cast: `as`, `as?`
-(checked). Range: `..` and `..=` (used in `for`). Address-of via `&` and `&mut`.
+Postfix: `!` (pointer unwrap). Field: `.`. Index: `[]`. Cast: `as`.
+Range: `..` and `..=` (used in `for`). Address-of via `&` and `&mut`.
 Type-level path separator: `::` (used only in type expressions, for
 associated-type paths like `T::Slot` — see §10.5).
 
@@ -83,7 +83,8 @@ associated-type paths like `T::Slot` — see §10.5).
 | `i8 i16 i32 i64` | `int8_t … int64_t` |
 | `u16 u32 u64` | `uint16_t … uint64_t` |
 | `isize` / `usize` | `intptr_t` / `uintptr_t` |
-| `f32` / `f64` | `double` (both - single precision is not yet distinct) |
+| `f32` | `float` (IEEE-754 binary32, 4 bytes) — distinct ABI from `float`/`f64` |
+| `f64` / `float` | `double` (IEEE-754 binary64, 8 bytes); `float` and `f64` are aliases |
 
 `int` and the sized integers (`i32`, `u8`, etc.) are **distinct types**.
 Implicit conversion between them is forbidden; use `as` to convert.
@@ -244,8 +245,13 @@ Standard infix and unary operators with conventional precedence. Maka-specific:
   this site - see §6.
 - `&x` / `&mut x` - borrow.
 - `alloc value` - heap allocation (see §2.3).
-- `expr as Type` - unchecked cast.
-- `expr as? Type` - checked cast (currently for `int → enum` and `int → char`).
+- `expr as Type` — cast.  Whether the cast can fail is read off the **target
+  type**, not a separate sigil.  When the target is a pointer (`*T`), the
+  result is nullable: failures produce `null`.  Currently the runtime-check
+  paths are `int → *Enum` (validates the tag) and `int → *char` (currently
+  no encoding validation).  When the target is a non-pointer value type,
+  the cast must succeed at the type level — `int → float`, `MyEnum → int`,
+  primitive ↔ primitive reinterprets, etc.
 - `transfer x` / `share x` - only at direct argument positions of `gate`
   function calls (see §7).
 - `match (expr) { arms }` - pattern matching, can appear as expression or

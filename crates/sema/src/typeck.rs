@@ -3377,13 +3377,32 @@ impl<'a> TypeChecker<'a> {
         HExpr { kind, ty: final_ret, span: sp }
     }
 
-    fn check_cast(&mut self, expr: &ast::Expr, ty: &ast::Type, checked: bool, sp: Span) -> HExpr {
+    fn check_cast(&mut self, expr: &ast::Expr, ty: &ast::Type, _checked: bool, sp: Span) -> HExpr {
         let h = self.check_expr(expr, None);
         let to = resolve_type(self.sym, ty, &mut self.errors);
 
         // `as dyn Trait` — special: produces a dyn fat pointer or `&dyn` / `&mut dyn`.
         if let HType::Dyn { traits } = &to {
-            return self.check_to_dyn(h, traits.clone(), checked, sp);
+            return self.check_to_dyn(h, traits.clone(), false, sp);
+        }
+
+        // §3 fallible cast: when the source needs runtime validation and the
+        // target is a pointer (`*T`), produce a nullable result — null on
+        // failure.  The pointer-ness of the target is the signal that the
+        // cast can fail; no separate `?` sigil.  Currently fires for
+        // `int → *Enum` and `int → *char`.
+        if let HType::Ptr { inner: to_inner, .. } = &to {
+            let from = &h.ty;
+            let needs_check = matches!(
+                (from, to_inner.as_ref()),
+                (HType::Int, HType::Enum(_)) | (HType::Int, HType::Char)
+            );
+            if needs_check {
+                let inner = (**to_inner).clone();
+                let kind = self.classify_cast(from, &inner, true, sp);
+                let res_ty = to.clone();
+                return HExpr { kind: HExprKind::CheckedCast { expr: Box::new(h), kind, to: inner }, ty: res_ty, span: sp };
+            }
         }
 
         // `own &T` (Heap) is never a valid cast target — synthesizing an
@@ -3402,14 +3421,8 @@ impl<'a> TypeChecker<'a> {
         if bool_int_forbidden {
             self.err("bool ↔ int conversion is not allowed; use if/else", sp);
         }
-        let kind = self.classify_cast(from, &to, checked, sp);
-        if checked {
-            // result is *T
-            let res_ty = HType::Ptr { mutable: true, inner: Box::new(to.clone()) };
-            HExpr { kind: HExprKind::CheckedCast { expr: Box::new(h), kind, to }, ty: res_ty, span: sp }
-        } else {
-            HExpr { kind: HExprKind::Cast { expr: Box::new(h), kind, to: to.clone() }, ty: to, span: sp }
-        }
+        let kind = self.classify_cast(from, &to, false, sp);
+        HExpr { kind: HExprKind::Cast { expr: Box::new(h), kind, to: to.clone() }, ty: to, span: sp }
     }
 
     /// Handle `expr as dyn Trait`. The source must be a reference or a value whose underlying

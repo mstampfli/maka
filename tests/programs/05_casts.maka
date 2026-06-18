@@ -1,4 +1,6 @@
-// §7 — Type casts: as, as?
+// §3 — Type casts: `as`.  The cast can fail iff the target is a pointer
+// (`*T`) — Maka's pointer-is-nullable convention is what carries the
+// "this might fail" signal.  No separate sigil.
 enum MovementState {
     Idle,
     Walking,
@@ -19,13 +21,13 @@ unit main() {
     log(code);                               // 1
 
     int tag_val = 2;
-    *MovementState parsed = tag_val as? MovementState;
+    *MovementState parsed = tag_val as *MovementState;
     if (parsed != null) {
         log(parsed! as int);                 // 2 (= Running)
     }
 
     int bad = 99;
-    *MovementState p2 = bad as? MovementState;
+    *MovementState p2 = bad as *MovementState;
     if (p2 == null) {
         log("not a movement state");
     }

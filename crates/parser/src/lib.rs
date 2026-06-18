@@ -1497,12 +1497,6 @@ impl Parser {
                             let ty = self.parse_type()?;
                             wrapped = Expr::Cast { expr: Box::new(wrapped), ty, span: s };
                         }
-                        TokKind::AsCheck => {
-                            let s = self.peek_span();
-                            self.bump();
-                            let ty = self.parse_type()?;
-                            wrapped = Expr::CheckedCast { expr: Box::new(wrapped), ty, span: s };
-                        }
                         _ => break,
                     }
                 }
@@ -1582,12 +1576,6 @@ impl Parser {
                     self.bump();
                     let ty = self.parse_type()?;
                     e = Expr::Cast { expr: Box::new(e), ty, span };
-                }
-                TokKind::AsCheck if allow_as => {
-                    let span = self.peek_span();
-                    self.bump();
-                    let ty = self.parse_type()?;
-                    e = Expr::CheckedCast { expr: Box::new(e), ty, span };
                 }
                 _ => break,
             }
