@@ -1,0 +1,15 @@
+// §10.5 bounded associated types: `<T: Cell<Repr = int>>` constrains the
+// bound to impls whose Repr is exactly `int`.  Other impls of `Cell`
+// (e.g. one with `type Repr = bool`) don't satisfy the bound and the
+// call is rejected at instantiation.
+attr Cell { type Repr; int read(&_ self); }
+int  has Cell { type Repr = int;  int read(&int self) { return self; } }
+bool has Cell { type Repr = bool; int read(&bool self) { return 0; } }
+
+// Only types whose Cell impl has Repr=int can satisfy this bound.
+int use_int<T: Cell<Repr = int>>(&T x) { return read(x); }
+
+unit main() {
+    int a = 7;
+    log(use_int(&a));   // 7 — int has Cell { Repr = int }, OK
+}

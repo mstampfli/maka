@@ -154,9 +154,12 @@ impl Type {
 
 /// One associated-type declaration inside an `attr` block: `type Name;`
 /// (signature-only) — the impl must provide a `type Name = ConcreteType;`.
+/// With an optional `default`, the impl may omit the definition and the
+/// default is used instead.
 #[derive(Debug, Clone)]
 pub struct AssocTypeDecl {
     pub name: String,
+    pub default: Option<Type>,
     pub span: Span,
 }
 
@@ -444,6 +447,11 @@ pub struct Param {
 pub struct WhereClause {
     pub trait_name: String,
     pub args: Vec<Type>,
+    /// Optional assoc-type bindings (§10.5 "bounds on associated types"):
+    /// `<T: Foo<Slot = i64>>` carries `[("Slot", i64)]` here.  Each pair
+    /// requires the impl's `type Name = ...` definition (after
+    /// substitution) to type_eq the bound's value at instantiation.
+    pub assoc_type_bindings: Vec<(String, Type)>,
     pub span: Span,
 }
 

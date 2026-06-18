@@ -1,0 +1,27 @@
+// §10.5 default associated types: when the attr declares
+// `type Slot = ConcreteT;`, the impl may omit `type Slot = ...;`
+// and inherit the default.
+attr Cell {
+    type Slot = int;            // default Slot
+    int read(&_ self);
+}
+
+// `int has Cell` omits `type Slot = ...` — inherits Slot = int.
+int has Cell {
+    int read(&int self) { return self + 1000; }
+}
+
+// `bool has Cell` explicitly overrides Slot.
+bool has Cell {
+    type Slot = int;
+    int read(&bool self) { if (self) { return 1; } else { return 0; } }
+}
+
+data Wrap<T: Cell> { T::Slot inner; }
+
+unit main() {
+    Wrap<int>  wi = { inner = 42 };
+    Wrap<bool> wb = { inner = 99 };
+    log(wi.inner);     // 42
+    log(wb.inner);     // 99
+}

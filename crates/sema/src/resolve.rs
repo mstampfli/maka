@@ -73,7 +73,7 @@ pub fn resolve_assoc_type(
             if let Some(a) = attr_hint { if h.attr_name != a { return false; } }
             // Must declare a segment of this name in the matching attr.
             let attr = sym.attr_by_name(&h.attr_name);
-            let declares = attr.map(|a| a.assoc_type_decls.iter().any(|(n, _)| n == segment)).unwrap_or(false);
+            let declares = attr.map(|a| a.assoc_type_decls.iter().any(|(n, _, _)| n == segment)).unwrap_or(false);
             if !declares { return false; }
             // Receiver pattern must unify with `on`.
             receiver_unify(&h.receiver_pattern, on, &h.receiver_tyvars).is_some()
@@ -452,11 +452,14 @@ impl SymTab {
                         errors.push(SemaError { msg: format!("duplicate data type `{}`", d.name), span: d.span });
                     }
                     // Resolve the where clauses against the data decl's own type params.
-                    let where_bounds: Vec<(String, Vec<HType>)> = d.where_clauses.iter().map(|w| {
+                    let where_bounds: Vec<(String, Vec<HType>, Vec<(String, HType)>)> = d.where_clauses.iter().map(|w| {
                         let args: Vec<HType> = w.args.iter()
                             .map(|a| resolve_type_in(&sym, a, &d.type_params, &mut errors))
                             .collect();
-                        (w.trait_name.clone(), args)
+                        let bindings: Vec<(String, HType)> = w.assoc_type_bindings.iter()
+                            .map(|(n, t)| (n.clone(), resolve_type_in(&sym, t, &d.type_params, &mut errors)))
+                            .collect();
+                        (w.trait_name.clone(), args, bindings)
                     }).collect();
                     sym.structs.push(StructInfo {
                         name: d.name.clone(),
@@ -690,11 +693,14 @@ impl SymTab {
                     }
                     check_type_visibility(&sym, &ret, &item_module, &item_imports, f.span, &mut errors);
                     // Resolve where-clause bounds into `(trait_name, type_args)`.
-                    let where_bounds: Vec<(String, Vec<HType>)> = f.where_clauses.iter().map(|w| {
+                    let where_bounds: Vec<(String, Vec<HType>, Vec<(String, HType)>)> = f.where_clauses.iter().map(|w| {
                         let args: Vec<HType> = w.args.iter()
                             .map(|a| resolve_type_in(&sym, a, &f.type_params, &mut errors))
                             .collect();
-                        (w.trait_name.clone(), args)
+                        let bindings: Vec<(String, HType)> = w.assoc_type_bindings.iter()
+                            .map(|(n, t)| (n.clone(), resolve_type_in(&sym, t, &f.type_params, &mut errors)))
+                            .collect();
+                        (w.trait_name.clone(), args, bindings)
                     }).collect();
                     let param_names: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
                     let fid = FuncId(sym.sigs.len() as u32);
@@ -855,8 +861,11 @@ impl SymTab {
                             });
                         }
                     }
-                    let assoc_type_decls: Vec<(String, _)> = a.assoc_types.iter()
-                        .map(|d| (d.name.clone(), d.span))
+                    let assoc_type_decls: Vec<(String, Option<HType>, _)> = a.assoc_types.iter()
+                        .map(|d| {
+                            let default = d.default.as_ref().map(|t| resolve_type_in(&sym, t, &a.type_params, &mut errors));
+                            (d.name.clone(), default, d.span)
+                        })
                         .collect();
                     sym.attrs.push(AttrInfo {
                         name: a.name.clone(),
@@ -938,9 +947,9 @@ impl SymTab {
                         assoc_type_defs.push((d.name.clone(), v));
                     }
                     // Validate: every declared assoc-type in the attr must be
-                    // provided by the impl; no extras allowed.
+                    // provided by the impl OR have a default; no extras allowed.
                     let decl_names: std::collections::HashSet<String> =
-                        attr_info.assoc_type_decls.iter().map(|(n, _)| n.clone()).collect();
+                        attr_info.assoc_type_decls.iter().map(|(n, _, _)| n.clone()).collect();
                     for (n, _) in &assoc_type_defs {
                         if !decl_names.contains(n) {
                             errors.push(SemaError {
@@ -949,12 +958,17 @@ impl SymTab {
                             });
                         }
                     }
-                    for (decl_name, decl_sp) in &attr_info.assoc_type_decls {
+                    for (decl_name, default_ty, decl_sp) in &attr_info.assoc_type_decls {
                         if !def_seen.contains(decl_name) {
-                            errors.push(SemaError {
-                                msg: format!("`{} has {}` is missing `type {} = ...;` required by attr `{}`", h.type_name, h.attr_name, decl_name, h.attr_name),
-                                span: *decl_sp,
-                            });
+                            // No def from impl — inherit default if attr has one.
+                            if let Some(d) = default_ty {
+                                assoc_type_defs.push((decl_name.clone(), d.clone()));
+                            } else {
+                                errors.push(SemaError {
+                                    msg: format!("`{} has {}` is missing `type {} = ...;` required by attr `{}`", h.type_name, h.attr_name, decl_name, h.attr_name),
+                                    span: *decl_sp,
+                                });
+                            }
                         }
                     }
                     // §10.4 coherence: reject overlap with any prior impl of
@@ -1127,7 +1141,7 @@ impl SymTab {
             let tspan = tinfo.span;
             if template_bounds.is_empty() { continue; }
             let env: std::collections::HashMap<String, HType> = tinfo.type_params.iter().cloned().zip(req_args.iter().cloned()).collect();
-            for (trait_name, type_args) in &template_bounds {
+            for (trait_name, type_args, _bindings) in &template_bounds {
                 for a in type_args {
                     let concrete = a.subst(&env);
                     let satisfied = underlying_struct_key(&sym, &concrete).as_ref()

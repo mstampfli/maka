@@ -371,7 +371,7 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                 // impls by visibility: a non-`pub` impl is only usable in its own
                 // module; a `pub` impl is only usable in modules that opted in via
                 // `use Mod.Type.Attr;`.
-                for (trait_name, type_args) in &template_sig.where_bounds {
+                for (trait_name, type_args, assoc_bindings) in &template_sig.where_bounds {
                     // Multi-arg bound semantics: type_args[0] is the receiver type
                     // (T in `where T has Attr<U>`), type_args[1..] are the attr's
                     // type-args.  Match against a HasImpl whose type_key equals the
@@ -380,15 +380,40 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                     let recv_concrete = type_args[0].subst(&env);
                     let attr_args_concrete: Vec<HType> = type_args[1..].iter().map(|a| a.subst(&env)).collect();
                     let key = resolve::underlying_struct_key(&sym, &recv_concrete);
+                    // §10.5 bounded assoc types: if the bound has any
+                    // `Slot = ConcreteT` bindings, the picked impl's
+                    // `type Slot = R` (after substitution via receiver
+                    // unification) must type_eq ConcreteT.
+                    let bindings_concrete: Vec<(String, hir::HType)> = assoc_bindings.iter()
+                        .map(|(n, t)| (n.clone(), t.subst(&env)))
+                        .collect();
                     let satisfied = match key.as_ref() {
                         None => false,
                         Some(k) => sym.has_impls.iter().any(|h| {
-                            h.attr_name == *trait_name
-                                && h.type_key == *k
-                                && h.attr_args.len() == attr_args_concrete.len()
-                                && h.attr_args.iter().zip(attr_args_concrete.iter())
-                                    .all(|(a, b)| typeck::type_eq(a, b))
-                                && has_impl_visible(h, &req.caller_module, &req.caller_has_imports)
+                            if h.attr_name != *trait_name { return false; }
+                            if h.type_key != *k { return false; }
+                            if h.attr_args.len() != attr_args_concrete.len() { return false; }
+                            if !h.attr_args.iter().zip(attr_args_concrete.iter())
+                                .all(|(a, b)| typeck::type_eq(a, b)) { return false; }
+                            if !has_impl_visible(h, &req.caller_module, &req.caller_has_imports) { return false; }
+                            // Validate assoc-type bindings: substitute the impl's
+                            // type vars (via receiver_unify against recv_concrete),
+                            // then compare each binding's value.
+                            if !bindings_concrete.is_empty() {
+                                let env = match hir::receiver_unify(&h.receiver_pattern, &recv_concrete, &h.receiver_tyvars) {
+                                    Some(e) => e,
+                                    None => return false,
+                                };
+                                for (bname, bvalue) in &bindings_concrete {
+                                    let impl_def = h.assoc_type_defs.iter().find(|(n, _)| n == bname);
+                                    let resolved = match impl_def {
+                                        Some((_, raw)) => raw.subst(&env),
+                                        None => return false,
+                                    };
+                                    if !typeck::type_eq(&resolved, bvalue) { return false; }
+                                }
+                            }
+                            true
                         }),
                     };
                     if !satisfied {

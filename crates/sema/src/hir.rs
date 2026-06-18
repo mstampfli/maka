@@ -339,7 +339,11 @@ pub struct StructInfo {
     /// `where` clauses on the data decl — enforced at concrete instantiation time
     /// just like function where-bounds.  Each entry is `(attr_name, type_args)` and
     /// the position-0 substituted type must have a visible `has` impl.
-    pub where_bounds: Vec<(String, Vec<HType>)>,
+    /// Where-bound: (trait name, args, optional assoc-type bindings).
+    /// `assoc_bindings` carries `<T: Foo<Slot = i64>>` constraints; at each
+    /// instantiation, the picked impl's `type Slot = R` must type_eq the
+    /// bound's value (after substitution).
+    pub where_bounds: Vec<(String, Vec<HType>, Vec<(String, HType)>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -405,7 +409,11 @@ pub struct FuncSig {
     /// Resolved `where` clauses: `(trait_name, type_args)`.  Type args are HTypes that
     /// may contain `TyVar`s (substituted at instantiation time).  Each clause asserts
     /// that the concrete substitute of the first TyVar must implement the named trait.
-    pub where_bounds: Vec<(String, Vec<HType>)>,
+    /// Where-bound: (trait name, args, optional assoc-type bindings).
+    /// `assoc_bindings` carries `<T: Foo<Slot = i64>>` constraints; at each
+    /// instantiation, the picked impl's `type Slot = R` must type_eq the
+    /// bound's value (after substitution).
+    pub where_bounds: Vec<(String, Vec<HType>, Vec<(String, HType)>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -625,10 +633,11 @@ pub struct AttrInfo {
     pub module_path: Vec<String>,
     pub span: Span,
     pub methods: Vec<AttrMethod>,
-    /// Associated-type declarations: `type Slot;` lines (§10.5).  Each entry
-    /// is just the name + span; impls must provide a `type Name = ...;` for
-    /// every entry.
-    pub assoc_type_decls: Vec<(String, Span)>,
+    /// Associated-type declarations: `type Slot;` (no default) or
+    /// `type Slot = DefaultT;` (with default) lines (§10.5).  Tuples are
+    /// (name, optional default HType, span).  Impls without a definition
+    /// inherit the default if present, else it's a missing-impl error.
+    pub assoc_type_decls: Vec<(String, Option<HType>, Span)>,
 }
 
 /// One method signature declared inside an `attr` block.  Param/ret types are

@@ -935,14 +935,13 @@ etc. are expanded to distinct C structs.
 
 ### 10.4 Generic `has` receivers
 
-> **Stabilized 2026-06-18** (commit `095ea31`).  Parametric `has` receivers,
-> overlap-rejection coherence checking, and the associated-type machinery
-> described in §10.4–10.7 are implemented end-to-end and exercised by the
-> test suite (`169_has_primitive`, `170_assoc_type_basic`,
-> `171_parametric_has`, `172_worked_example_atomic`, `neg_overlap_impl`).
-> Default associated types and bounds on associated types
-> (`<T: Foo<Slot = i64>>`) remain "planned but not in MVP" — flagged
-> inline below.
+> **Stabilized 2026-06-18.**  §10.4–10.7 — parametric `has` receivers,
+> overlap-rejection coherence, associated types with the placeholder data
+> pattern, **default associated types**, and **bounds on associated
+> types** (`<T: Foo<Slot = i64>>`) — are all implemented end-to-end and
+> exercised by the test suite (`169_has_primitive`, `170_assoc_type_basic`,
+> `171_parametric_has`, `172_worked_example_atomic`,
+> `173_default_assoc_type`, `174_bounded_assoc_type`, `neg_overlap_impl`).
 
 The receiver of a `has` impl can be **parametric**, not only a concrete named
 type.  Four receiver kinds are accepted:
@@ -1206,16 +1205,31 @@ A future revision may add `dyn Attr<Slot = ConcreteType>` ("dyn with
 fixed associated types") in the manner of Rust's object-safety rules,
 but it is not in v1.
 
-**Default associated types** (optional, planned but not in MVP):
+**Default associated types** (stabilized 2026-06-18):
 ```maka
 attr Stored {
-    type Slot = unit;                     // default if the impl omits it
+    type Slot = int;                      // default — impls may omit `type Slot = ...;`
+                                          // and inherit this value
 }
+int has Stored { /* no type Slot — inherits int from the default */ }
+```
+See `173_default_assoc_type.maka` for the worked example.
+
+**Bounds on associated types** (`<T: Stored<Slot = i64>>`, stabilized
+2026-06-18): restrict the bound to those impls whose `Slot` resolves
+exactly to the named type.  Bindings live inside the bound's angle
+brackets, mixed with positional attr-args, in any order:
+
+```maka
+int  use_int<T: Stored<Slot = int>>(&T x)         { return read(x); }
+int  some_fn<T: Convert<int, Slot = string>>(...) { /* ... */ }
 ```
 
-**Bounds on associated types** (`<T: Stored<Slot = i64>>`) are planned
-but not in MVP.  When added, they restrict the bound to those impls
-whose `Slot` is exactly the named type.
+At each instantiation site, sema looks up the impl whose receiver
+pattern unifies with `T`, reads its `type Slot = R`, substitutes the
+impl's type variables via the unification env, and rejects the
+instantiation if `R` doesn't `type_eq` the bound's named value.  See
+`174_bounded_assoc_type.maka` for the worked example.
 
 **Coherence with assoc types.** When two parametric `has` impls overlap
 in the receiver pattern, they conflict regardless of which assoc types

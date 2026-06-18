@@ -37,7 +37,7 @@ pub struct TypeChecker<'a> {
     /// calls whose receiver type is a TyVar that has a multi-arg attribute bound:
     /// `demo<T: Convert<int>>(&T x) { x.to(); }` — the bound says "pick the
     /// `Convert<int>` impl of `to`", which narrows the candidate set.
-    cur_where_bounds: Vec<(String, Vec<HType>)>,
+    cur_where_bounds: Vec<(String, Vec<HType>, Vec<(String, HType)>)>,
     /// Are we inside an `unsafe` block? (Currently unused except as a flag.)
     in_unsafe: u32,
     /// If we're checking a function in a `logic` block, this is the logic's name.
@@ -3207,7 +3207,7 @@ impl<'a> TypeChecker<'a> {
         if tied.len() > 1 && !probed.is_empty() {
             let recv_key = receiver_key(&probed[0].ty, self.sym);
             let bound_args_by_attr: Vec<(String, Vec<HType>)> = self.cur_where_bounds.iter()
-                .filter_map(|(trait_name, args)| {
+                .filter_map(|(trait_name, args, _bindings)| {
                     if args.is_empty() { return None; }
                     let bound_recv = args[0].subst(&self.subst);
                     let bound_recv_key = receiver_key(&bound_recv, self.sym);

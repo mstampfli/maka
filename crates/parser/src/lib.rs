@@ -375,13 +375,19 @@ impl Parser {
         let mut funcs = Vec::new();
         let mut assoc_types: Vec<AssocTypeDecl> = Vec::new();
         while !self.at(&TokKind::RBrace) {
-            // `type Name;` — associated-type declaration (§10.5).
+            // `type Name;` or `type Name = DefaultType;` — associated-type
+            // declaration (§10.5).  With a default, the impl may omit the
+            // definition and the default is used; without one, the impl
+            // MUST provide `type Name = ConcreteType;`.
             if self.at(&TokKind::Type) {
                 let sp = self.peek_span();
                 self.bump();
                 let (n, _) = self.expect_ident("associated-type name")?;
+                let default = if self.eat(&TokKind::Eq) {
+                    Some(self.parse_type()?)
+                } else { None };
                 self.expect(&TokKind::Semicolon, "`;`")?;
-                assoc_types.push(AssocTypeDecl { name: n, span: sp });
+                assoc_types.push(AssocTypeDecl { name: n, default, span: sp });
             } else {
                 funcs.push(self.parse_attr_method()?);
             }
@@ -519,21 +525,31 @@ impl Parser {
             let start = self.peek_span();
             let (n, _) = self.expect_ident("type parameter")?;
             // `<T: Attr>` shorthand → equivalent to `where T has Attr`.
+            // Extended: `<T: Attr<Slot = i64>>` adds an assoc-type binding.
             if self.eat(&TokKind::Colon) {
                 let (trait_name, _) = self.expect_ident("attribute name")?;
-                // Optional generic args on the attribute (e.g. `Add<R>`).
                 let mut args: Vec<Type> = Vec::new();
+                let mut bindings: Vec<(String, Type)> = Vec::new();
                 if self.eat(&TokKind::Lt) {
                     loop {
-                        args.push(self.parse_type()?);
+                        // Bound entries can be either `Type` (positional attr-arg)
+                        // or `Name = Type` (assoc-type binding).  Distinguish by
+                        // peeking for `Ident =`.
+                        if matches!((self.peek().clone(), self.peek_at(1).clone()), (TokKind::Ident(_), TokKind::Eq)) {
+                            let (bn, _) = self.expect_ident("assoc-type name")?;
+                            self.expect(&TokKind::Eq, "`=`")?;
+                            let bv = self.parse_type()?;
+                            bindings.push((bn, bv));
+                        } else {
+                            args.push(self.parse_type()?);
+                        }
                         if !self.eat(&TokKind::Comma) { break; }
                     }
                     self.expect(&TokKind::Gt, "`>`")?;
                 }
-                // The first arg of the WhereClause is the type parameter itself.
                 let mut all_args = vec![Type::Named(n.clone(), start)];
                 all_args.extend(args);
-                bounds.push(WhereClause { trait_name, args: all_args, span: start });
+                bounds.push(WhereClause { trait_name, args: all_args, assoc_type_bindings: bindings, span: start });
             }
             out.push(n);
             if !self.eat(&TokKind::Comma) { break; }
@@ -556,25 +572,41 @@ impl Parser {
                 self.expect(&TokKind::Has, "`has`")?;
                 let (attr_name, _) = self.expect_ident("attribute name")?;
                 let mut args: Vec<Type> = vec![Type::Named(type_var, ty_span)];
+                let mut bindings: Vec<(String, Type)> = Vec::new();
                 if self.eat(&TokKind::Lt) {
                     loop {
-                        args.push(self.parse_type()?);
+                        if matches!((self.peek().clone(), self.peek_at(1).clone()), (TokKind::Ident(_), TokKind::Eq)) {
+                            let (bn, _) = self.expect_ident("assoc-type name")?;
+                            self.expect(&TokKind::Eq, "`=`")?;
+                            let bv = self.parse_type()?;
+                            bindings.push((bn, bv));
+                        } else {
+                            args.push(self.parse_type()?);
+                        }
                         if !self.eat(&TokKind::Comma) { break; }
                     }
                     self.expect(&TokKind::Gt, "`>`")?;
                 }
-                out.push(WhereClause { trait_name: attr_name, args, span: start });
+                out.push(WhereClause { trait_name: attr_name, args, assoc_type_bindings: bindings, span: start });
             } else {
                 let (trait_name, _) = self.expect_ident("trait name")?;
                 let mut args = Vec::new();
+                let mut bindings: Vec<(String, Type)> = Vec::new();
                 if self.eat(&TokKind::Lt) {
                     loop {
-                        args.push(self.parse_type()?);
+                        if matches!((self.peek().clone(), self.peek_at(1).clone()), (TokKind::Ident(_), TokKind::Eq)) {
+                            let (bn, _) = self.expect_ident("assoc-type name")?;
+                            self.expect(&TokKind::Eq, "`=`")?;
+                            let bv = self.parse_type()?;
+                            bindings.push((bn, bv));
+                        } else {
+                            args.push(self.parse_type()?);
+                        }
                         if !self.eat(&TokKind::Comma) { break; }
                     }
                     self.expect(&TokKind::Gt, "`>`")?;
                 }
-                out.push(WhereClause { trait_name, args, span: start });
+                out.push(WhereClause { trait_name, args, assoc_type_bindings: bindings, span: start });
             }
             if !self.eat(&TokKind::Comma) { break; }
         }
