@@ -49,6 +49,14 @@ pub enum HType {
     FnPtr { ret: Box<HType>, params: Vec<HType> },
     /// Unresolved type variable from a generic decl (used during sema's pre-monomorphization phase).
     TyVar(String),
+    /// `T::Slot` — an unresolved associated-type path.  `on` is the receiver
+    /// type (typically a TyVar for `T::Slot` inside a generic body; resolved
+    /// to a concrete type at monomorphization).  `attr_hint` is `None` unless
+    /// the source explicitly qualified the path (reserved for future spec
+    /// revisions).  Substitution resolves this to a concrete type at each
+    /// instantiation by looking up the impl whose receiver pattern unifies
+    /// with `on`.
+    AssocType { on: Box<HType>, segment: String, attr_hint: Option<String> },
     /// `Rust<T>` — an opaque handle to a Rust-side heap value.  Layout / ABI
     /// identical to `OwnPtr { mutable: true, inner: Unit }`; the `String`
     /// carries the Rust type name so Maka can route per-call-site
@@ -73,6 +81,11 @@ impl HType {
             HType::Array { len, elem } => HType::Array { len: *len, elem: Box::new(elem.subst(env)) },
             HType::Slice { mutable, elem } => HType::Slice { mutable: *mutable, elem: Box::new(elem.subst(env)) },
             HType::Vec { elem } => HType::Vec { elem: Box::new(elem.subst(env)) },
+            HType::AssocType { on, segment, attr_hint } => HType::AssocType {
+                on: Box::new(on.subst(env)),
+                segment: segment.clone(),
+                attr_hint: attr_hint.clone(),
+            },
             _ => self.clone(),
         }
     }
@@ -105,6 +118,7 @@ impl HType {
                 s
             }
             HType::TyVar(n) => format!("'{}", n),
+            HType::AssocType { on, segment, .. } => format!("AT{}_{}", on.key(), segment),
             // Key is shared with `own *mut unit` so monomorphisation, dedup, and
             // type-equality treat the two as the same — the label is purely
             // out-of-band metadata for probe routing.
@@ -138,6 +152,141 @@ impl HType {
             _ => None,
         }
     }
+}
+
+/// Pattern-vs-pattern unification.  Both sides have their own type
+/// variables (listed in `lhs_vars` / `rhs_vars`).  Returns `Some(())` iff
+/// some concrete type unifies with both patterns simultaneously — i.e. the
+/// patterns OVERLAP per §10.4's coherence rule.
+pub fn patterns_overlap(
+    lhs: &HType,
+    lhs_vars: &[String],
+    rhs: &HType,
+    rhs_vars: &[String],
+) -> bool {
+    fn go(
+        lhs: &HType,
+        lvars: &[String],
+        rhs: &HType,
+        rvars: &[String],
+        lenv: &mut std::collections::HashMap<String, HType>,
+        renv: &mut std::collections::HashMap<String, HType>,
+    ) -> bool {
+        // A type variable on either side: bind to the other side.  We track
+        // bindings to detect conflicting requirements (`Pair<A, A>` vs
+        // `Pair<int, bool>` should NOT overlap because the var A would have
+        // to be both int and bool).
+        if let HType::TyVar(n) = lhs {
+            if lvars.iter().any(|v| v == n) {
+                if let Some(prev) = lenv.get(n) {
+                    return prev == rhs;
+                }
+                lenv.insert(n.clone(), rhs.clone());
+                return true;
+            }
+        }
+        if let HType::TyVar(n) = rhs {
+            if rvars.iter().any(|v| v == n) {
+                if let Some(prev) = renv.get(n) {
+                    return prev == lhs;
+                }
+                renv.insert(n.clone(), lhs.clone());
+                return true;
+            }
+        }
+        match (lhs, rhs) {
+            (HType::Int, HType::Int) | (HType::Bool, HType::Bool)
+            | (HType::Char, HType::Char) | (HType::Float, HType::Float)
+            | (HType::Str, HType::Str) | (HType::Unit, HType::Unit) => true,
+            (HType::SizedInt { signed: ls, bits: lb }, HType::SizedInt { signed: rs, bits: rb })
+                => ls == rs && lb == rb,
+            (HType::Struct(li), HType::Struct(ri)) => li == ri,
+            (HType::Enum(li), HType::Enum(ri)) => li == ri,
+            (HType::Ref { mutable: lm, inner: li }, HType::Ref { mutable: rm, inner: ri })
+                if lm == rm => go(li, lvars, ri, rvars, lenv, renv),
+            (HType::Ptr { mutable: lm, inner: li }, HType::Ptr { mutable: rm, inner: ri })
+                if lm == rm => go(li, lvars, ri, rvars, lenv, renv),
+            (HType::RawPtr { mutable: lm, inner: li }, HType::RawPtr { mutable: rm, inner: ri })
+                if lm == rm => go(li, lvars, ri, rvars, lenv, renv),
+            (HType::OwnPtr { mutable: lm, inner: li }, HType::OwnPtr { mutable: rm, inner: ri })
+                if lm == rm => go(li, lvars, ri, rvars, lenv, renv),
+            (HType::Heap { inner: li }, HType::Heap { inner: ri }) => go(li, lvars, ri, rvars, lenv, renv),
+            (HType::Slice { mutable: lm, elem: le }, HType::Slice { mutable: rm, elem: re })
+                if lm == rm => go(le, lvars, re, rvars, lenv, renv),
+            (HType::Array { len: ll, elem: le }, HType::Array { len: rl, elem: re })
+                if ll == rl => go(le, lvars, re, rvars, lenv, renv),
+            (HType::Vec { elem: le }, HType::Vec { elem: re }) => go(le, lvars, re, rvars, lenv, renv),
+            _ => false,
+        }
+    }
+    let mut lenv = std::collections::HashMap::new();
+    let mut renv = std::collections::HashMap::new();
+    go(lhs, lhs_vars, rhs, rhs_vars, &mut lenv, &mut renv)
+}
+
+/// First-order structural unification of a `has`-receiver PATTERN against a
+/// concrete (or partially concrete) HType.  Pattern type variables (listed in
+/// `tyvars`) bind to whatever they meet.  Concrete head constructors must
+/// match exactly — no implicit subtyping.  Returns the unification env on
+/// success.
+///
+/// Used at:
+///   (a) generic call sites — pat = impl's receiver_pattern, actual = the
+///       concrete instantiation, to pick the matching impl.
+///   (b) associated-type resolution — same.
+pub fn receiver_unify(
+    pat: &HType,
+    actual: &HType,
+    tyvars: &[String],
+) -> Option<std::collections::HashMap<String, HType>> {
+    let mut env: std::collections::HashMap<String, HType> = std::collections::HashMap::new();
+    fn go(
+        pat: &HType,
+        actual: &HType,
+        tyvars: &[String],
+        env: &mut std::collections::HashMap<String, HType>,
+    ) -> bool {
+        if let HType::TyVar(n) = pat {
+            if tyvars.iter().any(|v| v == n) {
+                if let Some(prev) = env.get(n) {
+                    return prev == actual;
+                }
+                env.insert(n.clone(), actual.clone());
+                return true;
+            }
+        }
+        match (pat, actual) {
+            (HType::Int, HType::Int)
+            | (HType::Bool, HType::Bool)
+            | (HType::Char, HType::Char)
+            | (HType::Float, HType::Float)
+            | (HType::Str, HType::Str)
+            | (HType::Unit, HType::Unit) => true,
+            (HType::SizedInt { signed: ps, bits: pb }, HType::SizedInt { signed: us, bits: ub })
+                => ps == us && pb == ub,
+            (HType::Struct(pi), HType::Struct(ui)) => pi == ui,
+            (HType::Enum(pi), HType::Enum(ui)) => pi == ui,
+            (HType::Ref { mutable: pm, inner: pi }, HType::Ref { mutable: um, inner: ui })
+                if pm == um => go(pi, ui, tyvars, env),
+            (HType::Ptr { mutable: pm, inner: pi }, HType::Ptr { mutable: um, inner: ui })
+                if pm == um => go(pi, ui, tyvars, env),
+            (HType::RawPtr { mutable: pm, inner: pi }, HType::RawPtr { mutable: um, inner: ui })
+                if pm == um => go(pi, ui, tyvars, env),
+            (HType::OwnPtr { mutable: pm, inner: pi }, HType::OwnPtr { mutable: um, inner: ui })
+                if pm == um => go(pi, ui, tyvars, env),
+            (HType::Heap { inner: pi }, HType::Heap { inner: ui }) => go(pi, ui, tyvars, env),
+            (HType::Slice { mutable: pm, elem: pe }, HType::Slice { mutable: um, elem: ue })
+                if pm == um => go(pe, ue, tyvars, env),
+            (HType::Array { len: pl, elem: pe }, HType::Array { len: ul, elem: ue })
+                if pl == ul => go(pe, ue, tyvars, env),
+            (HType::Vec { elem: pe }, HType::Vec { elem: ue }) => go(pe, ue, tyvars, env),
+            // Note: Generic structs are already monomorphized to Struct(id) by
+            // the time receiver_unify is called (resolver turned `Box<int>`
+            // into a distinct StructId).  So no Generic-vs-Generic case here.
+            _ => false,
+        }
+    }
+    if go(pat, actual, tyvars, &mut env) { Some(env) } else { None }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -476,6 +625,10 @@ pub struct AttrInfo {
     pub module_path: Vec<String>,
     pub span: Span,
     pub methods: Vec<AttrMethod>,
+    /// Associated-type declarations: `type Slot;` lines (§10.5).  Each entry
+    /// is just the name + span; impls must provide a `type Name = ...;` for
+    /// every entry.
+    pub assoc_type_decls: Vec<(String, Span)>,
 }
 
 /// One method signature declared inside an `attr` block.  Param/ret types are
@@ -508,6 +661,20 @@ pub struct HasImpl {
     /// pass to find the bodies for `has`-block methods (including defaults
     /// synthesized from the `attr`).
     pub func_ids: Vec<FuncId>,
+    /// Associated-type definitions: `type Slot = ConcreteType;` resolved to
+    /// HType at registration.  Free type variables from the impl's receiver
+    /// pattern (e.g. `T` in `*T has Foo { type Slot = *T; }`) appear here as
+    /// `HType::TyVar(name)` and are substituted at the call site using the
+    /// unification env from receiver matching.  Order matches `AttrInfo.assoc_type_decls`.
+    pub assoc_type_defs: Vec<(String, HType)>,
+    /// Type variables introduced by the receiver pattern (e.g. `["T"]` for
+    /// `*T has Foo`).  Used by `assoc_type_defs` substitution and by the
+    /// receiver-unification machinery in `typeck`.
+    pub receiver_tyvars: Vec<String>,
+    /// Receiver pattern resolved to HType (with TyVars at parametric positions).
+    /// For concrete receivers this is e.g. `HType::Struct(id)`; for `*T` it's
+    /// `HType::Ptr { mutable: true, inner: TyVar("T") }`; for `int` it's `HType::Int`.
+    pub receiver_pattern: HType,
 }
 
 #[derive(Debug, Clone, Default)]

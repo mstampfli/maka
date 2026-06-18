@@ -15,6 +15,11 @@ pub enum Mutness {
 pub enum Type {
     /// Named type (`int`, `float`, `bool`, `char`, `unit`, `MyStruct`, ...)
     Named(String, Span),
+    /// `T::Slot` — associated-type path.  `base` is a Type (typically a
+    /// Named type variable referencing the enclosing generic parameter or
+    /// concrete receiver), `segment` is the associated-type name declared
+    /// by an attr the base is bound by.  Resolved at monomorphization.
+    AssocPath { base: Box<Type>, segment: String, span: Span },
     /// `&Mut? T`
     Ref { mutness: Mutness, inner: Box<Type>, span: Span },
     /// `*Mut? T`
@@ -52,6 +57,11 @@ impl Type {
         match self {
             Type::Named(n, sp) if n == "_" => Type::Named(concrete.to_string(), *sp),
             Type::Named(_, _) | Type::Unit(_) => self.clone(),
+            Type::AssocPath { base, segment, span } => Type::AssocPath {
+                base: Box::new(base.subst_placeholder(concrete)),
+                segment: segment.clone(),
+                span: *span,
+            },
             Type::Ref { mutness, inner, span } => Type::Ref {
                 mutness: *mutness, inner: Box::new(inner.subst_placeholder(concrete)), span: *span,
             },
@@ -89,12 +99,80 @@ impl Type {
             },
         }
     }
+
+    /// Type-tree-aware placeholder substitution: replace `_` (and `Self`) with
+    /// the receiver's full Type tree.  Used by parametric `has` impls where the
+    /// receiver pattern is e.g. `*T` and method signatures spelled with `&_ self`
+    /// must expand to `&*T self`.
+    pub fn subst_placeholder_ty(&self, recv: &Type) -> Type {
+        match self {
+            Type::Named(n, _) if n == "_" => recv.clone(),
+            Type::Named(_, _) | Type::Unit(_) => self.clone(),
+            Type::AssocPath { base, segment, span } => Type::AssocPath {
+                base: Box::new(base.subst_placeholder_ty(recv)),
+                segment: segment.clone(),
+                span: *span,
+            },
+            Type::Ref { mutness, inner, span } => Type::Ref {
+                mutness: *mutness, inner: Box::new(inner.subst_placeholder_ty(recv)), span: *span,
+            },
+            Type::Ptr { mutness, inner, span } => Type::Ptr {
+                mutness: *mutness, inner: Box::new(inner.subst_placeholder_ty(recv)), span: *span,
+            },
+            Type::RawPtr { mutness, inner, span } => Type::RawPtr {
+                mutness: *mutness, inner: Box::new(inner.subst_placeholder_ty(recv)), span: *span,
+            },
+            Type::OwnPtr { mutness, inner, span } => Type::OwnPtr {
+                mutness: *mutness, inner: Box::new(inner.subst_placeholder_ty(recv)), span: *span,
+            },
+            Type::Heap { inner, span } => Type::Heap {
+                inner: Box::new(inner.subst_placeholder_ty(recv)), span: *span,
+            },
+            Type::Array { len, elem, span } => Type::Array {
+                len: *len, elem: Box::new(elem.subst_placeholder_ty(recv)), span: *span,
+            },
+            Type::Slice { mutness, elem, span } => Type::Slice {
+                mutness: *mutness, elem: Box::new(elem.subst_placeholder_ty(recv)), span: *span,
+            },
+            Type::Vec { elem, span } => Type::Vec {
+                elem: Box::new(elem.subst_placeholder_ty(recv)), span: *span,
+            },
+            Type::Dyn { traits, span } => Type::Dyn { traits: traits.clone(), span: *span },
+            Type::Generic { name, args, span } => Type::Generic {
+                name: name.clone(),
+                args: args.iter().map(|a| a.subst_placeholder_ty(recv)).collect(),
+                span: *span,
+            },
+            Type::FnPtr { ret, params, span } => Type::FnPtr {
+                ret: Box::new(ret.subst_placeholder_ty(recv)),
+                params: params.iter().map(|p| p.subst_placeholder_ty(recv)).collect(),
+                span: *span,
+            },
+        }
+    }
+}
+
+/// One associated-type declaration inside an `attr` block: `type Name;`
+/// (signature-only) — the impl must provide a `type Name = ConcreteType;`.
+#[derive(Debug, Clone)]
+pub struct AssocTypeDecl {
+    pub name: String,
+    pub span: Span,
+}
+
+/// One associated-type definition inside a `has` impl: `type Name = T;`
+#[derive(Debug, Clone)]
+pub struct AssocTypeDef {
+    pub name: String,
+    pub value: Type,
+    pub span: Span,
 }
 
 impl Type {
     pub fn span(&self) -> Span {
         match self {
             Type::Named(_, s) | Type::Unit(s) => *s,
+            Type::AssocPath { span, .. } => *span,
             Type::Ref { span, .. }
             | Type::Ptr { span, .. }
             | Type::RawPtr { span, .. }
@@ -508,6 +586,8 @@ pub struct AttrDecl {
     pub type_params: Vec<String>,
     /// Method signatures inside the attr block (may have default bodies in `funcs`).
     pub funcs: Vec<FuncDecl>,
+    /// Associated-type declarations: `type Slot;` lines (§10.5).
+    pub assoc_types: Vec<AssocTypeDecl>,
     pub is_pub: bool,
     pub span: Span,
 }
@@ -529,6 +609,8 @@ pub struct HasDecl {
     pub attr_args: Vec<Type>,
     /// Method bodies — receiver type must match `receiver`.
     pub funcs: Vec<FuncDecl>,
+    /// Associated-type definitions: `type Slot = ConcreteType;` lines (§10.5).
+    pub assoc_type_defs: Vec<AssocTypeDef>,
     pub is_pub: bool,
     pub span: Span,
 }
@@ -539,6 +621,9 @@ pub struct HasDecl {
 pub fn receiver_canonical_name(t: &Type) -> String {
     match t {
         Type::Named(n, _) => n.clone(),
+        Type::AssocPath { base, segment, .. } => {
+            format!("{}::{}", receiver_canonical_name(base), segment)
+        }
         Type::Ptr { inner, mutness, .. } => {
             let pref = match mutness { Mutness::Const => "*const ", Mutness::Mut | Mutness::Default => "*" };
             format!("{}{}", pref, receiver_canonical_name(inner))

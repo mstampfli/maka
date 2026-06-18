@@ -1,0 +1,39 @@
+// §10.6 worked example: attr with an associated type, generic + primitive
+// has-impls, and a placeholder data struct that materializes per
+// instantiation.  This is the full target shape the spec was written
+// against — combines §10.4 parametric receivers + §10.5 associated types
+// + the placeholder data pattern.
+
+attr Cell {
+    type Repr;
+    int read(&_ self);
+}
+
+// For pointer types, the cell's Repr is the pointer itself.
+*T has Cell {
+    type Repr = *T;
+    int read(&_ self) { return 1; }
+}
+
+// For ints, the cell's Repr is the int value.
+int has Cell {
+    type Repr = int;
+    int read(&int self) { return self; }
+}
+
+// Placeholder data struct: the field's TYPE is the impl-resolved Repr;
+// the FIELD COUNT is fixed by this declaration.
+data Wrap<T: Cell> { T::Repr inner; }
+
+data Box { int x; }
+
+int peek<T: Cell>(&T x) { return read(x); }
+
+unit main() {
+    // T = int: Wrap<int>::Repr = int. So Wrap<int> = { int inner; }
+    Wrap<int> wi = { inner = 99 };
+    log(wi.inner);          // 99
+
+    int a = 17;
+    log(peek(&a));          // 17
+}

@@ -373,11 +373,21 @@ impl Parser {
         let type_params = self.parse_type_params()?;
         self.expect(&TokKind::LBrace, "`{`")?;
         let mut funcs = Vec::new();
+        let mut assoc_types: Vec<AssocTypeDecl> = Vec::new();
         while !self.at(&TokKind::RBrace) {
-            funcs.push(self.parse_attr_method()?);
+            // `type Name;` — associated-type declaration (§10.5).
+            if self.at(&TokKind::Type) {
+                let sp = self.peek_span();
+                self.bump();
+                let (n, _) = self.expect_ident("associated-type name")?;
+                self.expect(&TokKind::Semicolon, "`;`")?;
+                assoc_types.push(AssocTypeDecl { name: n, span: sp });
+            } else {
+                funcs.push(self.parse_attr_method()?);
+            }
         }
         self.expect(&TokKind::RBrace, "`}`")?;
-        Ok(AttrDecl { name, type_params, funcs, is_pub: false, span: kw.span })
+        Ok(AttrDecl { name, type_params, funcs, assoc_types, is_pub: false, span: kw.span })
     }
 
     /// Parse one method declaration inside an `attr` block.  Accepts either:
@@ -443,11 +453,23 @@ impl Parser {
         }
         self.expect(&TokKind::LBrace, "`{`")?;
         let mut funcs = Vec::new();
+        let mut assoc_type_defs: Vec<AssocTypeDef> = Vec::new();
         while !self.at(&TokKind::RBrace) {
-            funcs.push(self.parse_func()?);
+            // `type Name = ConcreteType;` — associated-type definition (§10.5).
+            if self.at(&TokKind::Type) {
+                let sp = self.peek_span();
+                self.bump();
+                let (n, _) = self.expect_ident("associated-type name")?;
+                self.expect(&TokKind::Eq, "`=`")?;
+                let value = self.parse_type()?;
+                self.expect(&TokKind::Semicolon, "`;`")?;
+                assoc_type_defs.push(AssocTypeDef { name: n, value, span: sp });
+            } else {
+                funcs.push(self.parse_func()?);
+            }
         }
         self.expect(&TokKind::RBrace, "`}`")?;
-        Ok(HasDecl { type_name, receiver, attr_name, attr_args, funcs, is_pub: false, span: start })
+        Ok(HasDecl { type_name, receiver, attr_name, attr_args, funcs, assoc_type_defs, is_pub: false, span: start })
     }
 
     /// Speculative lookahead: do the next tokens read as `<Type> has`?  Used
@@ -875,7 +897,7 @@ impl Parser {
             }
             TokKind::Ident(_) => {
                 let (name, sp) = self.expect_ident("type name")?;
-                if self.at(&TokKind::Lt) {
+                let mut head = if self.at(&TokKind::Lt) {
                     // Generic type instantiation `Name<T, U>`. Only accept if the inside parses cleanly.
                     let save = self.pos;
                     self.bump(); // <
@@ -890,12 +912,21 @@ impl Parser {
                         break false;
                     };
                     if ok && self.eat(&TokKind::Gt) {
-                        return Ok(Type::Generic { name, args, span: sp });
+                        Type::Generic { name, args, span: sp }
+                    } else {
+                        self.pos = save;
+                        Type::Named(name, sp)
                     }
-                    // Rollback — not a generic-type context.
-                    self.pos = save;
+                } else {
+                    Type::Named(name, sp)
+                };
+                // Trailing `::Seg::Seg2...` — associated-type path.
+                while self.at(&TokKind::ColonColon) {
+                    self.bump();
+                    let (seg, sseg) = self.expect_ident("associated-type name")?;
+                    head = Type::AssocPath { base: Box::new(head), segment: seg, span: sseg };
                 }
-                Ok(Type::Named(name, sp))
+                Ok(head)
             }
             other => Err(ParseError { msg: format!("expected type, got {:?}", other), span: self.peek_span() }),
         }

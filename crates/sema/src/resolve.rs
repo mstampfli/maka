@@ -12,6 +12,128 @@ pub fn resolve_type(sym: &SymTab, t: &ast::Type, errors: &mut Vec<SemaError>) ->
 /// canonical name as a string key, or `None` if the type isn't a nominal type.
 /// Used to record trait impls: the first parameter's underlying nominal type is the
 /// receiver of the trait.
+/// Collect the names of type variables introduced by a `has` impl's
+/// receiver pattern.  Any `Type::Named(n, _)` whose `n` is NOT a known
+/// struct/enum and NOT a primitive name is treated as a type variable.
+/// This is the impl-local convention — the variable's scope is the
+/// receiver and the impl body.
+pub fn collect_receiver_tyvars(sym: &SymTab, t: &maka_ast::Type) -> Vec<String> {
+    fn is_struct_or_enum(sym: &SymTab, n: &str) -> bool {
+        sym.struct_by_name(n).is_some() || sym.enum_by_name(n).is_some()
+    }
+    fn is_primitive(n: &str) -> bool {
+        matches!(n,
+            "int" | "bool" | "char" | "string" | "float" | "unit" | "String"
+            | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
+            | "isize" | "usize" | "f32" | "f64")
+    }
+    let mut out: Vec<String> = Vec::new();
+    fn walk(sym: &SymTab, t: &maka_ast::Type, out: &mut Vec<String>) {
+        match t {
+            maka_ast::Type::Named(n, _) => {
+                if !is_struct_or_enum(sym, n) && !is_primitive(n) && n != "_" {
+                    if !out.contains(n) { out.push(n.clone()); }
+                }
+            }
+            maka_ast::Type::Ref { inner, .. } | maka_ast::Type::Ptr { inner, .. }
+            | maka_ast::Type::RawPtr { inner, .. } | maka_ast::Type::OwnPtr { inner, .. }
+            | maka_ast::Type::Heap { inner, .. } => walk(sym, inner, out),
+            maka_ast::Type::Array { elem, .. } | maka_ast::Type::Slice { elem, .. }
+            | maka_ast::Type::Vec { elem, .. } => walk(sym, elem, out),
+            maka_ast::Type::Generic { args, .. } => {
+                for a in args { walk(sym, a, out); }
+            }
+            maka_ast::Type::FnPtr { ret, params, .. } => {
+                walk(sym, ret, out);
+                for p in params { walk(sym, p, out); }
+            }
+            maka_ast::Type::AssocPath { base, .. } => walk(sym, base, out),
+            _ => {}
+        }
+        let _ = sym;
+    }
+    walk(sym, t, &mut out);
+    out
+}
+
+/// Resolve `on::segment` (an HType::AssocType placeholder) to its concrete
+/// type by looking up the impl whose receiver pattern unifies with `on` and
+/// reading the impl's `type segment = ...` definition with the unification
+/// env applied.  Returns `None` if no impl matches or the impl doesn't
+/// define the segment.  Reports `attr_hint` (if Some) to disambiguate when
+/// multiple bounds could match.
+pub fn resolve_assoc_type(
+    sym: &SymTab,
+    on: &HType,
+    segment: &str,
+    attr_hint: Option<&str>,
+) -> Option<HType> {
+    let matching: Vec<&HasImpl> = sym.has_impls.iter()
+        .filter(|h| {
+            if let Some(a) = attr_hint { if h.attr_name != a { return false; } }
+            // Must declare a segment of this name in the matching attr.
+            let attr = sym.attr_by_name(&h.attr_name);
+            let declares = attr.map(|a| a.assoc_type_decls.iter().any(|(n, _)| n == segment)).unwrap_or(false);
+            if !declares { return false; }
+            // Receiver pattern must unify with `on`.
+            receiver_unify(&h.receiver_pattern, on, &h.receiver_tyvars).is_some()
+        })
+        .collect();
+    if matching.is_empty() { return None; }
+    // Pick the first matching impl (coherence guarantees uniqueness once
+    // the overlap checker is in; until then we tolerate first-match).
+    let h = matching[0];
+    let env = receiver_unify(&h.receiver_pattern, on, &h.receiver_tyvars)?;
+    let (_, raw) = h.assoc_type_defs.iter().find(|(n, _)| n == segment)?;
+    Some(raw.subst(&env))
+}
+
+/// Walk an HType, replacing every `HType::AssocType { on, segment, .. }`
+/// whose `on` is concrete (no TyVar inside it) with the resolved type.
+/// Recurses into the resolved type so chained assoc-types collapse.
+pub fn resolve_assoc_types_in(sym: &SymTab, t: &HType) -> HType {
+    fn has_tyvar(t: &HType) -> bool {
+        match t {
+            HType::TyVar(_) => true,
+            HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::RawPtr { inner, .. }
+            | HType::OwnPtr { inner, .. } | HType::Heap { inner } => has_tyvar(inner),
+            HType::Array { elem, .. } | HType::Slice { elem, .. } | HType::Vec { elem } => has_tyvar(elem),
+            HType::FnPtr { ret, params } => has_tyvar(ret) || params.iter().any(has_tyvar),
+            HType::AssocType { on, .. } => has_tyvar(on),
+            _ => false,
+        }
+    }
+    match t {
+        HType::AssocType { on, segment, attr_hint } => {
+            let on_resolved = resolve_assoc_types_in(sym, on);
+            if has_tyvar(&on_resolved) {
+                return HType::AssocType {
+                    on: Box::new(on_resolved),
+                    segment: segment.clone(),
+                    attr_hint: attr_hint.clone(),
+                };
+            }
+            match resolve_assoc_type(sym, &on_resolved, segment, attr_hint.as_deref()) {
+                Some(r) => resolve_assoc_types_in(sym, &r),
+                None => t.clone(),
+            }
+        }
+        HType::Ref { mutable, inner } => HType::Ref { mutable: *mutable, inner: Box::new(resolve_assoc_types_in(sym, inner)) },
+        HType::Ptr { mutable, inner } => HType::Ptr { mutable: *mutable, inner: Box::new(resolve_assoc_types_in(sym, inner)) },
+        HType::RawPtr { mutable, inner } => HType::RawPtr { mutable: *mutable, inner: Box::new(resolve_assoc_types_in(sym, inner)) },
+        HType::OwnPtr { mutable, inner } => HType::OwnPtr { mutable: *mutable, inner: Box::new(resolve_assoc_types_in(sym, inner)) },
+        HType::Heap { inner } => HType::Heap { inner: Box::new(resolve_assoc_types_in(sym, inner)) },
+        HType::Array { len, elem } => HType::Array { len: *len, elem: Box::new(resolve_assoc_types_in(sym, elem)) },
+        HType::Slice { mutable, elem } => HType::Slice { mutable: *mutable, elem: Box::new(resolve_assoc_types_in(sym, elem)) },
+        HType::Vec { elem } => HType::Vec { elem: Box::new(resolve_assoc_types_in(sym, elem)) },
+        HType::FnPtr { ret, params } => HType::FnPtr {
+            ret: Box::new(resolve_assoc_types_in(sym, ret)),
+            params: params.iter().map(|p| resolve_assoc_types_in(sym, p)).collect(),
+        },
+        _ => t.clone(),
+    }
+}
+
 pub fn underlying_struct_key(sym: &SymTab, ty: &HType) -> Option<String> {
     match ty {
         HType::Struct(id) => Some(sym.struct_info(*id).name.clone()),
@@ -260,6 +382,14 @@ pub fn resolve_type_in(
             let ps: Vec<HType> = params.iter().map(|p| resolve_type_in(sym, p, type_params, errors)).collect();
             HType::FnPtr { ret: Box::new(r), params: ps }
         }
+        ast::Type::AssocPath { base, segment, .. } => {
+            // `T::Slot` — the base resolves to (typically) a TyVar; we keep
+            // it as an AssocType placeholder that monomorphization resolves
+            // by looking up the impl whose receiver pattern unifies with the
+            // base's concrete substitution.
+            let on = resolve_type_in(sym, base, type_params, errors);
+            HType::AssocType { on: Box::new(on), segment: segment.clone(), attr_hint: None }
+        }
         ast::Type::Generic { name, args, span } => {
             // Built-in `Rust<T>` from the Maka↔Rust bridge: an opaque heap
             // handle to a Rust value.  Same ABI as `own *mut unit`; the `T`
@@ -474,13 +604,20 @@ impl SymTab {
             if template.type_params.len() != args.len() { continue; }
             let mangled = format!("{}__{}", name, args.iter().map(|t| t.key()).collect::<Vec<_>>().join("_"));
             let env: std::collections::HashMap<String, HType> = template.type_params.iter().cloned().zip(args.iter().cloned()).collect();
-            let new_fields: Vec<FieldInfo> = template.fields.iter().map(|f| FieldInfo {
-                name: f.name.clone(),
-                ty: f.ty.subst(&env),
-                mut_payload: f.mut_payload,
-                default: f.default.clone(),
-                is_embed: f.is_embed,
-                span: f.span,
+            let new_fields: Vec<FieldInfo> = template.fields.iter().map(|f| {
+                // First substitute the template's type vars with the concrete
+                // args, then resolve any AssocType placeholders against the
+                // registered impls (§10.5 monomorphization-time resolution).
+                let subst_ty = f.ty.subst(&env);
+                let resolved_ty = resolve_assoc_types_in(&sym, &subst_ty);
+                FieldInfo {
+                    name: f.name.clone(),
+                    ty: resolved_ty,
+                    mut_payload: f.mut_payload,
+                    default: f.default.clone(),
+                    is_embed: f.is_embed,
+                    span: f.span,
+                }
             }).collect();
             let _ = tid;
             let new_id = StructId(sym.structs.len() as u32);
@@ -636,6 +773,9 @@ impl SymTab {
                                         is_pub: l.is_pub,
                                         module_path: item_module.clone(),
                                         func_ids: Vec::new(),
+                                        assoc_type_defs: Vec::new(),
+                                        receiver_tyvars: Vec::new(),
+                                        receiver_pattern: first_ty.clone(),
                                     });
                                 }
                             }
@@ -715,6 +855,9 @@ impl SymTab {
                             });
                         }
                     }
+                    let assoc_type_decls: Vec<(String, _)> = a.assoc_types.iter()
+                        .map(|d| (d.name.clone(), d.span))
+                        .collect();
                     sym.attrs.push(AttrInfo {
                         name: a.name.clone(),
                         type_params: a.type_params.clone(),
@@ -722,6 +865,7 @@ impl SymTab {
                         module_path: item_module.clone(),
                         span: a.span,
                         methods,
+                        assoc_type_decls,
                     });
                 }
                 ast::Item::Has(h) => {
@@ -771,6 +915,79 @@ impl SymTab {
                             span: h.span,
                         });
                     }
+                    // Resolve the receiver pattern to an HType.  Type-variable
+                    // identifiers introduced by the receiver (e.g. `T` in `*T`)
+                    // are collected so we know which identifiers in the impl's
+                    // assoc-type defs are free variables to be substituted at
+                    // call sites.
+                    let receiver_tyvars = collect_receiver_tyvars(&sym, &h.receiver);
+                    let receiver_pattern = resolve_type_in(&sym, &h.receiver, &receiver_tyvars, &mut errors);
+                    // Resolve assoc-type definitions in the impl, with the
+                    // receiver's type variables in scope.
+                    let mut assoc_type_defs: Vec<(String, HType)> = Vec::new();
+                    let mut def_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    for d in &h.assoc_type_defs {
+                        if !def_seen.insert(d.name.clone()) {
+                            errors.push(SemaError {
+                                msg: format!("`type {} = ...` defined twice in `{} has {}`", d.name, h.type_name, h.attr_name),
+                                span: d.span,
+                            });
+                            continue;
+                        }
+                        let v = resolve_type_in(&sym, &d.value, &receiver_tyvars, &mut errors);
+                        assoc_type_defs.push((d.name.clone(), v));
+                    }
+                    // Validate: every declared assoc-type in the attr must be
+                    // provided by the impl; no extras allowed.
+                    let decl_names: std::collections::HashSet<String> =
+                        attr_info.assoc_type_decls.iter().map(|(n, _)| n.clone()).collect();
+                    for (n, _) in &assoc_type_defs {
+                        if !decl_names.contains(n) {
+                            errors.push(SemaError {
+                                msg: format!("`{} has {}`: `type {}` not declared by attr `{}`", h.type_name, h.attr_name, n, h.attr_name),
+                                span: h.span,
+                            });
+                        }
+                    }
+                    for (decl_name, decl_sp) in &attr_info.assoc_type_decls {
+                        if !def_seen.contains(decl_name) {
+                            errors.push(SemaError {
+                                msg: format!("`{} has {}` is missing `type {} = ...;` required by attr `{}`", h.type_name, h.attr_name, decl_name, h.attr_name),
+                                span: *decl_sp,
+                            });
+                        }
+                    }
+                    // §10.4 coherence: reject overlap with any prior impl of
+                    // the same attr.  Overlap is "some concrete type unifies
+                    // with both receiver patterns".  We rely on the
+                    // pattern-vs-pattern unification helper.
+                    let mut overlapped = false;
+                    for prior in sym.has_impls.iter() {
+                        if prior.attr_name != h.attr_name { continue; }
+                        // Two impls of the same attr conflict only if BOTH the
+                        // receiver patterns overlap AND the attr-args match
+                        // exactly.  `Foo has Convert<int>` and
+                        // `Foo has Convert<string>` are disjoint via attr-args
+                        // even though the receivers are identical.
+                        if prior.attr_args.len() != attr_args.len() { continue; }
+                        if !prior.attr_args.iter().zip(attr_args.iter())
+                            .all(|(a, b)| crate::typeck::type_eq(a, b)) { continue; }
+                        if patterns_overlap(
+                            &prior.receiver_pattern, &prior.receiver_tyvars,
+                            &receiver_pattern, &receiver_tyvars,
+                        ) {
+                            errors.push(SemaError {
+                                msg: format!(
+                                    "overlapping `has {}` impls for receiver `{}` and `{}` — receivers unify with a common concrete type, which makes method dispatch ambiguous (§10.4)",
+                                    h.attr_name, prior.type_key, h.type_name,
+                                ),
+                                span: h.span,
+                            });
+                            overlapped = true;
+                            break;
+                        }
+                    }
+                    if overlapped { continue; }
                     // Record the impl: `<T: Attr>` bound is satisfied when T == type_name,
                     // subject to visibility filtering at bound-check time.
                     sym.trait_impls.entry(h.attr_name.clone())
@@ -783,6 +1000,9 @@ impl SymTab {
                         is_pub: h.is_pub,
                         module_path: item_module.clone(),
                         func_ids: Vec::new(),
+                        assoc_type_defs,
+                        receiver_tyvars: receiver_tyvars.clone(),
+                        receiver_pattern,
                     });
                     let has_impl_idx = sym.has_impls.len() - 1;
                     // Contract-match: every `has` method must correspond to an attr decl;
@@ -817,9 +1037,10 @@ impl SymTab {
                             let attr_args_for_check = sym.has_impls.get(last_idx)
                                 .map(|h| h.attr_args.clone())
                                 .unwrap_or_default();
-                            check_attr_shape(
+                            check_attr_shape_ty(
                                 &sym, &am.decl, user_decl,
-                                &h.type_name, &h.attr_name,
+                                &h.type_name, &h.receiver, &receiver_tyvars,
+                                &h.attr_name,
                                 &attr_info.type_params, &attr_args_for_check,
                                 &mut errors,
                             );
@@ -827,7 +1048,7 @@ impl SymTab {
                         } else if am.has_default {
                             // Synthesize: clone the attr's decl and rewrite `_` → impl type in
                             // both signature and body (in-type positions).
-                            let synth = synthesize_default(&am.decl, &h.type_name);
+                            let synth = synthesize_default_ty(&am.decl, &h.receiver);
                             resolved_funcs.push((synth, true));
                         } else {
                             errors.push(SemaError {
@@ -843,9 +1064,17 @@ impl SymTab {
                     // already gone (substituted at AST level above), so normal resolution works.
                     let mut name_seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
                     for (f, _is_default) in &resolved_funcs {
-                        // Substitute `_` once more on the FuncDecl signature in case the user
-                        // wrote `_` in the has block too.
-                        let f_subst = substitute_func_placeholders(f, &h.type_name);
+                        // Substitute `_` with the receiver's full AST Type tree
+                        // (so `&_ self` in a `*T has Foo` impl becomes `&*T self`).
+                        // The receiver's own type variables (`T` in `*T`) must
+                        // also be added to the method's type_params so they
+                        // resolve to TyVars during signature/body resolution.
+                        let mut f_subst = substitute_func_placeholders_ty(f, &h.receiver);
+                        for v in &receiver_tyvars {
+                            if !f_subst.type_params.contains(v) {
+                                f_subst.type_params.push(v.clone());
+                            }
+                        }
                         let (param_tys, ret) = resolve_signature(&sym, &f_subst.params, &f_subst.ret, &f_subst.type_params, &mut errors);
                         let param_names: Vec<String> = f_subst.params.iter().map(|p| p.name.clone()).collect();
                         let overload_idx = *name_seen.entry(f_subst.name.clone()).and_modify(|v| *v += 1).or_insert(0);
@@ -916,6 +1145,18 @@ impl SymTab {
                         });
                     }
                 }
+            }
+        }
+
+        // Pass 5: walk all struct instantiations and re-resolve any AssocType
+        // placeholders in their field types.  Struct instantiation happened
+        // in Pass 2b — before Pass 3 registered `has` impls — so any
+        // `T::Slot` field types were left abstract.  Now that impls are
+        // registered, we can resolve them concretely.
+        let sym_snapshot = sym.clone();
+        for s in sym.structs.iter_mut() {
+            for f in s.fields.iter_mut() {
+                f.ty = resolve_assoc_types_in(&sym_snapshot, &f.ty);
             }
         }
 
@@ -1074,6 +1315,123 @@ pub fn substitute_func_placeholders(f: &ast::FuncDecl, impl_ty: &str) -> ast::Fu
     out
 }
 
+/// Type-tree-aware variant of `substitute_func_placeholders`: substitutes the
+/// `_` placeholder with the receiver's full AST Type tree (carrying type
+/// variables in their parametric positions).  Used by parametric `has` impls
+/// (§10.4).
+pub fn substitute_func_placeholders_ty(f: &ast::FuncDecl, recv: &ast::Type) -> ast::FuncDecl {
+    let mut out = f.clone();
+    out.ret = out.ret.subst_placeholder_ty(recv);
+    for p in out.params.iter_mut() { p.ty = p.ty.subst_placeholder_ty(recv); }
+    substitute_block_placeholders_ty(&mut out.body, recv);
+    out
+}
+
+fn substitute_block_placeholders_ty(b: &mut ast::Block, recv: &ast::Type) {
+    for s in &mut b.stmts { substitute_stmt_placeholders_ty(s, recv); }
+}
+
+fn substitute_stmt_placeholders_ty(s: &mut ast::Stmt, recv: &ast::Type) {
+    use ast::Stmt::*;
+    match s {
+        Let { ty, init, .. } => {
+            *ty = ty.subst_placeholder_ty(recv);
+            substitute_expr_placeholders_ty(init, recv);
+        }
+        Assign { place, value, .. } => {
+            substitute_expr_placeholders_ty(place, recv);
+            substitute_expr_placeholders_ty(value, recv);
+        }
+        Return(opt, _) => { if let Some(e) = opt { substitute_expr_placeholders_ty(e, recv); } }
+        ExprStmt(e, _) => substitute_expr_placeholders_ty(e, recv),
+        If { cond, then_block, else_block, .. } => {
+            substitute_expr_placeholders_ty(cond, recv);
+            substitute_block_placeholders_ty(then_block, recv);
+            if let Some(eb) = else_block { substitute_block_placeholders_ty(eb, recv); }
+        }
+        While { cond, body, .. } => {
+            substitute_expr_placeholders_ty(cond, recv);
+            substitute_block_placeholders_ty(body, recv);
+        }
+        ForRange { var_ty, start, end, body, .. } => {
+            *var_ty = var_ty.subst_placeholder_ty(recv);
+            substitute_expr_placeholders_ty(start, recv);
+            substitute_expr_placeholders_ty(end, recv);
+            substitute_block_placeholders_ty(body, recv);
+        }
+        ForEach { var_ty, src, body, .. } => {
+            *var_ty = var_ty.subst_placeholder_ty(recv);
+            substitute_expr_placeholders_ty(src, recv);
+            substitute_block_placeholders_ty(body, recv);
+        }
+        Block(b) | Unsafe(b, _) => substitute_block_placeholders_ty(b, recv),
+        Match { scrutinee, arms, .. } => {
+            substitute_expr_placeholders_ty(scrutinee, recv);
+            for a in arms {
+                if let Some(g) = a.guard.as_mut() { substitute_expr_placeholders_ty(g, recv); }
+                match &mut a.body {
+                    ast::ArmBody::Expr(e) => substitute_expr_placeholders_ty(e, recv),
+                    ast::ArmBody::Block(b) => substitute_block_placeholders_ty(b, recv),
+                }
+            }
+        }
+        Yield(e, _) => substitute_expr_placeholders_ty(e, recv),
+        Propagate(opt, _) => if let Some(e) = opt { substitute_expr_placeholders_ty(e, recv); },
+        Break(_) | Continue(_) => {}
+    }
+}
+
+fn substitute_expr_placeholders_ty(e: &mut ast::Expr, recv: &ast::Type) {
+    use ast::Expr::*;
+    match e {
+        Lit(_, _) | Ident(_, _) => {}
+        Bin { lhs, rhs, .. } => {
+            substitute_expr_placeholders_ty(lhs, recv);
+            substitute_expr_placeholders_ty(rhs, recv);
+        }
+        Un { expr, .. } | Unwrap { expr, .. } | Ref { expr, .. }
+        | HeapAlloc { value: expr, .. } | Free { value: expr, .. } => {
+            substitute_expr_placeholders_ty(expr, recv);
+        }
+        Field { base, .. } => substitute_expr_placeholders_ty(base, recv),
+        Index { base, idx, .. } => {
+            substitute_expr_placeholders_ty(base, recv);
+            substitute_expr_placeholders_ty(idx, recv);
+        }
+        Call { callee, args, .. } => {
+            substitute_expr_placeholders_ty(callee, recv);
+            for a in args { substitute_expr_placeholders_ty(a, recv); }
+        }
+        Cast { expr, ty, .. } | CheckedCast { expr, ty, .. } => {
+            substitute_expr_placeholders_ty(expr, recv);
+            *ty = ty.subst_placeholder_ty(recv);
+        }
+        Struct { fields, .. } | VariantCtor { fields, .. } => {
+            for (_, fe) in fields.iter_mut() { substitute_expr_placeholders_ty(fe, recv); }
+        }
+        ArrayLit { elems, .. } => for el in elems { substitute_expr_placeholders_ty(el, recv); },
+        Match { scrutinee, arms, .. } => {
+            substitute_expr_placeholders_ty(scrutinee, recv);
+            for a in arms {
+                if let Some(g) = a.guard.as_mut() { substitute_expr_placeholders_ty(g, recv); }
+                match &mut a.body {
+                    ast::ArmBody::Expr(e) => substitute_expr_placeholders_ty(e, recv),
+                    ast::ArmBody::Block(b) => substitute_block_placeholders_ty(b, recv),
+                }
+            }
+        }
+        Lambda { ret, params, body, .. } => {
+            *ret = ret.subst_placeholder_ty(recv);
+            for p in params { p.ty = p.ty.subst_placeholder_ty(recv); }
+            match body {
+                ast::LambdaBody::Expr(b) => substitute_expr_placeholders_ty(b, recv),
+                ast::LambdaBody::Block(b) => substitute_block_placeholders_ty(b, recv),
+            }
+        }
+        WallMod { expr, .. } => substitute_expr_placeholders_ty(expr, recv),
+    }
+}
+
 fn substitute_block_placeholders(b: &mut ast::Block, impl_ty: &str) {
     for s in &mut b.stmts { substitute_stmt_placeholders(s, impl_ty); }
 }
@@ -1194,18 +1552,42 @@ pub fn check_attr_shape(
     attr_args: &[HType],
     errors: &mut Vec<SemaError>,
 ) {
-    // Substitute `_` in the attr decl to the implementing type, then resolve both.
-    // Pass the attr's own `type_params` (e.g. ["U"]) so attr-args resolve to TyVars
-    // first, then substitute them with the impl's concrete `attr_args`.
-    let attr_subst = substitute_func_placeholders(attr_decl, impl_ty);
-    let combined: Vec<String> = attr_type_params.iter().chain(attr_subst.type_params.iter()).cloned().collect();
+    check_attr_shape_ty(sym, attr_decl, has_decl, impl_ty, &ast::Type::Named(impl_ty.to_string(), maka_lexer::Span::dummy()), &[], attr_name, attr_type_params, attr_args, errors);
+}
+
+/// Type-tree-aware variant: substitute `_` with the receiver's full AST Type
+/// tree (so `&_ self` becomes e.g. `&*T self` for a `*T has Foo` impl),
+/// and resolve the impl-side signature with the receiver's type variables in
+/// scope so they become TyVars (not "unknown type") during the contract check.
+pub fn check_attr_shape_ty(
+    sym: &SymTab,
+    attr_decl: &ast::FuncDecl,
+    has_decl: &ast::FuncDecl,
+    impl_ty_name: &str,
+    receiver: &ast::Type,
+    receiver_tyvars: &[String],
+    attr_name: &str,
+    attr_type_params: &[String],
+    attr_args: &[HType],
+    errors: &mut Vec<SemaError>,
+) {
+    let impl_ty = impl_ty_name;
+    // Substitute `_` in the attr decl to the receiver Type tree, then resolve
+    // with attr type-params AND receiver tyvars in scope.
+    let attr_subst = substitute_func_placeholders_ty(attr_decl, receiver);
+    let combined: Vec<String> = attr_type_params.iter()
+        .chain(attr_subst.type_params.iter())
+        .chain(receiver_tyvars.iter())
+        .cloned().collect();
     let (a_params_raw, a_ret_raw) = resolve_signature(sym, &attr_subst.params, &attr_subst.ret, &combined, &mut Vec::new());
     let env: std::collections::HashMap<String, HType> = attr_type_params.iter().cloned().zip(attr_args.iter().cloned()).collect();
     let a_params: Vec<HType> = a_params_raw.iter().map(|t| t.subst(&env)).collect();
     let a_ret = a_ret_raw.subst(&env);
-    // For the has decl, also substitute (the user may have written `_` too).
-    let has_subst = substitute_func_placeholders(has_decl, impl_ty);
-    let (h_params, h_ret) = resolve_signature(sym, &has_subst.params, &has_subst.ret, &has_subst.type_params, &mut Vec::new());
+    let has_subst = substitute_func_placeholders_ty(has_decl, receiver);
+    let combined_has: Vec<String> = has_subst.type_params.iter()
+        .chain(receiver_tyvars.iter())
+        .cloned().collect();
+    let (h_params, h_ret) = resolve_signature(sym, &has_subst.params, &has_subst.ret, &combined_has, &mut Vec::new());
 
     if a_params.len() != h_params.len() {
         errors.push(SemaError {
@@ -1267,4 +1649,8 @@ fn htype_eq(a: &HType, b: &HType) -> bool {
 
 pub fn synthesize_default(attr_decl: &ast::FuncDecl, impl_ty: &str) -> ast::FuncDecl {
     substitute_func_placeholders(attr_decl, impl_ty)
+}
+
+pub fn synthesize_default_ty(attr_decl: &ast::FuncDecl, receiver: &ast::Type) -> ast::FuncDecl {
+    substitute_func_placeholders_ty(attr_decl, receiver)
 }

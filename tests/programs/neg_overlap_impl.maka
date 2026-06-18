@@ -1,0 +1,7 @@
+// §10.4 coherence: registering a second `has Foo` impl whose receiver
+// pattern overlaps with an existing impl is a compile error.
+attr Foo { int show(&_ self); }
+data Bar { int x; }
+Bar has Foo { int show(&Bar self) { return 1; } }
+Bar has Foo { int show(&Bar self) { return 2; } }
+unit main() { Bar b = { x = 7 }; log(show(&b)); }

@@ -1,0 +1,38 @@
+// §10.5 associated types: an attr declares `type Slot;` and each impl
+// supplies a concrete `type Slot = ...`.  A generic struct uses `T::Slot`
+// as its field type; per concrete instantiation the field type
+// materializes to the impl-resolved type.
+
+attr Stored {
+    type Slot;
+    Slot value(&_ self);
+}
+
+int has Stored {
+    type Slot = int;
+    int value(&int self) { return self + 1000; }
+}
+
+bool has Stored {
+    type Slot = int;
+    int value(&bool self) { if (self) { return 1; } else { return 0; } }
+}
+
+data Wrap<T: Stored> { T::Slot inner; }
+
+int peek<T: Stored>(&T x) {
+    return value(x);
+}
+
+unit main() {
+    int  a = 7;
+    bool b = true;
+
+    Wrap<int>  wi = { inner = 42 };       // T::Slot resolves to int
+    Wrap<bool> wb = { inner = 99 };       // T::Slot also resolves to int
+
+    log(wi.inner);    // 42
+    log(wb.inner);    // 99
+    log(peek(&a));    // 1007
+    log(peek(&b));    // 1
+}

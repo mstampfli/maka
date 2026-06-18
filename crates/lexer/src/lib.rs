@@ -84,6 +84,8 @@ pub enum TokKind {
     As,        // bare `as`
     AsCheck,   // `as?` (no whitespace between)
     Unit,      // the keyword `unit`
+    Type,      // the keyword `type` — used in `attr { type Name; }` and `has { type Name = T; }`
+    ColonColon,// `::` — path separator for `T::Slot` assoc-type paths
     // primitive type names left as plain Idents handled by parser/types
 
     // punctuation
@@ -280,6 +282,7 @@ impl<'a> Lexer<'a> {
                 "false" => TokKind::False,
                 "null" => TokKind::Null,
                 "unit" => TokKind::Unit,
+                "type" => TokKind::Type,
                 "as" => {
                     // detect `as?` only if `?` follows immediately
                     if self.peek(0) == b'?' {
@@ -326,6 +329,7 @@ impl<'a> Lexer<'a> {
             (b'*', b'=') => { self.bump(); self.bump(); TokKind::StarEq }
             (b'/', b'=') => { self.bump(); self.bump(); TokKind::SlashEq }
             (b'%', b'=') => { self.bump(); self.bump(); TokKind::PercentEq }
+            (b':', b':') => { self.bump(); self.bump(); TokKind::ColonColon }
             (b'.', b'.') => {
                 self.bump(); self.bump();
                 if self.peek(0) == b'=' { self.bump(); TokKind::DotDotEq } else { TokKind::DotDot }

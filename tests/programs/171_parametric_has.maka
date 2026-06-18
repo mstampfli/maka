@@ -1,0 +1,27 @@
+// §10.4 parametric `has` receivers: an impl can match a SHAPE (`*T`) and
+// the type variable `T` binds at the call site.  The dispatcher uses
+// receiver-pattern unification against the impl's pattern, not string
+// equality on the receiver name.
+
+attr Tagged { int tag(&_ self); }
+
+// Two disjoint impls — generic-pointer and concrete primitive.  No overlap.
+*T has Tagged { int tag(&_ self) { return 100; } }
+int has Tagged { int tag(&int self) { return self + 1000; } }
+
+data Box { int v; }
+data Node { int n; }
+
+unit drive_box(*Box p)   { log(tag(&p)); }      // 100
+unit drive_node(*Node q) { log(tag(&q)); }      // 100
+
+unit main() {
+    own *Box  b = alloc Box  { v = 7 };
+    drive_box(b);                                // 100
+
+    own *Node n = alloc Node { n = 8 };
+    drive_node(n);                               // 100
+
+    int a = 5;
+    log(tag(&a));                                // 1005
+}

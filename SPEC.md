@@ -42,7 +42,7 @@ A `.maka` source file consists of:
 ```
 mut const constexpr unsafe inline propagate
 extern cinclude cblock rblock rdep raw own alloc free
-data enum logic attr has where dyn type Self
+data enum logic attr has where dyn type
 if else while for in break continue match yield return
 gate transfer share thread_local module import use pub
 spawn join
@@ -956,7 +956,7 @@ int has Stored { ... }              // primitives (`int`/`bool`/`i8..u64`)
 Inside a generic-receiver `has` block, `T` refers to the bound type
 variable.  Methods see the receiver type via the usual `_` placeholder
 substitution (e.g. `&_ self` becomes `&*T self` in a `*T has Stored`
-block; `&Self` is an accepted alias).
+block; `&_` is an accepted alias).
 
 **Receiver patterns.** The grammar admits:
 - A concrete named type (`Foo`, `Foo<int>`, `int`, `bool`, `i32`, etc.)
@@ -1024,19 +1024,12 @@ The grammar production (§5) is correspondingly relaxed: in `use ModPath . R . A
 parametric form — `*T`, `&T`, `&mut T`, `own *T`, `own &T`, `raw *T`,
 or `Name<T1, T2, ...>` with type variables in any subset of positions).
 
-**The `Self` keyword.**  `Self` is a reserved keyword (§1.4) usable
-**only** inside an `attr` declaration body or a `has` impl body.  Inside
-an `attr`, `Self` is an alias for the `_` placeholder.  Inside a `has`
-impl, `Self` refers to the impl's receiver type **after type-variable
-substitution at the current monomorphization**.  Examples:
-
-- In `*T has Stored { unit init(&Self self, ...) }`, `Self` denotes `*T`
-  during definition; when the impl is instantiated with `T = Foo`, every
-  `Self` becomes `*Foo`.
-- In `*Box<T> has Stored { ... &Self ... }`, `Self` denotes `*Box<T>`,
-  and `Self` substitutes to `*Box<int>` when called with `T = int`.
-
-`Self` outside `attr` / `has` blocks is a parse error.
+**Receiver placeholder.**  Inside an `attr` declaration or a `has` impl
+body, the existing `_` placeholder type (§1.4) refers to the receiver.
+In an `attr` it stands for "the implementing type, whatever it is"; in
+a `has` impl it is substituted with the impl's receiver pattern
+(post-type-variable-binding at monomorphization).  There is no separate
+`Self` keyword — `_` covers both jobs.
 
 **Interaction with `logic` blocks.**  `logic` blocks (§10.2) are subject
 to the same coherence rule — a `logic` block whose first-parameter
@@ -1061,12 +1054,12 @@ attr Stored {
 
 *T has Stored {
     type Slot = *T;                       // for a *T receiver, Slot is *T
-    unit init(&mut Self self, *T value) { self.inner = value; }
+    unit init(&mut _ self, *T value) { self.inner = value; }
 }
 
 own *T has Stored {
     type Slot = OwnCell<T>;               // for own *T, Slot is OwnCell<T>
-    unit init(&mut Self self, own *T value) { /* ... */ }
+    unit init(&mut _ self, own *T value) { /* ... */ }
 }
 
 data OwnCell<T> { own *T ptr; int drop_flag; }
@@ -1083,8 +1076,8 @@ data Tagged<L, R> { L l; R r; }
 Tagged<L, R> has Pair {
     type Left  = L;
     type Right = R;
-    L first (&Self self) { return self.l; }
-    R second(&Self self) { return self.r; }
+    L first (&_ self) { return self.l; }
+    R second(&_ self) { return self.r; }
 }
 ```
 
@@ -1239,9 +1232,9 @@ attr AtomicCell {
 // Pointer atomics: a typed cell holds a typed pointer.
 *T has AtomicCell {
     type Storage = *T;
-    *T  atomic_load_cell (&Self self)               { return atomic_load(self); }
-    unit atomic_store_cell(&mut Self self, *T v)    { atomic_store(self, v); }
-    *T  atomic_swap_cell (&mut Self self, *T v) {
+    *T  atomic_load_cell (&_ self)               { return atomic_load(self); }
+    unit atomic_store_cell(&mut _ self, *T v)    { atomic_store(self, v); }
+    *T  atomic_swap_cell (&mut _ self, *T v) {
         let old = atomic_load(self);
         atomic_store(self, v);
         return old;
@@ -1252,9 +1245,9 @@ attr AtomicCell {
 // stable, and users don't need extension.
 int has AtomicCell {
     type Storage = int;
-    int  atomic_load_cell (&Self self)              { return atomic_load(self); }
-    unit atomic_store_cell(&mut Self self, int v)   { atomic_store(self, v); }
-    int  atomic_swap_cell (&mut Self self, int v) { /* CAS-loop */ ... }
+    int  atomic_load_cell (&_ self)              { return atomic_load(self); }
+    unit atomic_store_cell(&mut _ self, int v)   { atomic_store(self, v); }
+    int  atomic_swap_cell (&mut _ self, int v) { /* CAS-loop */ ... }
 }
 
 bool has AtomicCell { type Storage = bool; /* ... */ }
@@ -1282,7 +1275,7 @@ User extension — declare your own atomic-able type:
 data MyHandle { *unit raw; }
 MyHandle has AtomicCell {
     type Storage = MyHandle;
-    MyHandle atomic_load_cell(&Self self)             { /* ... */ }
+    MyHandle atomic_load_cell(&_ self)             { /* ... */ }
     /* ... */
 }
 

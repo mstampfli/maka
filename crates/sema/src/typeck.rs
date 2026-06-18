@@ -1290,6 +1290,9 @@ impl<'a> TypeChecker<'a> {
             HType::Dyn { .. } => false,
             HType::FnPtr { .. } => true,
             HType::TyVar(_) => false,
+            // Unresolved associated-type — Shareable check is per concrete
+            // instantiation; abstract form has no verdict, conservatively false.
+            HType::AssocType { .. } => false,
             // A `Rust<T>` is `own *mut unit` semantically: sole-owner, never
             // shareable.  Probe routing for `share` is delegated to rustc's
             // `Sync` bound; see RUST_INTEROP.md §6.
@@ -4628,6 +4631,7 @@ pub fn type_str(t: &HType) -> String {
             format!("{}({})", type_str(ret), parts.join(", "))
         }
         HType::TyVar(n) => format!("'{}", n),
+        HType::AssocType { on, segment, .. } => format!("{}::{}", type_str(on), segment),
         HType::RustOpaque(label) => format!("Rust<{}>", label),
     }
 }
@@ -4645,6 +4649,21 @@ pub fn strip_to_dyn(t: &HType) -> Option<Vec<String>> {
 pub fn param_compatible(param: &HType, actual: &HType, type_params: &[String]) -> bool {
     // A TyVar matches anything.
     if let HType::TyVar(_) = param { return true; }
+    // Structural unification through pointer/ref kinds: when the param's head
+    // constructor matches the actual's, recurse on the inner.  This is what
+    // lets `&*T self` (param) match `&*Box` (actual) — the outer `&` and
+    // inner `*` match exactly, and `T` is a TyVar which matches `Box`.
+    match (param, actual) {
+        (HType::Ref { mutable: pm, inner: pi }, HType::Ref { mutable: am, inner: ai })
+            if pm == am => { if param_compatible(pi, ai, type_params) { return true; } }
+        (HType::Ptr { mutable: pm, inner: pi }, HType::Ptr { mutable: am, inner: ai })
+            if pm == am => { if param_compatible(pi, ai, type_params) { return true; } }
+        (HType::RawPtr { mutable: pm, inner: pi }, HType::RawPtr { mutable: am, inner: ai })
+            if pm == am => { if param_compatible(pi, ai, type_params) { return true; } }
+        (HType::OwnPtr { mutable: pm, inner: pi }, HType::OwnPtr { mutable: am, inner: ai })
+            if pm == am => { if param_compatible(pi, ai, type_params) { return true; } }
+        _ => {}
+    }
     // Allow trivial implicit conversions (struct embedding upcast deferred).
     if type_eq(param, actual) { return true; }
     // Allow null → ptr.

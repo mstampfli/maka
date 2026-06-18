@@ -4835,6 +4835,7 @@ impl<'a> Cx<'a> {
                 s
             }
             HType::TyVar(n) => format!("T_{}", n),
+            HType::AssocType { on, segment, .. } => format!("AT_{}_{}", self.type_key(on), segment),
             // `Rust<T>` shares the C layout of `own *mut unit` (= `void*`).
             HType::RustOpaque(_) => "p_maka_unit".into(),
         }
@@ -4898,6 +4899,7 @@ impl<'a> Cx<'a> {
                 format!("Callable_{}", fn_sig_key(ret, params))
             }
             HType::TyVar(_) => "void*".into(), // erased; not expected at codegen
+            HType::AssocType { .. } => "void*".into(), // erased; should have been resolved at mono
             // `Rust<T>` is `own *mut unit` at the C layer (= `void*`).
             HType::RustOpaque(_) => "void*".into(),
         }
