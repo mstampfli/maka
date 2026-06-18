@@ -482,12 +482,13 @@ impl Parser {
     /// to detect parametric `has`-items at the item-dispatch level without
     /// consuming the type.  Restores `self.pos` afterwards.
     fn looks_like_parametric_has_item(&mut self) -> bool {
-        // Only candidates: leading token is `*`, `&`, `own`, `raw`, or an
-        // ident.  (Ident-leading is already handled by the dedicated arm
-        // above; this method is for the structural-type-prefix cases.)
+        // Candidates: leading token is `*`, `&`, `own`, `raw`, or an Ident
+        // whose type expression has further qualification (`Box<T>`).  Plain
+        // `Ident HAS` is handled by the dedicated arm above; that path
+        // short-circuits before this one runs.
         if !matches!(
             self.peek(),
-            TokKind::Star | TokKind::Amp | TokKind::Own | TokKind::Raw
+            TokKind::Star | TokKind::Amp | TokKind::Own | TokKind::Raw | TokKind::Ident(_)
         ) {
             return false;
         }
@@ -925,7 +926,15 @@ impl Parser {
             // context the resolver rejects the unresolved sentinel.
             TokKind::Underscore => {
                 self.bump();
-                Ok(Type::Named("_".to_string(), start))
+                let mut base = Type::Named("_".to_string(), start);
+                // Allow trailing `::Seg` for assoc-type paths on the
+                // placeholder (e.g. `_::Ok`, `_::Err`).
+                while self.at(&TokKind::ColonColon) {
+                    self.bump();
+                    let (seg, sseg) = self.expect_ident("associated-type name")?;
+                    base = Type::AssocPath { base: Box::new(base), segment: seg, span: sseg };
+                }
+                Ok(base)
             }
             TokKind::Ident(_) => {
                 let (name, sp) = self.expect_ident("type name")?;

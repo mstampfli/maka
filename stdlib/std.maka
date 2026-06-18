@@ -23,6 +23,11 @@ pub enum Result<T, E> {
     Err { E err   },
 }
 
+// `Try` will eventually live here as a `has` attr once generic
+// enum-receiver type-variable tracking (`Result<T, E> has Try`) lands.
+// Until then `propagate r;` is special-cased on `Result<T, E>` directly
+// — see SPEC §4.3 and the worked test `176_propagate_result.maka`.
+
 // ---- string helpers ----------------------------------------------------
 
 extern "strlen" usize __str_len(string s);
