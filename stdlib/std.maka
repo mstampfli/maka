@@ -59,6 +59,25 @@ pub Result<T, E> has Try {
     }
 }
 
+// `try_ok` — the propagate-friendly unwrap idiom (§4.3).
+//
+// Inside any function that returns `Result<_, E>`, write
+//
+//     int v = try_ok(some_call_returning_result_int_e());
+//
+// to either bind the Ok value (if the call succeeded) or early-return
+// the same Err from the enclosing function (if it failed).  Works
+// because `try_ok` is `inline`: `propagate` inside an inline body
+// exits the **caller's** frame, not just the inline expansion.  No
+// language change needed — the existing `inline` + `propagate` pair
+// (§4.3) is enough.
+pub inline T try_ok<T, E>(Result<T, E> r) {
+    match (r) {
+        Result.Ok { value } { return value; }
+        Result.Err { err }  { propagate Result.Err { err = err }; }
+    }
+}
+
 // ---- string helpers ----------------------------------------------------
 
 extern "strlen" usize __str_len(string s);
