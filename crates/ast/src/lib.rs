@@ -514,16 +514,49 @@ pub struct AttrDecl {
 
 #[derive(Debug, Clone)]
 pub struct HasDecl {
-    /// The type that provides the attribute (e.g. "Color" in `Color has Drawable`).
+    /// Canonical-form string of the receiver pattern (e.g. "Color", "*T",
+    /// "int").  Computed from `receiver` at parse time.  Kept for back-compat
+    /// with code that keys impls by string (legacy nominal-receiver path).
     pub type_name: String,
+    /// The receiver pattern as written in source.  For a parametric receiver
+    /// (`*T has Foo`, `Box<T> has Foo`), this carries the full type tree
+    /// including type variables.  For a concrete receiver, it's just the
+    /// concrete `Type`.
+    pub receiver: Type,
     /// The attribute name (e.g. "Drawable").
     pub attr_name: String,
     /// Concrete type arguments for a generic attr: `Color has Convert<int>`.
     pub attr_args: Vec<Type>,
-    /// Method bodies — receiver type must match `type_name`.
+    /// Method bodies — receiver type must match `receiver`.
     pub funcs: Vec<FuncDecl>,
     pub is_pub: bool,
     pub span: Span,
+}
+
+/// Canonical short string of a `has`-receiver pattern, used as the
+/// back-compat `HasDecl.type_name` field.  For a concrete struct/enum it's
+/// the bare name; for a parametric receiver it's a short shape sketch.
+pub fn receiver_canonical_name(t: &Type) -> String {
+    match t {
+        Type::Named(n, _) => n.clone(),
+        Type::Ptr { inner, mutness, .. } => {
+            let pref = match mutness { Mutness::Const => "*const ", Mutness::Mut | Mutness::Default => "*" };
+            format!("{}{}", pref, receiver_canonical_name(inner))
+        }
+        Type::Ref { inner, mutness, .. } => {
+            let pref = match mutness { Mutness::Const | Mutness::Default => "&", Mutness::Mut => "&mut " };
+            format!("{}{}", pref, receiver_canonical_name(inner))
+        }
+        Type::RawPtr { inner, mutness, .. } => {
+            let pref = match mutness { Mutness::Const => "raw *const ", Mutness::Mut | Mutness::Default => "raw *" };
+            format!("{}{}", pref, receiver_canonical_name(inner))
+        }
+        Type::Generic { name, args, .. } => {
+            let inner: Vec<String> = args.iter().map(receiver_canonical_name).collect();
+            format!("{}<{}>", name, inner.join(","))
+        }
+        _ => "<unsupported>".to_string(),
+    }
 }
 
 #[derive(Debug, Clone)]

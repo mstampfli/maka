@@ -304,7 +304,8 @@ impl Parser {
 
     // -------- items --------
     fn parse_item(&mut self) -> Result<Item, ParseError> {
-        match self.peek() {
+        let kind = self.peek().clone();
+        match &kind {
             TokKind::Data => Ok(Item::Data(self.parse_data()?)),
             TokKind::Enum => Ok(Item::Enum(self.parse_enum()?)),
             TokKind::Extern => Ok(Item::Extern(self.parse_extern()?)),
@@ -320,6 +321,15 @@ impl Parser {
             TokKind::Mut => Ok(Item::Global(self.parse_global(true)?)),
             // `Type has Attr { ... }` — detect by looking two tokens ahead for `Has`.
             TokKind::Ident(_) if matches!(self.peek_at(1), TokKind::Has) => {
+                Ok(Item::Has(self.parse_has()?))
+            }
+            // Parametric `has`: `*T has Foo { ... }`, `&T has Foo { ... }`,
+            // `own *T has Foo { ... }`, `raw *T has Foo { ... }`, `Box<T> has Foo`.
+            // Disambiguates from globals/funcs (which also start with a type)
+            // by speculatively parsing a type and checking if the next token is
+            // `has`.  No heap allocation for the common (non-has) case — we
+            // restore self.pos.
+            _ if self.looks_like_parametric_has_item() => {
                 Ok(Item::Has(self.parse_has()?))
             }
             _ => {
@@ -415,7 +425,11 @@ impl Parser {
 
     fn parse_has(&mut self) -> Result<HasDecl, ParseError> {
         let start = self.peek_span();
-        let (type_name, _) = self.expect_ident("type name")?;
+        // Receiver can be a full Type (concrete name, primitive, or parametric
+        // pattern like `*T`, `Box<T>`).  The legacy single-ident path is a
+        // special case of parse_type.
+        let receiver = self.parse_type()?;
+        let type_name = receiver_canonical_name(&receiver);
         self.expect(&TokKind::Has, "`has`")?;
         let (attr_name, _) = self.expect_ident("attribute name")?;
         // Concrete attr args: `Color has Convert<int> { ... }`.
@@ -433,7 +447,26 @@ impl Parser {
             funcs.push(self.parse_func()?);
         }
         self.expect(&TokKind::RBrace, "`}`")?;
-        Ok(HasDecl { type_name, attr_name, attr_args, funcs, is_pub: false, span: start })
+        Ok(HasDecl { type_name, receiver, attr_name, attr_args, funcs, is_pub: false, span: start })
+    }
+
+    /// Speculative lookahead: do the next tokens read as `<Type> has`?  Used
+    /// to detect parametric `has`-items at the item-dispatch level without
+    /// consuming the type.  Restores `self.pos` afterwards.
+    fn looks_like_parametric_has_item(&mut self) -> bool {
+        // Only candidates: leading token is `*`, `&`, `own`, `raw`, or an
+        // ident.  (Ident-leading is already handled by the dedicated arm
+        // above; this method is for the structural-type-prefix cases.)
+        if !matches!(
+            self.peek(),
+            TokKind::Star | TokKind::Amp | TokKind::Own | TokKind::Raw
+        ) {
+            return false;
+        }
+        let save = self.pos;
+        let ok = self.parse_type().is_ok() && matches!(self.peek(), TokKind::Has);
+        self.pos = save;
+        ok
     }
 
     fn parse_logic(&mut self) -> Result<LogicDecl, ParseError> {

@@ -1,0 +1,27 @@
+// `has` impls for primitive types — §10.4 generic receivers (the
+// non-parametric, primitives slice).  Allows the user to attach trait
+// methods to `int`/`bool`/etc. without wrapping them in a `data` struct.
+attr Tagged {
+    int tag(&_ self);
+    string label(&_ self) { return "anon"; }
+}
+
+int has Tagged {
+    int tag(&int self) { return self + 100; }
+}
+
+bool has Tagged {
+    int tag(&bool self) { if (self) { return 1; } else { return 0; } }
+    string label(&bool self) { return "boolean"; }
+}
+
+int show<T: Tagged>(&T x) { return tag(x); }
+
+unit main() {
+    int    a = 7;
+    bool   b = true;
+    log(show(&a));        // 107
+    log(show(&b));        // 1
+    log(tag(&a));         // 107
+    log(label(&b));       // boolean
+}

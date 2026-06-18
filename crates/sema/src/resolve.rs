@@ -21,6 +21,19 @@ pub fn underlying_struct_key(sym: &SymTab, ty: &HType) -> Option<String> {
         | HType::RawPtr { inner, .. }
         | HType::OwnPtr { inner, .. }
         | HType::Heap { inner } => underlying_struct_key(sym, inner),
+        // Primitives can be `has`-implementors (§10.4) — return their
+        // canonical name as the key so bound-check lookup matches the
+        // string the parser stored in HasDecl.type_name.
+        HType::Int => Some("int".into()),
+        HType::Bool => Some("bool".into()),
+        HType::Char => Some("char".into()),
+        HType::Str => Some("string".into()),
+        HType::Float => Some("float".into()),
+        HType::Unit => Some("unit".into()),
+        HType::SizedInt { signed, bits } => {
+            let pref = if *signed { "i" } else { "u" };
+            match bits { 8 | 16 | 32 | 64 => Some(format!("{}{}", pref, bits)), _ => None }
+        }
         _ => None,
     }
 }
@@ -723,10 +736,21 @@ impl SymTab {
                             continue;
                         }
                     };
-                    // Validate referenced type exists (struct or enum).
-                    let type_exists = sym.struct_by_name(&h.type_name).is_some()
+                    // Validate the receiver pattern.  Accepted shapes:
+                    //   (a) a known struct or enum name (legacy concrete receiver)
+                    //   (b) a primitive name (`int`, `bool`, sized ints, `char`, `string`, `float`)
+                    //   (c) a parametric pointer / reference / generic receiver
+                    //       (`*T`, `&T`, `own *T`, `raw *T`, `Box<T>` — §10.4).
+                    let primitive_names = [
+                        "int", "bool", "char", "string", "float", "unit",
+                        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+                        "isize", "usize", "f32", "f64",
+                    ];
+                    let is_struct_or_enum = sym.struct_by_name(&h.type_name).is_some()
                         || sym.enum_by_name(&h.type_name).is_some();
-                    if !type_exists {
+                    let is_primitive = primitive_names.contains(&h.type_name.as_str());
+                    let is_parametric = !matches!(&h.receiver, maka_ast::Type::Named(_, _));
+                    if !(is_struct_or_enum || is_primitive || is_parametric) {
                         errors.push(SemaError {
                             msg: format!("`has` references unknown type `{}`", h.type_name),
                             span: h.span,
