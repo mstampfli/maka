@@ -63,6 +63,8 @@ Arithmetic: `+ - * / %`. Bitwise: `& | ^ << >>`. Comparison: `== != < <= > >=`.
 Logical: `&& ||`. Assignment: `= += -= *= /= %=`. Unary: `- ! &` (and `&mut`).
 Postfix: `!` (pointer unwrap). Field: `.`. Index: `[]`. Cast: `as`, `as?`
 (checked). Range: `..` and `..=` (used in `for`). Address-of via `&` and `&mut`.
+Type-level path separator: `::` (used only in type expressions, for
+associated-type paths like `T::Slot` — see §10.5).
 
 ---
 
@@ -933,14 +935,14 @@ etc. are expanded to distinct C structs.
 
 ### 10.4 Generic `has` receivers
 
-> **Implementation status (2026-06).**  §10.4–10.7 describe the **target design**
-> for Maka's typeclass extensions.  As of this writing the implementation
-> supports only §10.1's concrete-receiver `has` impls; the parser, sema impl
-> lookup, overlap checker, and associated-type machinery described below are
-> not yet present.  Specifying them here ahead of implementation is intentional —
-> these sections are the contract the parser/sema work will be checked against.
-> When the implementation lands, this note is replaced by a "Stabilized in vX.Y"
-> line.
+> **Stabilized 2026-06-18** (commit `095ea31`).  Parametric `has` receivers,
+> overlap-rejection coherence checking, and the associated-type machinery
+> described in §10.4–10.7 are implemented end-to-end and exercised by the
+> test suite (`169_has_primitive`, `170_assoc_type_basic`,
+> `171_parametric_has`, `172_worked_example_atomic`, `neg_overlap_impl`).
+> Default associated types and bounds on associated types
+> (`<T: Foo<Slot = i64>>`) remain "planned but not in MVP" — flagged
+> inline below.
 
 The receiver of a `has` impl can be **parametric**, not only a concrete named
 type.  Four receiver kinds are accepted:
@@ -983,6 +985,16 @@ mutness (`*T` vs `*const T` vs `*mut T`) is **not** a match.  The
 algorithm bottoms out on primitives (each is its own atom; `int` and
 `bool` do not unify).  No backtracking, no occurs check (cycles forbidden
 elsewhere — see §10.5).
+
+Implementation note: unification receives HTypes that are **already
+monomorphized**.  A receiver pattern `Box<T>` and a concrete `Box<int>`
+both arrive at the unifier as a single `StructId` (the monomorphizer
+turned `Box<int>` into a distinct struct at instantiation time, and the
+pattern's `Box<T>` carries `TyVar(T)` in the type-arg position only
+inside the impl's own bookkeeping — by the time unification runs on a
+call site, the call site has already produced a concrete `StructId`).
+This means the unifier compares at the instance level, not the
+template level, and no `Generic<…>`-vs-`Generic<…>` case is needed.
 
 **Coherence — overlap is rejected.** If a new `has` impl's receiver pattern
 overlaps with an already-registered impl for the same attr, the new impl
@@ -1218,6 +1230,18 @@ with concrete `T = X`:
 
 If step 1 finds no impl or two impls, instantiation is rejected with
 a specific error.
+
+Implementation note: assoc-type resolution runs as a **post-pass** in
+the resolver — after every `has` impl has been registered.  Struct
+instantiation (e.g. materializing `Wrapper<int>`) happens earlier in
+the pipeline, while the impls of the attr the wrapper is bound by may
+not yet exist; any `T::Slot` field types are left as abstract
+`AssocType` placeholders at that point.  Once all impls are
+registered, a final pass walks every materialized struct's fields and
+substitutes each placeholder with the unifier-resolved concrete type.
+Code that lives outside generic bodies never sees an unresolved
+`AssocType` — by the time typecheck runs on a concrete instantiation,
+the field types are concrete.
 
 ### 10.6 Worked example: `AtomicPtr<T>`
 
