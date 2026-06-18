@@ -76,14 +76,14 @@ pub fn resolve_assoc_type(
             let declares = attr.map(|a| a.assoc_type_decls.iter().any(|(n, _, _)| n == segment)).unwrap_or(false);
             if !declares { return false; }
             // Receiver pattern must unify with `on`.
-            receiver_unify(&h.receiver_pattern, on, &h.receiver_tyvars).is_some()
+            receiver_unify_with_sym(&h.receiver_pattern, on, &h.receiver_tyvars, sym).is_some()
         })
         .collect();
     if matching.is_empty() { return None; }
     // Pick the first matching impl (coherence guarantees uniqueness once
     // the overlap checker is in; until then we tolerate first-match).
     let h = matching[0];
-    let env = receiver_unify(&h.receiver_pattern, on, &h.receiver_tyvars)?;
+    let env = receiver_unify_with_sym(&h.receiver_pattern, on, &h.receiver_tyvars, sym)?;
     let (_, raw) = h.assoc_type_defs.iter().find(|(n, _)| n == segment)?;
     Some(raw.subst(&env))
 }
@@ -412,6 +412,38 @@ pub fn resolve_type_in(
             if let Some(eid) = sym.enum_instantiations.get(&(name.clone(), key)) {
                 return HType::Enum(EnumId(*eid));
             }
+            // §10.4 parametric receivers: when ANY arg is a TyVar (or contains
+            // one), preserve the generic structure so receiver_unify can
+            // recover the args at a call site.  Without this, `Result<T, E>`
+            // collapses to `Enum(Result_template_id)` and a concrete
+            // `Result<int, MyErr>` (a different EnumId) can never unify.
+            fn contains_tyvar(t: &HType) -> bool {
+                match t {
+                    HType::TyVar(_) => true,
+                    HType::Ref { inner, .. } | HType::Ptr { inner, .. }
+                    | HType::RawPtr { inner, .. } | HType::OwnPtr { inner, .. }
+                    | HType::Heap { inner } => contains_tyvar(inner),
+                    HType::Array { elem, .. } | HType::Slice { elem, .. }
+                    | HType::Vec { elem } => contains_tyvar(elem),
+                    HType::FnPtr { ret, params } => contains_tyvar(ret) || params.iter().any(contains_tyvar),
+                    HType::GenericPattern { args, .. } => args.iter().any(contains_tyvar),
+                    HType::AssocType { on, .. } => contains_tyvar(on),
+                    _ => false,
+                }
+            }
+            let any_tyvar = resolved_args.iter().any(contains_tyvar);
+            if any_tyvar {
+                let is_enum = sym.enum_by_name(name).is_some();
+                let is_struct = sym.struct_by_name(name).is_some();
+                if is_enum || is_struct {
+                    return HType::GenericPattern {
+                        template_name: name.clone(),
+                        args: resolved_args,
+                        is_enum,
+                    };
+                }
+                // Fall through to the "unknown generic type" error path.
+            }
             // Template (used inside generic bodies — yields a TyVar-bearing pattern).
             if let Some((id, _)) = sym.struct_by_name(name) {
                 HType::Struct(id)
@@ -437,6 +469,7 @@ impl SymTab {
             name: "Thread".to_string(),
             type_params: Vec::new(),
             template: None,
+            template_args: Vec::new(),
             fields: Vec::new(),
             is_pub: true,
             module_path: Vec::new(),
@@ -466,6 +499,7 @@ impl SymTab {
                         name: d.name.clone(),
                         type_params: d.type_params.clone(),
                         template: None,
+                        template_args: Vec::new(),
                         fields: Vec::new(),
                         is_pub: d.is_pub,
                         module_path: item_module.clone(),
@@ -497,6 +531,8 @@ impl SymTab {
                         is_pub: e.is_pub,
                         module_path: item_module.clone(),
                         span: e.span,
+                        template: None,
+                        template_args: Vec::new(),
                     });
                 }
                 _ => {}
@@ -583,10 +619,20 @@ impl SymTab {
                     }
                 }
                 ast::Item::Has(h) => {
+                    // §10.4: include the receiver's own type variables in scope
+                    // when scanning impl-method types — `Result<T, E> has Foo {
+                    // ... f(&Result<T, E> self) ... }` references T and E inside
+                    // the method, but f.type_params is empty.  Without merging
+                    // receiver_tyvars in, resolve_type_in fires "unknown type T".
+                    let receiver_tyvars = collect_receiver_tyvars(&sym, &h.receiver);
                     for f in &h.funcs {
-                        for p in &f.params { scan_struct_insts(&sym, &p.ty, &f.type_params, &mut struct_inst_requests, &mut errors); }
-                        scan_struct_insts(&sym, &f.ret, &f.type_params, &mut struct_inst_requests, &mut errors);
-                        scan_block(&sym, &f.body, &f.type_params, &mut struct_inst_requests, &mut errors);
+                        let mut tp = f.type_params.clone();
+                        for v in &receiver_tyvars {
+                            if !tp.contains(v) { tp.push(v.clone()); }
+                        }
+                        for p in &f.params { scan_struct_insts(&sym, &p.ty, &tp, &mut struct_inst_requests, &mut errors); }
+                        scan_struct_insts(&sym, &f.ret, &tp, &mut struct_inst_requests, &mut errors);
+                        scan_block(&sym, &f.body, &tp, &mut struct_inst_requests, &mut errors);
                     }
                 }
                 ast::Item::Extern(e) => {
@@ -631,6 +677,7 @@ impl SymTab {
                 name: mangled,
                 type_params: Vec::new(),
                 template: Some(name.clone()),
+                template_args: args.clone(),
                 fields: new_fields,
                 is_pub: tmpl_is_pub,
                 module_path: tmpl_mod,
@@ -671,6 +718,8 @@ impl SymTab {
                 is_pub: template.is_pub,
                 module_path: template.module_path.clone(),
                 span: template.span,
+                template: Some(name.clone()),
+                template_args: args.clone(),
             });
             sym.enum_instantiations.insert((name.clone(), key), new_id.0);
         }
@@ -1015,7 +1064,7 @@ impl SymTab {
                         is_pub: h.is_pub,
                         module_path: item_module.clone(),
                         func_ids: Vec::new(),
-                        assoc_type_defs,
+                        assoc_type_defs: assoc_type_defs.clone(),
                         receiver_tyvars: receiver_tyvars.clone(),
                         receiver_pattern,
                     });
@@ -1057,6 +1106,7 @@ impl SymTab {
                                 &h.type_name, &h.receiver, &receiver_tyvars,
                                 &h.attr_name,
                                 &attr_info.type_params, &attr_args_for_check,
+                                &assoc_type_defs,
                                 &mut errors,
                             );
                             resolved_funcs.push(((*user_decl).clone(), false));
@@ -1567,7 +1617,7 @@ pub fn check_attr_shape(
     attr_args: &[HType],
     errors: &mut Vec<SemaError>,
 ) {
-    check_attr_shape_ty(sym, attr_decl, has_decl, impl_ty, &ast::Type::Named(impl_ty.to_string(), maka_lexer::Span::dummy()), &[], attr_name, attr_type_params, attr_args, errors);
+    check_attr_shape_ty(sym, attr_decl, has_decl, impl_ty, &ast::Type::Named(impl_ty.to_string(), maka_lexer::Span::dummy()), &[], attr_name, attr_type_params, attr_args, &[], errors);
 }
 
 /// Type-tree-aware variant: substitute `_` with the receiver's full AST Type
@@ -1584,6 +1634,7 @@ pub fn check_attr_shape_ty(
     attr_name: &str,
     attr_type_params: &[String],
     attr_args: &[HType],
+    impl_assoc_type_defs: &[(String, HType)],
     errors: &mut Vec<SemaError>,
 ) {
     let impl_ty = impl_ty_name;
@@ -1596,8 +1647,36 @@ pub fn check_attr_shape_ty(
         .cloned().collect();
     let (a_params_raw, a_ret_raw) = resolve_signature(sym, &attr_subst.params, &attr_subst.ret, &combined, &mut Vec::new());
     let env: std::collections::HashMap<String, HType> = attr_type_params.iter().cloned().zip(attr_args.iter().cloned()).collect();
-    let a_params: Vec<HType> = a_params_raw.iter().map(|t| t.subst(&env)).collect();
-    let a_ret = a_ret_raw.subst(&env);
+    // Resolve `_::Foo` AssocType references on the attr side using the impl's
+    // `type Foo = ...` definitions.  Without this, e.g. `_::Err` stays as
+    // AssocType{...} and never compares equal to the impl method's `E` even
+    // though they're contractually the same.
+    fn resolve_assoc_via_impl(t: &HType, defs: &[(String, HType)]) -> HType {
+        match t {
+            HType::AssocType { segment, on, .. } => {
+                // Match `_`-relative paths (the substituted receiver is the on);
+                // the assoc-type defs in impl_assoc_type_defs use the impl's
+                // own tyvars as their values, which matches what we want.
+                if defs.iter().any(|(n, _)| n == segment) {
+                    let (_, v) = defs.iter().find(|(n, _)| n == segment).unwrap();
+                    let _ = on;
+                    return v.clone();
+                }
+                t.clone()
+            }
+            HType::Ref { mutable, inner } => HType::Ref { mutable: *mutable, inner: Box::new(resolve_assoc_via_impl(inner, defs)) },
+            HType::Ptr { mutable, inner } => HType::Ptr { mutable: *mutable, inner: Box::new(resolve_assoc_via_impl(inner, defs)) },
+            HType::RawPtr { mutable, inner } => HType::RawPtr { mutable: *mutable, inner: Box::new(resolve_assoc_via_impl(inner, defs)) },
+            HType::OwnPtr { mutable, inner } => HType::OwnPtr { mutable: *mutable, inner: Box::new(resolve_assoc_via_impl(inner, defs)) },
+            HType::Heap { inner } => HType::Heap { inner: Box::new(resolve_assoc_via_impl(inner, defs)) },
+            HType::Array { len, elem } => HType::Array { len: *len, elem: Box::new(resolve_assoc_via_impl(elem, defs)) },
+            HType::Slice { mutable, elem } => HType::Slice { mutable: *mutable, elem: Box::new(resolve_assoc_via_impl(elem, defs)) },
+            HType::Vec { elem } => HType::Vec { elem: Box::new(resolve_assoc_via_impl(elem, defs)) },
+            _ => t.clone(),
+        }
+    }
+    let a_params: Vec<HType> = a_params_raw.iter().map(|t| resolve_assoc_via_impl(&t.subst(&env), impl_assoc_type_defs)).collect();
+    let a_ret = resolve_assoc_via_impl(&a_ret_raw.subst(&env), impl_assoc_type_defs);
     let has_subst = substitute_func_placeholders_ty(has_decl, receiver);
     let combined_has: Vec<String> = has_subst.type_params.iter()
         .chain(receiver_tyvars.iter())
@@ -1657,6 +1736,11 @@ fn htype_eq(a: &HType, b: &HType) -> bool {
         (Vec { elem: ea }, Vec { elem: eb }) => htype_eq(ea, eb),
         (FnPtr { ret: ra, params: pa }, FnPtr { ret: rb, params: pb }) => {
             htype_eq(ra, rb) && pa.len() == pb.len() && pa.iter().zip(pb).all(|(x, y)| htype_eq(x, y))
+        }
+        (GenericPattern { template_name: na, args: aa, is_enum: ea },
+         GenericPattern { template_name: nb, args: ab, is_enum: eb }) => {
+            na == nb && ea == eb && aa.len() == ab.len()
+                && aa.iter().zip(ab).all(|(x, y)| htype_eq(x, y))
         }
         _ => false,
     }

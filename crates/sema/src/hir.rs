@@ -57,6 +57,18 @@ pub enum HType {
     FnPtr { ret: Box<HType>, params: Vec<HType> },
     /// Unresolved type variable from a generic decl (used during sema's pre-monomorphization phase).
     TyVar(String),
+    /// A generic struct/enum **with its arg structure preserved** — used as
+    /// the receiver pattern of a parametric `has` impl that references a
+    /// generic type with type variables, e.g. `Result<T, E> has Try` stores
+    /// `GenericPattern { template_name: "Result", args: [TyVar("T"), TyVar("E")], is_enum: true }`.
+    ///
+    /// At a concrete call site with `Result<int, MyErr>`, receiver unification
+    /// looks up the concrete instantiation's template name + its remembered
+    /// `template_args` (stored on StructInfo / EnumInfo at instantiation time)
+    /// and unifies arg-by-arg, binding the impl's tyvars.
+    ///
+    /// Lives **only** at the pattern / receiver layer.  Never reaches codegen.
+    GenericPattern { template_name: String, args: Vec<HType>, is_enum: bool },
     /// `T::Slot` — an unresolved associated-type path.  `on` is the receiver
     /// type (typically a TyVar for `T::Slot` inside a generic body; resolved
     /// to a concrete type at monomorphization).  `attr_hint` is `None` unless
@@ -94,6 +106,11 @@ impl HType {
                 segment: segment.clone(),
                 attr_hint: attr_hint.clone(),
             },
+            HType::GenericPattern { template_name, args, is_enum } => HType::GenericPattern {
+                template_name: template_name.clone(),
+                args: args.iter().map(|a| a.subst(env)).collect(),
+                is_enum: *is_enum,
+            },
             _ => self.clone(),
         }
     }
@@ -128,6 +145,10 @@ impl HType {
             }
             HType::TyVar(n) => format!("'{}", n),
             HType::AssocType { on, segment, .. } => format!("AT{}_{}", on.key(), segment),
+            HType::GenericPattern { template_name, args, .. } => {
+                let inner: Vec<String> = args.iter().map(|a| a.key()).collect();
+                format!("GP{}__{}", template_name, inner.join("_"))
+            }
             // Key is shared with `own *mut unit` so monomorphisation, dedup, and
             // type-equality treat the two as the same — the label is purely
             // out-of-band metadata for probe routing.
@@ -248,12 +269,38 @@ pub fn receiver_unify(
     actual: &HType,
     tyvars: &[String],
 ) -> Option<std::collections::HashMap<String, HType>> {
+    // Back-compat shim — old callers without a SymTab.  Cannot handle
+    // GenericPattern against a concrete Struct/Enum (needs SymTab to
+    // recover the concrete's template_args).  New callers should use
+    // `receiver_unify_with_sym`.
+    receiver_unify_impl(pat, actual, tyvars, None)
+}
+
+/// `receiver_unify` that can recover concrete instantiations' template
+/// args from the SymTab.  Use this when the actual may be a concrete
+/// `Struct(id)`/`Enum(id)` for a generic template.
+pub fn receiver_unify_with_sym(
+    pat: &HType,
+    actual: &HType,
+    tyvars: &[String],
+    sym: &SymTab,
+) -> Option<std::collections::HashMap<String, HType>> {
+    receiver_unify_impl(pat, actual, tyvars, Some(sym))
+}
+
+fn receiver_unify_impl(
+    pat: &HType,
+    actual: &HType,
+    tyvars: &[String],
+    sym: Option<&SymTab>,
+) -> Option<std::collections::HashMap<String, HType>> {
     let mut env: std::collections::HashMap<String, HType> = std::collections::HashMap::new();
     fn go(
         pat: &HType,
         actual: &HType,
         tyvars: &[String],
         env: &mut std::collections::HashMap<String, HType>,
+        sym: Option<&SymTab>,
     ) -> bool {
         if let HType::TyVar(n) = pat {
             if tyvars.iter().any(|v| v == n) {
@@ -262,6 +309,44 @@ pub fn receiver_unify(
                 }
                 env.insert(n.clone(), actual.clone());
                 return true;
+            }
+        }
+        // §10.4: GenericPattern (impl receiver) vs concrete Struct/Enum
+        // (call-site).  Look up the concrete's StructInfo/EnumInfo to read
+        // its `template` name + `template_args`, then match arg-by-arg.
+        if let (HType::GenericPattern { template_name: pn, args: pargs, is_enum: pe }, sym) = (pat, sym) {
+            let Some(sym) = sym else { return false; };
+            match actual {
+                HType::Struct(sid) => {
+                    if *pe { return false; }
+                    let info = sym.struct_info(*sid);
+                    let Some(t) = info.template.as_ref() else { return false; };
+                    if t != pn { return false; }
+                    if info.template_args.len() != pargs.len() { return false; }
+                    for (pa, ca) in pargs.iter().zip(info.template_args.iter()) {
+                        if !go(pa, ca, tyvars, env, Some(sym)) { return false; }
+                    }
+                    return true;
+                }
+                HType::Enum(eid) => {
+                    if !*pe { return false; }
+                    let info = sym.enum_info(*eid);
+                    let Some(t) = info.template.as_ref() else { return false; };
+                    if t != pn { return false; }
+                    if info.template_args.len() != pargs.len() { return false; }
+                    for (pa, ca) in pargs.iter().zip(info.template_args.iter()) {
+                        if !go(pa, ca, tyvars, env, Some(sym)) { return false; }
+                    }
+                    return true;
+                }
+                HType::GenericPattern { template_name: un, args: uargs, is_enum: ue } => {
+                    if pn != un || pe != ue || pargs.len() != uargs.len() { return false; }
+                    for (pa, ua) in pargs.iter().zip(uargs.iter()) {
+                        if !go(pa, ua, tyvars, env, Some(sym)) { return false; }
+                    }
+                    return true;
+                }
+                _ => return false,
             }
         }
         match (pat, actual) {
@@ -276,26 +361,23 @@ pub fn receiver_unify(
             (HType::Struct(pi), HType::Struct(ui)) => pi == ui,
             (HType::Enum(pi), HType::Enum(ui)) => pi == ui,
             (HType::Ref { mutable: pm, inner: pi }, HType::Ref { mutable: um, inner: ui })
-                if pm == um => go(pi, ui, tyvars, env),
+                if pm == um => go(pi, ui, tyvars, env, sym),
             (HType::Ptr { mutable: pm, inner: pi }, HType::Ptr { mutable: um, inner: ui })
-                if pm == um => go(pi, ui, tyvars, env),
+                if pm == um => go(pi, ui, tyvars, env, sym),
             (HType::RawPtr { mutable: pm, inner: pi }, HType::RawPtr { mutable: um, inner: ui })
-                if pm == um => go(pi, ui, tyvars, env),
+                if pm == um => go(pi, ui, tyvars, env, sym),
             (HType::OwnPtr { mutable: pm, inner: pi }, HType::OwnPtr { mutable: um, inner: ui })
-                if pm == um => go(pi, ui, tyvars, env),
-            (HType::Heap { inner: pi }, HType::Heap { inner: ui }) => go(pi, ui, tyvars, env),
+                if pm == um => go(pi, ui, tyvars, env, sym),
+            (HType::Heap { inner: pi }, HType::Heap { inner: ui }) => go(pi, ui, tyvars, env, sym),
             (HType::Slice { mutable: pm, elem: pe }, HType::Slice { mutable: um, elem: ue })
-                if pm == um => go(pe, ue, tyvars, env),
+                if pm == um => go(pe, ue, tyvars, env, sym),
             (HType::Array { len: pl, elem: pe }, HType::Array { len: ul, elem: ue })
-                if pl == ul => go(pe, ue, tyvars, env),
-            (HType::Vec { elem: pe }, HType::Vec { elem: ue }) => go(pe, ue, tyvars, env),
-            // Note: Generic structs are already monomorphized to Struct(id) by
-            // the time receiver_unify is called (resolver turned `Box<int>`
-            // into a distinct StructId).  So no Generic-vs-Generic case here.
+                if pl == ul => go(pe, ue, tyvars, env, sym),
+            (HType::Vec { elem: pe }, HType::Vec { elem: ue }) => go(pe, ue, tyvars, env, sym),
             _ => false,
         }
     }
-    if go(pat, actual, tyvars, &mut env) { Some(env) } else { None }
+    if go(pat, actual, tyvars, &mut env, sym) { Some(env) } else { None }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -341,6 +423,13 @@ pub struct StructInfo {
     pub type_params: Vec<String>,
     /// For instantiations, the underlying template name (e.g. "Pair") and the concrete args.
     pub template: Option<String>,
+    /// For instantiations, the resolved HType args used to build this
+    /// monomorphization (e.g. `[Int, Str]` for `Pair<int, string>`).  Empty
+    /// for templates and non-generic structs.  Used by receiver_unify so
+    /// `GenericPattern { Pair, [TyVar A, TyVar B] }` against a concrete
+    /// `Struct(Pair<int, string>_id)` can recover the original args and
+    /// bind A=int, B=string.
+    pub template_args: Vec<HType>,
     pub fields: Vec<FieldInfo>,
     pub is_pub: bool,
     pub module_path: Vec<String>,
@@ -371,6 +460,12 @@ pub struct EnumInfo {
     pub is_pub: bool,
     pub module_path: Vec<String>,
     pub span: Span,
+    /// For instantiations, the underlying template name (e.g. "Result").
+    /// Empty for templates and non-generic enums.  Mirror of `StructInfo.template`.
+    pub template: Option<String>,
+    /// For instantiations, the resolved HType args used to build this
+    /// monomorphization.  Mirror of `StructInfo.template_args`.
+    pub template_args: Vec<HType>,
 }
 
 impl EnumInfo {

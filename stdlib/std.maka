@@ -23,10 +23,41 @@ pub enum Result<T, E> {
     Err { E err   },
 }
 
-// `Try` will eventually live here as a `has` attr once generic
-// enum-receiver type-variable tracking (`Result<T, E> has Try`) lands.
-// Until then `propagate r;` is special-cased on `Result<T, E>` directly
-// — see SPEC §4.3 and the worked test `176_propagate_result.maka`.
+// `Try` — the propagate-friendly fallibility attr.  A type T has Try
+// iff it splits cleanly into an Ok / Err pair AND can be reconstructed
+// from an Err alone.  `propagate r;` (§4.3) desugars through this attr.
+pub attr Try {
+    type Ok;
+    type Err;
+    bool is_ok(&_ self);
+    _::Err unwrap_err(_ self);
+    _ from_err(_::Err err);
+}
+
+pub Result<T, E> has Try {
+    type Ok  = T;
+    type Err = E;
+
+    bool is_ok(&Result<T, E> self) {
+        mut bool out = false;
+        match (self) {
+            Result.Ok { value } { out = true; }
+            Result.Err { err }  { out = false; }
+        }
+        return out;
+    }
+
+    E unwrap_err(Result<T, E> self) {
+        match (self) {
+            Result.Err { err }  { return err; }
+            Result.Ok { value } { panic("unwrap_err on Ok"); }
+        }
+    }
+
+    Result<T, E> from_err(E e) {
+        return Result.Err { err = e };
+    }
+}
 
 // ---- string helpers ----------------------------------------------------
 

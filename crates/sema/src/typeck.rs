@@ -1257,6 +1257,7 @@ impl<'a> TypeChecker<'a> {
         match t {
             HType::Int | HType::SizedInt { .. } | HType::Float | HType::SizedFloat { .. } | HType::Bool
             | HType::Char | HType::Unit | HType::Str | HType::NullT => true,
+            HType::GenericPattern { .. } => false,
             // Sync primitives recognized by name (auto-recognized stdlib types).
             HType::Struct(id) => {
                 let info = self.sym.struct_info(*id);
@@ -3095,7 +3096,7 @@ impl<'a> TypeChecker<'a> {
                 if sig.param_tys.len() != probed.len() { return false; }
             }
             for (i, ph) in probed.iter().take(sig.param_tys.len()).enumerate() {
-                if !param_compatible(&sig.param_tys[i], &ph.ty, &sig.type_params) {
+                if !param_compatible_with_sym(&sig.param_tys[i], &ph.ty, &sig.type_params, self.sym) {
                     return false;
                 }
             }
@@ -3269,7 +3270,7 @@ impl<'a> TypeChecker<'a> {
             let probed: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
             for (i, ph) in probed.iter().enumerate() {
                 if let Some(want) = template_param_tys.get(i) {
-                    unify(want, &ph.ty, &mut env);
+                    unify_with_sym(want, &ph.ty, &mut env, self.sym);
                 }
             }
             // Ensure all type params got substitutions.
@@ -3331,8 +3332,10 @@ impl<'a> TypeChecker<'a> {
         let (final_fid, final_param_tys, final_ret) = if type_params.is_empty() {
             (fid, template_param_tys, template_ret)
         } else {
-            let new_param_tys: Vec<HType> = template_param_tys.iter().map(|t| t.subst(&env)).collect();
-            let new_ret = template_ret.subst(&env);
+            let new_param_tys: Vec<HType> = template_param_tys.iter()
+                .map(|t| concretize_generic_patterns(&t.subst(&env), self.sym))
+                .collect();
+            let new_ret = concretize_generic_patterns(&template_ret.subst(&env), self.sym);
             let req_idx = self.instantiation_requests.len();
             self.instantiation_requests.push(InstantiationReq {
                 template_fid: fid,
@@ -3641,6 +3644,7 @@ impl<'a> TypeChecker<'a> {
             name: env_name.clone(),
             type_params: Vec::new(),
             template: None,
+            template_args: Vec::new(),
             fields: env_fields,
             is_pub: false,
             module_path: Vec::new(),
@@ -4644,6 +4648,10 @@ pub fn type_str(t: &HType) -> String {
         }
         HType::TyVar(n) => format!("'{}", n),
         HType::AssocType { on, segment, .. } => format!("{}::{}", type_str(on), segment),
+        HType::GenericPattern { template_name, args, .. } => {
+            let inner: Vec<String> = args.iter().map(type_str).collect();
+            format!("{}<{}>", template_name, inner.join(", "))
+        }
         HType::RustOpaque(label) => format!("Rust<{}>", label),
     }
 }
@@ -4657,23 +4665,114 @@ pub fn strip_to_dyn(t: &HType) -> Option<Vec<String>> {
     }
 }
 
+/// After type-variable substitution, replace any `GenericPattern { template, args }`
+/// whose args are all concrete with the matching concrete `Struct(id)` / `Enum(id)`
+/// from `sym.struct_instantiations` / `sym.enum_instantiations`.  Returns the input
+/// unchanged when no canonical instantiation exists.  Walks the type tree.
+pub fn concretize_generic_patterns(t: &HType, sym: &SymTab) -> HType {
+    fn fully_concrete(t: &HType) -> bool {
+        match t {
+            HType::TyVar(_) | HType::GenericPattern { .. } => false,
+            HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::RawPtr { inner, .. }
+            | HType::OwnPtr { inner, .. } | HType::Heap { inner } => fully_concrete(inner),
+            HType::Array { elem, .. } | HType::Slice { elem, .. } | HType::Vec { elem } => fully_concrete(elem),
+            HType::FnPtr { ret, params } => fully_concrete(ret) && params.iter().all(fully_concrete),
+            HType::AssocType { on, .. } => fully_concrete(on),
+            _ => true,
+        }
+    }
+    match t {
+        HType::GenericPattern { template_name, args, is_enum } => {
+            let cargs: Vec<HType> = args.iter().map(|a| concretize_generic_patterns(a, sym)).collect();
+            if cargs.iter().all(fully_concrete) {
+                let key: String = cargs.iter().map(|t| t.key()).collect::<Vec<_>>().join(",");
+                if *is_enum {
+                    if let Some(eid) = sym.enum_instantiations.get(&(template_name.clone(), key)) {
+                        return HType::Enum(EnumId(*eid));
+                    }
+                } else {
+                    if let Some(sid) = sym.struct_instantiations.get(&(template_name.clone(), key)) {
+                        return HType::Struct(StructId(*sid));
+                    }
+                }
+            }
+            HType::GenericPattern {
+                template_name: template_name.clone(),
+                args: cargs,
+                is_enum: *is_enum,
+            }
+        }
+        HType::Ref { mutable, inner } => HType::Ref { mutable: *mutable, inner: Box::new(concretize_generic_patterns(inner, sym)) },
+        HType::Ptr { mutable, inner } => HType::Ptr { mutable: *mutable, inner: Box::new(concretize_generic_patterns(inner, sym)) },
+        HType::RawPtr { mutable, inner } => HType::RawPtr { mutable: *mutable, inner: Box::new(concretize_generic_patterns(inner, sym)) },
+        HType::OwnPtr { mutable, inner } => HType::OwnPtr { mutable: *mutable, inner: Box::new(concretize_generic_patterns(inner, sym)) },
+        HType::Heap { inner } => HType::Heap { inner: Box::new(concretize_generic_patterns(inner, sym)) },
+        HType::Array { len, elem } => HType::Array { len: *len, elem: Box::new(concretize_generic_patterns(elem, sym)) },
+        HType::Slice { mutable, elem } => HType::Slice { mutable: *mutable, elem: Box::new(concretize_generic_patterns(elem, sym)) },
+        HType::Vec { elem } => HType::Vec { elem: Box::new(concretize_generic_patterns(elem, sym)) },
+        HType::FnPtr { ret, params } => HType::FnPtr {
+            ret: Box::new(concretize_generic_patterns(ret, sym)),
+            params: params.iter().map(|p| concretize_generic_patterns(p, sym)).collect(),
+        },
+        _ => t.clone(),
+    }
+}
+
 /// Check if an argument's type is compatible with a parameter type (possibly generic).
 pub fn param_compatible(param: &HType, actual: &HType, type_params: &[String]) -> bool {
+    param_compatible_impl(param, actual, type_params, None)
+}
+
+/// SymTab-aware variant — needed when the param contains `GenericPattern`
+/// (impl receiver pattern for `Result<T, E> has Foo`) and the actual is a
+/// concrete `Enum(id)` / `Struct(id)` of an instantiation: we have to read
+/// the concrete's `template` and `template_args` from sym to match arg-by-arg.
+pub fn param_compatible_with_sym(param: &HType, actual: &HType, type_params: &[String], sym: &SymTab) -> bool {
+    param_compatible_impl(param, actual, type_params, Some(sym))
+}
+
+fn param_compatible_impl(param: &HType, actual: &HType, type_params: &[String], sym: Option<&SymTab>) -> bool {
     // A TyVar matches anything.
     if let HType::TyVar(_) = param { return true; }
-    // Structural unification through pointer/ref kinds: when the param's head
-    // constructor matches the actual's, recurse on the inner.  This is what
-    // lets `&*T self` (param) match `&*Box` (actual) — the outer `&` and
-    // inner `*` match exactly, and `T` is a TyVar which matches `Box`.
+    // §10.4 receiver-pattern dispatch: the impl stored `Result<T, E>` as
+    // GenericPattern; the call site has a concrete instantiation Enum(id).
+    // Look up the concrete's template_name + template_args and match.
+    if let HType::GenericPattern { template_name: pn, args: pargs, is_enum: pe } = param {
+        if let Some(sym) = sym {
+            match actual {
+                HType::Struct(sid) if !pe => {
+                    let info = sym.struct_info(*sid);
+                    if info.template.as_deref() != Some(pn.as_str()) { return false; }
+                    if info.template_args.len() != pargs.len() { return false; }
+                    return pargs.iter().zip(info.template_args.iter())
+                        .all(|(p, a)| param_compatible_impl(p, a, type_params, Some(sym)));
+                }
+                HType::Enum(eid) if *pe => {
+                    let info = sym.enum_info(*eid);
+                    if info.template.as_deref() != Some(pn.as_str()) { return false; }
+                    if info.template_args.len() != pargs.len() { return false; }
+                    return pargs.iter().zip(info.template_args.iter())
+                        .all(|(p, a)| param_compatible_impl(p, a, type_params, Some(sym)));
+                }
+                HType::GenericPattern { template_name: an, args: aargs, is_enum: ae } => {
+                    if pn != an || pe != ae || pargs.len() != aargs.len() { return false; }
+                    return pargs.iter().zip(aargs.iter())
+                        .all(|(p, a)| param_compatible_impl(p, a, type_params, Some(sym)));
+                }
+                _ => return false,
+            }
+        }
+        return false;
+    }
     match (param, actual) {
         (HType::Ref { mutable: pm, inner: pi }, HType::Ref { mutable: am, inner: ai })
-            if pm == am => { if param_compatible(pi, ai, type_params) { return true; } }
+            if pm == am => { if param_compatible_impl(pi, ai, type_params, sym) { return true; } }
         (HType::Ptr { mutable: pm, inner: pi }, HType::Ptr { mutable: am, inner: ai })
-            if pm == am => { if param_compatible(pi, ai, type_params) { return true; } }
+            if pm == am => { if param_compatible_impl(pi, ai, type_params, sym) { return true; } }
         (HType::RawPtr { mutable: pm, inner: pi }, HType::RawPtr { mutable: am, inner: ai })
-            if pm == am => { if param_compatible(pi, ai, type_params) { return true; } }
+            if pm == am => { if param_compatible_impl(pi, ai, type_params, sym) { return true; } }
         (HType::OwnPtr { mutable: pm, inner: pi }, HType::OwnPtr { mutable: am, inner: ai })
-            if pm == am => { if param_compatible(pi, ai, type_params) { return true; } }
+            if pm == am => { if param_compatible_impl(pi, ai, type_params, sym) { return true; } }
         _ => {}
     }
     // Allow trivial implicit conversions (struct embedding upcast deferred).
@@ -4740,20 +4839,52 @@ pub fn param_compatible(param: &HType, actual: &HType, type_params: &[String]) -
 
 /// Best-effort unification: collect bindings for TyVars by walking pattern (`pat`) vs actual.
 pub fn unify(pat: &HType, actual: &HType, env: &mut std::collections::HashMap<String, HType>) {
+    unify_impl(pat, actual, env, None)
+}
+
+pub fn unify_with_sym(pat: &HType, actual: &HType, env: &mut std::collections::HashMap<String, HType>, sym: &SymTab) {
+    unify_impl(pat, actual, env, Some(sym))
+}
+
+fn unify_impl(pat: &HType, actual: &HType, env: &mut std::collections::HashMap<String, HType>, sym: Option<&SymTab>) {
     match (pat, actual) {
         (HType::TyVar(n), other) => {
-            // For container patterns like `&mut T`, allow the actual to be the referent.
             env.entry(n.clone()).or_insert_with(|| other.clone());
+            return;
         }
-        (HType::Ref { inner: pi, .. }, HType::Ref { inner: ai, .. }) => unify(pi, ai, env),
-        (HType::Ptr { inner: pi, .. }, HType::Ptr { inner: ai, .. }) => unify(pi, ai, env),
-        (HType::Heap { inner: pi }, HType::Heap { inner: ai }) => unify(pi, ai, env),
-        (HType::Array { elem: pi, .. }, HType::Array { elem: ai, .. }) => unify(pi, ai, env),
-        (HType::Slice { elem: pi, .. }, HType::Slice { elem: ai, .. }) => unify(pi, ai, env),
-        (HType::Vec { elem: pi }, HType::Vec { elem: ai }) => unify(pi, ai, env),
+        _ => {}
+    }
+    // §10.4: GenericPattern (impl receiver Result<T, E>) vs concrete Enum/Struct.
+    // Recurse into the concrete's template_args to bind T and E.
+    if let HType::GenericPattern { args: pargs, is_enum, .. } = pat {
+        if let Some(sym) = sym {
+            let actual_args: Option<&Vec<HType>> = match actual {
+                HType::Enum(id) if *is_enum => Some(&sym.enum_info(*id).template_args),
+                HType::Struct(id) if !*is_enum => Some(&sym.struct_info(*id).template_args),
+                HType::GenericPattern { args, .. } => Some(args),
+                _ => None,
+            };
+            if let Some(aargs) = actual_args {
+                if pargs.len() == aargs.len() {
+                    for (p, a) in pargs.iter().zip(aargs.iter()) {
+                        unify_impl(p, a, env, Some(sym));
+                    }
+                }
+                return;
+            }
+        }
+        return;
+    }
+    match (pat, actual) {
+        (HType::Ref { inner: pi, .. }, HType::Ref { inner: ai, .. }) => unify_impl(pi, ai, env, sym),
+        (HType::Ptr { inner: pi, .. }, HType::Ptr { inner: ai, .. }) => unify_impl(pi, ai, env, sym),
+        (HType::Heap { inner: pi }, HType::Heap { inner: ai }) => unify_impl(pi, ai, env, sym),
+        (HType::Array { elem: pi, .. }, HType::Array { elem: ai, .. }) => unify_impl(pi, ai, env, sym),
+        (HType::Slice { elem: pi, .. }, HType::Slice { elem: ai, .. }) => unify_impl(pi, ai, env, sym),
+        (HType::Vec { elem: pi }, HType::Vec { elem: ai }) => unify_impl(pi, ai, env, sym),
         // Also accept passing `T` value for `&T`/`&mut T` parameter.
-        (HType::Ref { inner: pi, .. }, other) => unify(pi, other, env),
-        (HType::Ptr { inner: pi, .. }, other) => unify(pi, other, env),
+        (HType::Ref { inner: pi, .. }, other) => unify_impl(pi, other, env, sym),
+        (HType::Ptr { inner: pi, .. }, other) => unify_impl(pi, other, env, sym),
         _ => {}
     }
 }

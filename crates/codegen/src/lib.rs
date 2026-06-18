@@ -4925,6 +4925,10 @@ impl<'a> Cx<'a> {
             }
             HType::TyVar(n) => format!("T_{}", n),
             HType::AssocType { on, segment, .. } => format!("AT_{}_{}", self.type_key(on), segment),
+            HType::GenericPattern { template_name, args, .. } => {
+                let inner: Vec<String> = args.iter().map(|a| self.type_key(a)).collect();
+                format!("GP_{}__{}", template_name, inner.join("_"))
+            }
             // `Rust<T>` shares the C layout of `own *mut unit` (= `void*`).
             HType::RustOpaque(_) => "p_maka_unit".into(),
         }
@@ -4992,6 +4996,7 @@ impl<'a> Cx<'a> {
             }
             HType::TyVar(_) => "void*".into(), // erased; not expected at codegen
             HType::AssocType { .. } => "void*".into(), // erased; should have been resolved at mono
+            HType::GenericPattern { .. } => "void*".into(), // pattern-only; never reaches codegen for real instantiations
             // `Rust<T>` is `own *mut unit` at the C layer (= `void*`).
             HType::RustOpaque(_) => "void*".into(),
         }
