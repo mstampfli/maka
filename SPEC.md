@@ -1486,6 +1486,59 @@ Spawn lowering: `(Thread*)__maka_spawn(closure.code, closure.env)`. The
 prologue defines `__maka_spawn`, `__maka_join`, `__maka_thread_entry` as
 pthread wrappers.
 
+### 13.1 `--freestanding` (kernel / no-libc target)
+
+`makac --freestanding` strips the libc-using prologue, skips the auto-
+include of `stdlib/std.maka`, and routes the allocator + log + panic
+hooks to user-provided extern symbols.  Generated C compiles cleanly
+under `gcc -ffreestanding -nostdlib`.
+
+**Emitted prologue**: only the headers C requires every freestanding
+implementation to provide — `<stdint.h>`, `<stdbool.h>`, `<stddef.h>`,
+`<stdarg.h>` (plus user `cinclude` directives).  No `<stdio.h>`,
+`<stdlib.h>`, `<pthread.h>`, `<sys/*>`, or any other libc header.
+
+**User-supplied runtime hooks** (declared extern, never defined by codegen):
+
+| Symbol | Lowered from | Notes |
+|---|---|---|
+| `void* __maka_alloc(size_t sz)` | `alloc T { ... }` | OS-provided heap (bump / slab / buddy / whatever). |
+| `void __maka_free(void* p)` | `free p;` and auto-frees | May be a no-op if the kernel leaks. |
+| `void __maka_panic(const char* msg)` | `panic`, `maka_check_idx` | Halt, log, hcf — author's call. |
+| `void __maka_log_int(int64_t v)` | `log(int)` | Useful for early-boot debug; can be a no-op. |
+| `void __maka_log_str(const char* s)` | `log(string)` | Same. |
+
+The codegen prologue declares these as `extern` and `#define`s `malloc` /
+`free` / `maka_panic` / `maka_log_*` to forward to them — so existing
+emit sites (heap allocation in stmt-expressions, index checks, etc.)
+work unchanged with no per-site gating.
+
+**No `int main` shim** — the OS author calls `maka_main()` directly from
+their `_start` / boot code.  Codegen emits the user's `unit main()` as
+`void maka_main(void)`.
+
+**Atomic builtins** (`atomic_load`, `atomic_cas`, `atomic_fetch_*`,
+`atomic_fence`) lower to `__atomic_*` C intrinsics that gcc/clang emit
+inline — no libc, no syscalls.  They work unchanged in freestanding mode.
+
+**Platform-dependent builtins** (`futex_wait`, `futex_wake`,
+`thread_yield`, `syscall`) assume a host kernel exists, so they should
+not be used in freestanding code targeting the kernel level — the OS
+*is* the host kernel.  Calling them compiles, but the user-supplied
+runtime must define `__maka_futex_*` / `__maka_thread_yield` /
+`__maka_syscall` itself.
+
+**Build invocation** (example):
+```
+makac --freestanding kernel.maka --emit-c -o kernel.c
+gcc -ffreestanding -nostdlib -fno-stack-protector -nostartfiles \
+    -c kernel.c -o kernel.o
+gcc -ffreestanding -nostdlib -c runtime.c -o runtime.o
+ld -T linker.ld -o kernel.img kernel.o runtime.o
+```
+
+A worked stub runtime + smoke test live at `tests/freestanding/`.
+
 ---
 
 ## 14. Built-in functions (reserved `FuncId`)

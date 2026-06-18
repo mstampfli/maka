@@ -22,6 +22,12 @@ fn main() {
     let mut run = false;
     let mut rust_profile: Option<String> = None;
     let mut no_rust = false;
+    // Freestanding mode — strip the libc-using codegen prologue, skip the
+    // auto-include of stdlib/std.maka, and lower alloc/free/panic/log to
+    // user-provided extern symbols (__maka_alloc, __maka_free, __maka_panic,
+    // __maka_log).  Targets a no-libc / no-OS environment (kernels, boot
+    // images).  See "Freestanding mode" in SPEC.
+    let mut freestanding = false;
     let mut i = 1;
     while i < args.len() {
         let a = &args[i];
@@ -30,6 +36,7 @@ fn main() {
             "--emit-c" => { emit_c = true; }
             "--run" => { run = true; }
             "--no-rust" => { no_rust = true; }
+            "--freestanding" => { freestanding = true; no_rust = true; }
             "--rust-profile" => { i += 1; rust_profile = Some(args[i].clone()); }
             s if s.starts_with("--rust-profile=") => {
                 rust_profile = Some(s.trim_start_matches("--rust-profile=").to_string());
@@ -70,6 +77,7 @@ fn main() {
     // explicit `import std.Name;` to use - this is regular module visibility,
     // not magic prelude.
     let std_src = include_str!("../../../stdlib/std.maka");
+    if !freestanding {
     if let Ok(m) = maka_parser::parse(std_src) {
         let path: Vec<String> = m.module_path.clone().unwrap_or_default();
         let flat_imports: Vec<(Vec<String>, String)> = m.imports.iter()
@@ -82,6 +90,7 @@ fn main() {
             merged.item_has_imports.push(file_has_imports.clone());
         }
         merged.items.extend(m.items);
+    }
     }
     for f in &inputs {
         let src = std::fs::read_to_string(f).unwrap_or_else(|e| {
@@ -161,7 +170,11 @@ fn main() {
     }
 
     // Codegen
-    let c_code = maka_codegen::emit(&hir);
+    let c_code = if freestanding {
+        maka_codegen::emit_freestanding(&hir)
+    } else {
+        maka_codegen::emit(&hir)
+    };
 
     let stem = PathBuf::from(&first_input).file_stem().unwrap().to_string_lossy().to_string();
     let out_c = output.clone().unwrap_or_else(|| format!("{}.c", stem));

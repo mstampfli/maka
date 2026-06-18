@@ -12,6 +12,20 @@ pub fn emit(m: &HirModule) -> String {
     cx.out
 }
 
+/// Freestanding emit — no libc / no stdio / no malloc.  The prologue
+/// drops every `#include` and every runtime helper that calls libc; the
+/// allocator (`alloc T { ... }` and `free p;`) is rewritten to call
+/// user-provided extern symbols `__maka_alloc(usize)` and `__maka_free(*mut)`.
+/// `log` and `panic` likewise lower to `__maka_log` / `__maka_panic` externs.
+/// The caller (kernel author / boot image) is expected to provide those four
+/// symbols in their own translation unit before linking.
+pub fn emit_freestanding(m: &HirModule) -> String {
+    let mut cx = Cx::new(&m.sym, &m.cincludes, &m.cblocks);
+    cx.freestanding = true;
+    cx.emit_module();
+    cx.out
+}
+
 struct Cx<'a> {
     sym: &'a SymTab,
     out: String,
@@ -36,6 +50,11 @@ struct Cx<'a> {
     /// a unique tag so labels and locals never collide across multiple call sites
     /// of the same inline within the same C function.
     inline_call_seq: u32,
+    /// Freestanding mode — emit a minimal libc-free prologue and route the
+    /// allocator / panic / log / atomic-runtime hooks to user-provided
+    /// extern symbols (`__maka_alloc`, `__maka_free`, `__maka_panic`,
+    /// `__maka_log`).  Set by `emit_freestanding()`.
+    pub freestanding: bool,
 }
 
 impl<'a> Cx<'a> {
@@ -50,6 +69,7 @@ impl<'a> Cx<'a> {
             fn_trampolines: Default::default(),
             closure_trampolines: Default::default(),
             inline_call_seq: 0,
+            freestanding: false,
         }
     }
 
@@ -136,7 +156,9 @@ impl<'a> Cx<'a> {
         // include is positioned AFTER all user code.  Otherwise socket.h's
         // pollution (e.g. the bare `accept` symbol) clobbers user functions
         // sharing those names.
-        self.emit_socket_helpers();
+        if !self.freestanding {
+            self.emit_socket_helpers();
+        }
 
         // Synthesize a C `int main` that calls Maka `main`.  Two surface shapes:
         //
@@ -145,6 +167,13 @@ impl<'a> Cx<'a> {
         //
         // The slice form receives a borrowed view of argv; Maka code may not free
         // it.  argv[0] is the program name, matching every other language.
+        //
+        // Freestanding mode skips this shim entirely: there's no libc-style
+        // `int main(argc, argv)` entry point on a kernel target.  The OS
+        // author's boot code calls `maka_main()` directly from their `_start`.
+        if self.freestanding {
+            return;
+        }
         let user_main = funcs.iter().find(|f| f.name == "main");
         match user_main {
             Some(f) => {
@@ -169,8 +198,65 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// Minimal freestanding prologue — no libc, no stdio, no stdlib.  Pulls
+    /// in only the headers C requires every freestanding implementation to
+    /// provide (`<stdint.h>`, `<stdbool.h>`, `<stddef.h>`, `<stdarg.h>` and
+    /// the C11 `<stdatomic.h>` for the `__atomic_*` intrinsics).  Allocator,
+    /// log, and panic hooks become extern symbols the OS author defines.
+    /// User cblocks are pasted verbatim as in the regular path.
+    fn emit_freestanding_prologue(&mut self) {
+        self.w("// freestanding mode — no libc, no stdio, no malloc.\n");
+        self.w("// User must provide: __maka_alloc, __maka_free, __maka_panic, __maka_log_int, __maka_log_str.\n");
+        self.w("#include <stdint.h>\n");
+        self.w("#include <stdbool.h>\n");
+        self.w("#include <stddef.h>\n");
+        self.w("#include <stdarg.h>\n");
+        // User-requested system headers from `cinclude "name.h";` directives.
+        // In a kernel build the user will typically use cinclude only for
+        // their own headers; libc system headers will fail to compile under
+        // `-ffreestanding -nostdinc`.
+        let extras: Vec<String> = self.module_cincludes.to_vec();
+        for h in &extras { self.w(&format!("#include <{}>\n", h)); }
+        self.w("typedef int64_t maka_int;\ntypedef double maka_float;\ntypedef uint8_t maka_char;\n");
+        self.w("typedef struct { int dummy; } maka_unit;\n");
+        self.w("static maka_unit MAKA_UNIT = {0};\n");
+        // Runtime hooks the OS author supplies — declared, never defined here.
+        self.w("extern void* __maka_alloc(size_t sz);\n");
+        self.w("extern void  __maka_free(void* p);\n");
+        self.w("extern void  __maka_panic(const char* msg);\n");
+        self.w("extern void  __maka_log_int(maka_int v);\n");
+        self.w("extern void  __maka_log_str(const char* s);\n");
+        // Macro-redirect all in-prologue malloc/free/panic/log call sites in
+        // existing codegen paths so we don't have to change every emit point.
+        // `printf`/`puts`/`fprintf` are NOT redirected — any code path that
+        // would emit one of those (string concat helpers, read_line, etc.)
+        // is not reachable in freestanding mode because the stdlib that uses
+        // them isn't auto-included and the helper emit blocks are guarded.
+        self.w("#define malloc(sz)            __maka_alloc((size_t)(sz))\n");
+        self.w("#define free(p)               __maka_free((void*)(p))\n");
+        self.w("#define maka_panic(s)         __maka_panic(s)\n");
+        self.w("#define maka_log_int(v)       __maka_log_int(v)\n");
+        self.w("#define maka_log_str(s)       __maka_log_str(s)\n");
+        // Minimal helpers the rest of codegen assumes are present.
+        // `maka_check_idx` is emitted by array/slice access; route to panic.
+        self.w("static inline maka_int maka_check_idx(maka_int i, maka_int len, const char* msg){ if(i<0||i>=len) maka_panic(msg); return i; }\n");
+        // Atomic intrinsics — `__atomic_*` are compiler builtins (gcc/clang
+        // emit them inline, no libc).  The runtime helpers that wrap them
+        // in `maka_atomic_*` symbols are kept here for any extern decl that
+        // referenced them.
+        self.w("static maka_int maka_atomic_load_i64(maka_int* p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }\n");
+        self.w("static void     maka_atomic_store_i64(maka_int* p, maka_int v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }\n");
+        self.w("static maka_int maka_atomic_fetch_add_i64(maka_int* p, maka_int d) { return __atomic_fetch_add(p, d, __ATOMIC_SEQ_CST); }\n");
+        self.w("static maka_int maka_atomic_fetch_sub_i64(maka_int* p, maka_int d) { return __atomic_fetch_sub(p, d, __ATOMIC_SEQ_CST); }\n");
+        self.w("static void     maka_fence(maka_int ord) { (void)ord; __atomic_thread_fence(__ATOMIC_SEQ_CST); }\n");
+    }
+
     fn emit_prologue(&mut self) {
         self.w("// generated by makac\n");
+        if self.freestanding {
+            self.emit_freestanding_prologue();
+            return;
+        }
         // Feature-test macros must be defined BEFORE any libc include — once
         // <stdio.h> is parsed, redefining them is a no-op.  On Darwin we need
         // both _DARWIN_C_SOURCE (for non-POSIX extensions like ucontext) and

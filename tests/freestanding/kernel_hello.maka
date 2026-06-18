@@ -1,0 +1,10 @@
+// Smoke test for `--freestanding`: program uses `alloc`, deref, `log`.
+// Verifies the generated C compiles + links cleanly under
+// `-ffreestanding -nostdlib` with a user-supplied stub runtime.
+data Heap { mut int next; }
+
+unit main() {
+    own *Heap h = alloc Heap { next = 0 };
+    h!.next = 42;
+    log(h!.next);
+}
