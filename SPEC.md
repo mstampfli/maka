@@ -42,7 +42,7 @@ A `.maka` source file consists of:
 ```
 mut const constexpr unsafe inline propagate
 extern cinclude cblock rblock rdep raw own alloc free
-data enum logic attr has where dyn
+data enum logic attr has where dyn type Self
 if else while for in break continue match yield return
 gate transfer share thread_local module import use pub
 spawn join
@@ -325,7 +325,10 @@ logic_decl   := logic Name { func_decl* }
 attr_decl    := [pub]? attr Name { attr_method* }
 has_decl     := [pub]? Name has Name { func_decl* }
 attr_method  := RetType name (params) [where ...]  ";" | block
-use_decl     := use ModPath . Type . Attr ;
+use_decl     := use ModPath . Receiver . Attr ;
+Receiver     := Type | PrimitiveType | "*" Receiver | "&" Receiver | "&mut" Receiver
+              | "own" "*" Receiver | "own" "&" Receiver | "raw" "*" Receiver
+              | Ident "<" Receiver ("," Receiver)* ">"
 cinclude     := cinclude "header.h";
 cblock       := cblock "raw C source";
 rblock       := rblock "raw Rust source";
@@ -574,6 +577,13 @@ unit main() {
 and structs whose every field is Shareable are auto-derived as Shareable. `*T`
 to mutable data and `raw *T` are NOT Shareable.
 
+For generic structs with associated-type-placeholder fields (e.g.
+`data Wrapper<T: Stored> { T::Slot inner; }`, §10.5), Shareability is
+evaluated **per concrete instantiation**, not at the generic declaration
+site.  `Wrapper<int>` is Shareable iff the resolved `int::Slot` is
+Shareable; `Wrapper<*Foo>` is Shareable iff `*Foo::Slot` is.  The
+unmonomorphized form has no Shareable verdict.
+
 Recognized Shareable types by name: `Mutex`, `RwLock`, `Spinlock`, `Channel`,
 `AtomicI8`–`AtomicI64`, `AtomicU8`–`AtomicU64`, `AtomicBool`, `AtomicPtr`,
 `Thread`.
@@ -757,6 +767,11 @@ Match is both an expression and a statement. As an expression, all arms must
 produce the same type, returned via `yield expr;` (or just the trailing
 expression).
 
+Generics are erased before pattern dispatch — match scrutinees always
+have concrete monomorphized types.  A binding destructured out of a
+generic struct (`Wrapper<T>` per §10.5) receives the **concrete resolved**
+type for the current monomorphization, never an abstract `T::Slot`.
+
 ---
 
 ## 9. Closures and lambdas
@@ -902,11 +917,408 @@ machinery as `has` impls - a `pub logic` is reachable cross-module only when
 the consumer explicitly opts in.  Per-method `pub` on a logic-block method is
 not part of the grammar; visibility flows from the block.
 
+**`logic` is frozen at its current shape.**  The new features from
+§10.4 (parametric receivers) and §10.5 (associated types) are exclusive
+to `attr`/`has`.  `logic` blocks are subject to the §10.4 coherence
+rule against overlapping impls but cannot themselves use generic
+receivers or declare associated types.  When the trait extensions
+stabilize, `logic` is expected to be deprecated in favor of `attr`/`has`;
+no further features will be added to the `logic` form.
+
 ### 10.3 Monomorphization
 
 Generics are **monomorphized** at compile time: every concrete instantiation
 gets its own struct/function in the generated C. `Vec<T>`, `Pair<int, string>`
 etc. are expanded to distinct C structs.
+
+### 10.4 Generic `has` receivers
+
+> **Implementation status (2026-06).**  §10.4–10.7 describe the **target design**
+> for Maka's typeclass extensions.  As of this writing the implementation
+> supports only §10.1's concrete-receiver `has` impls; the parser, sema impl
+> lookup, overlap checker, and associated-type machinery described below are
+> not yet present.  Specifying them here ahead of implementation is intentional —
+> these sections are the contract the parser/sema work will be checked against.
+> When the implementation lands, this note is replaced by a "Stabilized in vX.Y"
+> line.
+
+The receiver of a `has` impl can be **parametric**, not only a concrete named
+type.  Four receiver kinds are accepted:
+
+```maka
+*T  has Stored { ... }              // any `*T` — non-owning mutable pointer
+&T  has Stored { ... }              // any `&T` — borrow
+own *T has Stored { ... }           // any `own *T` — owning pointer
+Box<T> has Stored { ... }           // any concrete generic struct
+int has Stored { ... }              // primitives (`int`/`bool`/`i8..u64`)
+```
+
+Inside a generic-receiver `has` block, `T` refers to the bound type
+variable.  Methods see the receiver type via the usual `_` placeholder
+substitution (e.g. `&_ self` becomes `&*T self` in a `*T has Stored`
+block; `&Self` is an accepted alias).
+
+**Receiver patterns.** The grammar admits:
+- A concrete named type (`Foo`, `Foo<int>`, `int`, `bool`, `i32`, etc.)
+- A primitive (`int`, `bool`, sized ints, `char`, `string`, `float`)
+- A pointer / reference family with one type-variable inside:
+  `*T`, `&T`, `&mut T`, `own *T`, `own &T`, `raw *T`
+- A generic struct with one or more type variables:
+  `Box<T>`, `Pair<A, B>` — the variables bind the generic positions
+
+Receiver kinds can also nest: `*Box<T> has Stored { ... }` matches `*Box<int>`,
+`*Box<string>`, etc., but not `*int`.
+
+**Resolution.** At a generic call site `foo<U>(...)` with bound `U: Stored`
+and concrete `U = X`, sema walks the registered `Stored` impls and unifies
+`X` against each receiver pattern.  The unique matching impl is the
+resolved instance.
+
+**Unification algorithm.**  Unification of a receiver pattern against a
+concrete type is **first-order, structural, no implicit subtyping**:
+the pattern and the concrete type are walked in parallel; type variables
+in the pattern bind to whatever they meet; concrete head constructors
+(pointer kind, struct name, primitive) must match exactly; differing
+mutness (`*T` vs `*const T` vs `*mut T`) is **not** a match.  The
+algorithm bottoms out on primitives (each is its own atom; `int` and
+`bool` do not unify).  No backtracking, no occurs check (cycles forbidden
+elsewhere — see §10.5).
+
+**Coherence — overlap is rejected.** If a new `has` impl's receiver pattern
+overlaps with an already-registered impl for the same attr, the new impl
+is a compile error.  Two patterns overlap iff there is some concrete type
+that simultaneously unifies with both (i.e. an assignment of all type
+variables on both sides exists making the patterns structurally equal).
+Examples:
+
+- `*Foo has Stored` and `*T has Stored` — `*Foo` unifies with both; overlap, rejected at the second.
+- `*T has Stored` and `&T has Stored` — disjoint (different head constructors); OK.
+- `*T has Stored` and `*const T has Stored` — disjoint (different mutness); OK.
+- `Box<int> has Stored` and `Box<T> has Stored` — `Box<int>` unifies with both; overlap, rejected.
+- `Pair<A, B> has Stored` and `Pair<int, B> has Stored` — `Pair<int, int>` unifies with both; overlap, rejected.  Partial specificity in any position still counts.
+- `int has Stored` and `bool has Stored` — disjoint primitives; OK.
+
+The rule keeps method dispatch unambiguous without specialization rules.
+Users who want concrete-overrides-generic must add a separate trait or
+use composition.
+
+**When overlap is diagnosed.**  Overlap is checked **at the registration
+site of the second impl**, during the sema resolve pass — not lazily at
+the call site.  An impl that conflicts with an imported impl is rejected
+in the importing module, with both impl locations included in the error.
+There is no "ok in this module, fails at use site" — registering an
+overlapping impl is always an error, even if the conflicting impl came
+from a `use`'d declaration.
+
+**Visibility.** `pub` and the cross-module `use Mod.Type.Attr;` rule
+(§10.1) carry over unchanged.  For a parametric receiver `R has Attr`,
+the use form spells `R` verbatim:
+
+```maka
+use shapes.*T.Stored;        // imports the `*T has Stored` impl from shapes
+use shapes.Box<T>.Stored;    // imports the `Box<T> has Stored` impl
+```
+
+The grammar production (§5) is correspondingly relaxed: in `use ModPath . R . Attr ;`,
+`R` may be any receiver pattern (concrete `Type`, primitive name, or
+parametric form — `*T`, `&T`, `&mut T`, `own *T`, `own &T`, `raw *T`,
+or `Name<T1, T2, ...>` with type variables in any subset of positions).
+
+**The `Self` keyword.**  `Self` is a reserved keyword (§1.4) usable
+**only** inside an `attr` declaration body or a `has` impl body.  Inside
+an `attr`, `Self` is an alias for the `_` placeholder.  Inside a `has`
+impl, `Self` refers to the impl's receiver type **after type-variable
+substitution at the current monomorphization**.  Examples:
+
+- In `*T has Stored { unit init(&Self self, ...) }`, `Self` denotes `*T`
+  during definition; when the impl is instantiated with `T = Foo`, every
+  `Self` becomes `*Foo`.
+- In `*Box<T> has Stored { ... &Self ... }`, `Self` denotes `*Box<T>`,
+  and `Self` substitutes to `*Box<int>` when called with `T = int`.
+
+`Self` outside `attr` / `has` blocks is a parse error.
+
+**Interaction with `logic` blocks.**  `logic` blocks (§10.2) are subject
+to the same coherence rule — a `logic` block whose first-parameter
+receiver type duplicates an existing `has` (or `logic`) impl of the same
+attr is rejected with the same overlap diagnostic.  However, `logic`
+blocks **do not** gain the new features: parametric receivers (§10.4) and
+associated types (§10.5) are exclusive to the `attr`/`has` form.  See
+§10.2 for the deprecation stance.
+
+### 10.5 Associated types on `attr`
+
+An `attr` may declare **associated types** — type-level slots each impl
+fills in.  Associated types extend the contract from "the impl provides
+these methods" to "the impl provides these methods AND picks these
+types."
+
+```maka
+attr Stored {
+    type Slot;                            // associated type — impl chooses
+    unit init(&mut _ self, _ value);
+}
+
+*T has Stored {
+    type Slot = *T;                       // for a *T receiver, Slot is *T
+    unit init(&mut Self self, *T value) { self.inner = value; }
+}
+
+own *T has Stored {
+    type Slot = OwnCell<T>;               // for own *T, Slot is OwnCell<T>
+    unit init(&mut Self self, own *T value) { /* ... */ }
+}
+
+data OwnCell<T> { own *T ptr; int drop_flag; }
+```
+
+**Multiple associated types.**  An `attr` may declare any number of
+associated types, in any order, intermixed with method signatures.
+Each `has` impl must provide a `type Name = ...;` for every associated
+type the attr declares (modulo the default-assoc-type extension below).
+
+```maka
+attr Pair { type Left; type Right; Left first(&_ self); Right second(&_ self); }
+data Tagged<L, R> { L l; R r; }
+Tagged<L, R> has Pair {
+    type Left  = L;
+    type Right = R;
+    L first (&Self self) { return self.l; }
+    R second(&Self self) { return self.r; }
+}
+```
+
+**Path syntax.** Inside a function or struct definition with a bound
+`T: Stored`, the associated type is named `T::Slot`.  This is a *type
+expression*: it can appear anywhere a type can.
+
+```maka
+// Function with assoc-type return:
+T::Slot fetch<T: Stored>(&T self) { ... }
+
+// Generic struct using an assoc type as a field type:
+data Wrapper<T: Stored> {
+    T::Slot inner;                        // ← the placeholder
+}
+```
+
+When `Wrapper<*Foo>` is instantiated, sema looks up `*T has Stored`,
+substitutes `T = Foo`, reads `type Slot = *T = *Foo`, and emits the
+concrete struct `{ *Foo inner; }`.  For `Wrapper<own *Foo>` the resolved
+slot is `OwnCell<Foo>`, so the emitted struct is `{ OwnCell<Foo> inner; }`
+which expands inline to `{ own *Foo ptr; int drop_flag; }`.
+
+**`data` is still the single source of layout truth.** The slot count
+of `Wrapper<T>` is fixed by the `data` declaration: exactly one field
+named `inner`.  The associated-type resolution can only choose what
+*type* sits in that slot — never whether more slots exist.  The "I want
+to inject additional fields per impl" pattern is expressible by having
+the resolved `Slot` itself be a struct: that struct's fields become the
+extra storage, but they live behind the named slot.  Composition is
+preferred over hidden injection; see §10.7 below for the rationale.
+
+**Abstract vs concrete typing.**  An unmonomorphized generic function
+with a bound — `fn f<T: Stored>() { let x: T::Slot = ...; }` — type-
+checks `T::Slot` **abstractly**: sema verifies the assoc type is
+declared in the bound attr and treats the path as an opaque type
+parameter throughout the body.  Operations applicable to an abstract
+`T::Slot` are only those the attr's method signatures expose (e.g.
+`atomic_load_cell(&self)` returning `T::Slot`).  Concrete resolution is
+deferred to monomorphization; the resolved type is substituted into the
+function body and rechecked against the concrete type's operations.
+
+A struct literal at a concrete instantiation — `Wrapper<*Foo> { inner = ptr }` —
+type-checks `ptr` against the **post-resolution** type (i.e. `*Foo`,
+the resolved `*T::Slot`), not against the abstract `T::Slot`.  After
+monomorphization, every field type is concrete.
+
+**Pattern matching.**  Pattern scrutinees always have concrete
+monomorphized types — generics are erased before pattern dispatch.
+A binding in `match (w) { Wrapper { inner } => ... }` receives the
+**concrete resolved** field type of the matched instantiation (`*Foo`,
+not the abstract `T::Slot`).
+
+**No-impl-at-decl is fine.**  Writing `data Wrapper<T: Stored> { T::Slot inner; }`
+in a module where **no** `Stored` impls exist yet is not an error.  The
+data declaration is checked structurally; the bound is only enforced at
+each concrete instantiation site.  An unused generic struct with bounds
+is valid in isolation.
+
+**Sizing.**  An unmonomorphized generic struct (`Wrapper<T>` for type
+variable `T`) has **no defined size or layout** — it is abstract.  Only
+concrete instantiations (`Wrapper<int>`, `Wrapper<*Foo>`) have a size;
+that size depends on the resolved `T::Slot`.  `sizeof` (when added) on
+the bare `Wrapper<T>` is a compile error; on `Wrapper<X>` it returns the
+concrete size.  Code cannot reference an unmonomorphized generic at
+runtime — every value of a generic type lives at a concrete instantiation.
+
+**Cyclic assoc-type definitions are forbidden.**  An `has` impl whose
+`type Slot = R` body causes `R`'s resolution (directly or through any
+chain of struct-field type lookups) to refer back to the same
+parameterized struct *with the same parameter substitution* is rejected
+at the impl declaration site with the diagnostic
+`type Slot = ... creates a cycle involving T`.  Example:
+
+```maka
+*T has Stored { type Slot = Wrapper<T>; }     // ← rejected (cycle)
+data Wrapper<T: Stored> { T::Slot inner; }    // would infinitely expand
+```
+
+Cycles broken by an indirection (`type Slot = *Wrapper<T>` — a pointer
+behind which the recursion lives) are permitted; the size and layout are
+well-defined because the indirection is finite.
+
+**Disambiguating assoc types under multiple bounds.**  When a generic
+parameter has multiple bounds and two of them declare an associated type
+with the same name, the bare `T::Name` syntax is **rejected** as
+ambiguous.  Disambiguation via `T::AttrName::Name` (a fully-qualified
+form) is reserved for a future revision; until then, the user must
+rename one of the conflicting assoc types in their own attr declaration.
+The error:
+
+```
+T::Slot is ambiguous: both `Stored` and `Cellable` declare it.
+Rename one attr's `Slot` until qualified paths are supported.
+```
+
+**Errors and hints (parity with §10.1).**
+
+- *Missing impl.*  `Wrapper<X>` where no `X has Stored` impl is in scope:
+  `type \`X\` does not implement \`Stored\` (required for assoc type \`T::Slot\`)`
+  plus, if a `pub` impl exists in another module, the hint
+  `add \`use Module.X.Stored;\``.
+- *Overlapping impls.*  The receiver-overlap diagnostic from §10.4 fires
+  before assoc-type resolution.
+- *Cycle.*  The cycle diagnostic above, with both impl and struct
+  locations.
+
+**Dyn dispatch interaction.**  `dyn Attr` (§2.5) is **not** compatible
+with associated-type field placement in v1.  A struct field cannot have
+type `dyn Attr::Slot` (the type isn't known statically; the vtable
+doesn't carry layout).  `T::Slot` in a struct field requires `T` to be
+either a concrete type or a generic bound, both of which monomorphize.
+A future revision may add `dyn Attr<Slot = ConcreteType>` ("dyn with
+fixed associated types") in the manner of Rust's object-safety rules,
+but it is not in v1.
+
+**Default associated types** (optional, planned but not in MVP):
+```maka
+attr Stored {
+    type Slot = unit;                     // default if the impl omits it
+}
+```
+
+**Bounds on associated types** (`<T: Stored<Slot = i64>>`) are planned
+but not in MVP.  When added, they restrict the bound to those impls
+whose `Slot` is exactly the named type.
+
+**Coherence with assoc types.** When two parametric `has` impls overlap
+in the receiver pattern, they conflict regardless of which assoc types
+they pick — the coherence rule is purely on receivers (§10.4).
+
+**Resolution order.** At each generic instantiation of `foo<T: Stored>`
+with concrete `T = X`:
+1. Find the unique `has` impl for `Stored` whose receiver unifies with `X`.
+2. Read the impl's `type Slot = R` line.
+3. Substitute the impl's type variables in `R` from the unification.
+4. The resulting concrete type is `X::Slot`.
+
+If step 1 finds no impl or two impls, instantiation is rejected with
+a specific error.
+
+### 10.6 Worked example: `AtomicPtr<T>`
+
+```maka
+attr AtomicCell {
+    type Storage;                                          // impl picks the cell type
+    Storage atomic_load_cell(&_ self);
+    unit    atomic_store_cell(&mut _ self, Storage v);
+    Storage atomic_swap_cell (&mut _ self, Storage v);
+}
+
+// Pointer atomics: a typed cell holds a typed pointer.
+*T has AtomicCell {
+    type Storage = *T;
+    *T  atomic_load_cell (&Self self)               { return atomic_load(self); }
+    unit atomic_store_cell(&mut Self self, *T v)    { atomic_store(self, v); }
+    *T  atomic_swap_cell (&mut Self self, *T v) {
+        let old = atomic_load(self);
+        atomic_store(self, v);
+        return old;
+    }
+}
+
+// Ints, bools, etc. fall under one primitive impl per type — small surface,
+// stable, and users don't need extension.
+int has AtomicCell {
+    type Storage = int;
+    int  atomic_load_cell (&Self self)              { return atomic_load(self); }
+    unit atomic_store_cell(&mut Self self, int v)   { atomic_store(self, v); }
+    int  atomic_swap_cell (&mut Self self, int v) { /* CAS-loop */ ... }
+}
+
+bool has AtomicCell { type Storage = bool; /* ... */ }
+
+// The wrapper:
+pub data Atomic<T: AtomicCell> {
+    T::Storage cell;                                   // placeholder; concrete type per T
+}
+```
+
+User code:
+
+```maka
+Atomic<*Box> ap = atomic_new(&my_box);                 // Storage = *Box
+*Box current = atomic_load_cell(&ap);
+atomic_store_cell(&mut ap, &other_box);
+
+Atomic<int>  ai = atomic_new(0);                       // Storage = int
+int          n  = atomic_load_cell(&ai);
+```
+
+User extension — declare your own atomic-able type:
+
+```maka
+data MyHandle { *unit raw; }
+MyHandle has AtomicCell {
+    type Storage = MyHandle;
+    MyHandle atomic_load_cell(&Self self)             { /* ... */ }
+    /* ... */
+}
+
+Atomic<MyHandle> ah = atomic_new(my_handle);
+```
+
+### 10.7 Why field-injection is rejected
+
+A natural-looking alternative to associated types is letting the `has`
+impl inject *new* fields into the wrapper struct:
+
+```maka
+attr Stored {
+    extra_fields { ... }                  // hypothetical — REJECTED
+}
+*T has Stored {
+    extra_fields { int rc; }              // would add rc to Wrapper<*T>
+}
+```
+
+This is **not** part of Maka.  The "`data` declaration is the complete
+layout" invariant is a load-bearing property of the language: a reader
+of `data Foo { ... }` is guaranteed that they see every field Foo will
+ever have, in every monomorphization, in every compilation unit.  That
+invariant unlocks local reasoning about size, layout, FFI compatibility,
+and debugger views.
+
+Every motivating case for injected fields (refcounting, drop-flags,
+observer slots) is expressible via the `type Slot = SomeBundle<T>`
+pattern — the impl declares a struct, packs its bookkeeping fields
+there, and that struct becomes the wrapper's named slot.  The wrapper's
+shape stays uniform; the bundle's shape is visible at *its* declaration
+site.  Locality is preserved.
+
+The cost — one extra named struct per pattern — is small.  The benefit —
+no "the struct I read is not the struct I get" surprise — is large.
 
 ---
 
@@ -990,6 +1402,20 @@ the module path.
 A `use` declaration also authorizes calls to that impl's methods across the
 module boundary - you do not need a separate `import` for each method, since
 the `use` covers the whole impl.
+
+**Bound visibility for generic types.**  Importing a `pub` generic type
+(e.g. `import shapes.Wrapper;` for `pub data Wrapper<T: Stored> { ... }`)
+does **not** implicitly bring the bound's attr into scope.  The bound
+attr (`Stored` in this case) must be independently visible at the
+instantiation site — typically via its own `import` (for the attr name)
+and a `use Module.X.Stored;` for the specific impl being relied on at
+instantiation.  Without that, instantiation is rejected and the missing
+`use` line is suggested in the error hint (per the rule in §10.5).
+
+**Parametric receivers.**  For a `pub` parametric `has` impl
+(`pub *T has Stored { ... }` in `shapes`), the use form spells the
+receiver verbatim: `use shapes.*T.Stored;`.  See §10.4 for the
+full receiver grammar.
 
 ---
 

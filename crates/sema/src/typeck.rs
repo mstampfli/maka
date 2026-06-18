@@ -2073,18 +2073,26 @@ impl<'a> TypeChecker<'a> {
             || name == "thread_yield"
             || name == "syscall") && qualifier.is_none() {
             let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
-            // Helper: pull the inner integer type out of a `&T` / `&mut T` / `&const T`.
+            // Atomic-compatible scalar: any word-sized type the hardware can
+            // load/store atomically.  Ints (native + sized), bool (lowers to
+            // u8), and pointers all qualify.  References don't — they carry
+            // a borrow lifetime that can't safely cross an atomic.
+            let atomic_t = |t: &HType| matches!(
+                t,
+                HType::Int
+                | HType::SizedInt { .. }
+                | HType::Bool
+                | HType::Ptr { .. }
+                | HType::RawPtr { .. }
+            );
+            // Helper: pull the inner scalar T out of a `&T` / `&mut T` / `&const T`.
             let inner_int = |e: &HExpr| -> Option<HType> {
                 match &e.ty {
-                    HType::Ref { inner, .. } => {
-                        if matches!(**inner, HType::Int | HType::SizedInt { .. }) {
-                            Some((**inner).clone())
-                        } else { None }
-                    }
+                    HType::Ref { inner, .. } if atomic_t(inner) => Some((**inner).clone()),
                     _ => None,
                 }
             };
-            let int_t = |t: &HType| matches!(t, HType::Int | HType::SizedInt { .. });
+            let int_t = atomic_t;
 
             match name.as_str() {
                 "atomic_cas" => {
