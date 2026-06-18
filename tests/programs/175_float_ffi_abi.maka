@@ -1,0 +1,17 @@
+// ABI test for sized floats at the FFI boundary.
+//
+// `extern f32 sqrtf(f32 x)` must emit a C declaration `float sqrtf(float x)`
+// — not `double sqrtf(double x)` — otherwise the call returns garbage on
+// any platform where float and double have different ABIs (i.e. every
+// platform).  Before the f32/Float split this collapsed to `maka_float`
+// (= double) and silently mis-called libc.
+extern f32 sqrtf(f32 x);
+extern float sqrt(float x);    // C double — Maka `float` ≡ HType::Float ≡ double
+
+unit main() {
+    f32 a = 16.0f32;
+    float b = 16.0;
+
+    log(sqrtf(a));   // 4
+    log(sqrt(b));    // 4
+}

@@ -1468,6 +1468,48 @@ What a Maka program **cannot** do directly:
 - Use C struct types without declaring an equivalent `data` struct.
 - Vararg-call a non-extern function.
 
+### 12.1 ABI at the FFI boundary
+
+Maka's source-level types are **language types**, not target ABI types.
+At extern declarations the user must spell out the C-side width
+explicitly — codegen lowers the type the user wrote, nothing more.
+
+| C type (target) | What you MUST write in Maka |
+|---|---|
+| `char`, `signed char`, `unsigned char` | `i8` / `u8` (or `char`) — all map to a 1-byte cell |
+| `short` | `i16` |
+| `unsigned short` | `u16` |
+| `int` | `i32` (NOT `int` — Maka `int` ≡ `i64`) |
+| `unsigned` | `u32` |
+| `long` (LP64) | `i64` (NOT `int` on its own — same value, but be explicit) |
+| `long long` | `i64` |
+| `size_t`, `uintptr_t` | `usize` |
+| `ssize_t`, `intptr_t` | `isize` |
+| `float` | `f32` (NOT `float` — Maka `float` ≡ `f64` ≡ C `double`) |
+| `double` | `float` (or `f64`) |
+| `void*`, `T*` | `*unit` (in extern decls), `*T` (when typed) |
+
+The two foot-guns:
+
+1. **Maka `int` is always 64-bit.**  Writing `extern int read(int fd, ...)`
+   declares `int64_t read(int64_t, …)` on the C side, which mismatches
+   libc's `int read(int, …)` and will silently corrupt arguments and
+   return values.  Use `i32` for any C function whose signature mentions
+   `int`.
+
+2. **Maka `float` is double.**  `float`/`f64`/native lower to C `double`
+   (8 bytes); `f32` is the dedicated 4-byte float.  `extern f32 sqrtf(f32 x)`
+   correctly calls libc's `float sqrtf(float)`; writing `extern float sqrtf(float x)`
+   compiles to `double sqrtf(double)` — ABI mismatch, garbage results.
+
+The sized-int family (`i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64`) and
+the new `f32` ARE ABI-exact — what you write is what gets emitted.
+Default `int` / `float` are convenient inside Maka but risky at the
+boundary; the safe rule is "use sized types in every `extern` signature
+and `cblock` shim."
+
+A worked test lives at `tests/programs/175_float_ffi_abi.maka`.
+
 ---
 
 ## 13. Code generation

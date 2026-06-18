@@ -296,7 +296,8 @@ pub fn resolve_type_in(
             "usize" => HType::SizedInt { signed: false, bits: 0 },
             // Per D5: char and u8 are the same byte type.
             "u8" | "char" => HType::Char,
-            "float" | "f32" | "f64" => HType::Float,
+            "float" | "f64" => HType::Float,
+            "f32" => HType::SizedFloat { bits: 32 },
             "bool" => HType::Bool,
             "unit" => HType::Unit,
             "string" => HType::Str,

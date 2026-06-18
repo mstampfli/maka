@@ -4902,6 +4902,9 @@ impl<'a> Cx<'a> {
             HType::SizedInt { signed, bits: 0 } => if *signed { "intptr_t".into() } else { "uintptr_t".into() },
             HType::SizedInt { signed, bits } => format!("{}int{}_t", if *signed {""} else {"u"}, bits),
             HType::Float => "maka_float".into(),
+            HType::SizedFloat { bits: 32 } => "float".into(),
+            HType::SizedFloat { bits: 64 } => "double".into(),
+            HType::SizedFloat { bits } => format!("_unknown_f{}", bits),
             HType::Bool => "bool".into(),
             HType::Char => "maka_char".into(),
             HType::Unit => "maka_unit".into(),
@@ -4953,6 +4956,9 @@ impl<'a> Cx<'a> {
             HType::SizedInt { signed, bits: 0 } => if *signed { "intptr_t".into() } else { "uintptr_t".into() },
             HType::SizedInt { signed, bits } => format!("{}int{}_t", if *signed {""} else {"u"}, bits),
             HType::Float => "maka_float".into(),
+            HType::SizedFloat { bits: 32 } => "float".into(),
+            HType::SizedFloat { bits: 64 } => "double".into(),
+            HType::SizedFloat { bits } => format!("_unknown_f{}", bits),
             HType::Bool => "bool".into(),
             HType::Char => "maka_char".into(),
             HType::Unit => "maka_unit".into(),
@@ -8305,7 +8311,7 @@ impl<'a> Cx<'a> {
     fn log_helper(&self, t: &HType) -> &'static str {
         match t {
             HType::Int | HType::Enum(_) | HType::SizedInt { .. } => "maka_log_int",
-            HType::Float => "maka_log_float",
+            HType::Float | HType::SizedFloat { .. } => "maka_log_float",
             HType::Bool => "maka_log_bool",
             HType::Char => "maka_log_char",
             HType::Str => "maka_log_str",

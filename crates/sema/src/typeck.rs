@@ -945,7 +945,15 @@ impl<'a> TypeChecker<'a> {
                     HExpr { kind: HExprKind::LitInt(*n), ty: HType::Int, span: sp }
                 }
             }
-            ast::Lit::Float(f) => HExpr { kind: HExprKind::LitFloat(*f), ty: HType::Float, span: sp },
+            ast::Lit::Float(f) => {
+                // Sized-float literals (`1.5f32`) coerce to the expected
+                // SizedFloat width.  Default is `HType::Float` (= C double).
+                if let Some(t @ HType::SizedFloat { .. }) = expected {
+                    HExpr { kind: HExprKind::LitFloat(*f), ty: t.clone(), span: sp }
+                } else {
+                    HExpr { kind: HExprKind::LitFloat(*f), ty: HType::Float, span: sp }
+                }
+            }
             ast::Lit::Bool(b) => HExpr { kind: HExprKind::LitBool(*b), ty: HType::Bool, span: sp },
             ast::Lit::Char(c) => HExpr { kind: HExprKind::LitChar(*c), ty: HType::Char, span: sp },
             ast::Lit::Str(s) => HExpr { kind: HExprKind::LitStr(s.clone()), ty: HType::Str, span: sp },
@@ -1247,7 +1255,7 @@ impl<'a> TypeChecker<'a> {
     /// `&const T` to a Shareable T are shareable. `*T` to mutable data is NOT shareable.
     pub fn is_shareable(&self, t: &HType) -> bool {
         match t {
-            HType::Int | HType::SizedInt { .. } | HType::Float | HType::Bool
+            HType::Int | HType::SizedInt { .. } | HType::Float | HType::SizedFloat { .. } | HType::Bool
             | HType::Char | HType::Unit | HType::Str | HType::NullT => true,
             // Sync primitives recognized by name (auto-recognized stdlib types).
             HType::Struct(id) => {
@@ -4578,6 +4586,9 @@ pub fn type_eq(a: &HType, b: &HType) -> bool {
     match (a, b) {
         (Int, Int) | (Float, Float) | (Bool, Bool) | (Char, Char) | (Unit, Unit) | (Str, Str) | (NullT, NullT) => true,
         (SizedInt { signed: a, bits: b }, SizedInt { signed: c, bits: d }) => a == c && b == d,
+        (SizedFloat { bits: a }, SizedFloat { bits: b }) => a == b,
+        // `float` (binary64) ≡ `f64`: same C `double` ABI, source-name alias.
+        (Float, SizedFloat { bits: 64 }) | (SizedFloat { bits: 64 }, Float) => true,
         (Struct(a), Struct(b)) => a == b,
         (Enum(a), Enum(b)) => a == b,
         (Ref { mutable: am, inner: ai }, Ref { mutable: bm, inner: bi }) => am == bm && type_eq(ai, bi),
@@ -4610,6 +4621,7 @@ pub fn type_str(t: &HType) -> String {
         HType::SizedInt { signed, bits: 0 } => if *signed { "isize".into() } else { "usize".into() },
         HType::SizedInt { signed, bits } => format!("{}{}", if *signed {"i"} else {"u"}, bits),
         HType::Float => "float".into(),
+        HType::SizedFloat { bits } => format!("f{}", bits),
         HType::Bool => "bool".into(),
         HType::Char => "char".into(),
         HType::Unit => "unit".into(),

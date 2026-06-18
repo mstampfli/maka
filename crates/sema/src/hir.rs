@@ -15,7 +15,15 @@ pub struct EnumId(pub u32);
 #[derive(Debug, Clone, PartialEq)]
 pub enum HType {
     Int,
+    /// Default float — IEEE-754 binary64, lowered to C `double`.  Maka source
+    /// spells this `float` (or `f64`).  Same ABI as a C `double` — safe to
+    /// use at extern boundaries against C functions that take `double`.
     Float,
+    /// Sized float — currently only 32-bit (binary32, C `float`).  Maka source
+    /// spells this `f32`.  Distinct from `HType::Float` at the ABI level — a
+    /// C function declared `float sinf(float)` must be `extern f32 sinf(f32)`
+    /// on the Maka side, NOT `extern float sinf(float)`.
+    SizedFloat { bits: u8 },
     Bool,
     Char,
     /// Sized integer: signed/unsigned and bit width (8, 16, 32, 64). 0 bits = pointer-sized.
@@ -95,6 +103,7 @@ impl HType {
         match self {
             HType::Int => "int".into(),
             HType::Float => "float".into(),
+            HType::SizedFloat { bits } => format!("f{}", bits),
             HType::Bool => "bool".into(),
             HType::Char => "char".into(),
             HType::SizedInt { signed, bits } => format!("{}{}", if *signed {"i"} else {"u"}, bits),
