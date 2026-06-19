@@ -636,8 +636,10 @@ pub enum HExprKind {
     InlineCall { callee: FuncId, args: Vec<HExpr> },
     /// Closure value: produces a Callable_KEY with the lifted fn pointer + an env struct.
     /// `env_struct` is the StructId of the synthetic env type; `env_values` lists the field-initializers
-    /// in declaration order.
-    Closure { lifted: FuncId, env_struct: StructId, env_values: Vec<HExpr> },
+    /// in declaration order.  `capture_lids` parallels `env_values` and lists the `LocalId`
+    /// each capture is bound to *inside* the lifted body — used by the lifetime pass to
+    /// forward capture-site non-null facts into the closure's initial state (§6.3).
+    Closure { lifted: FuncId, env_struct: StructId, env_values: Vec<HExpr>, capture_lids: Vec<LocalId> },
     /// `transfer x` at a call-site argument — yields the source's value AND marks the source as moved.
     /// The lifetime pass walks this kind and rejects any further use of the moved binding.
     Transfer(Box<HExpr>),

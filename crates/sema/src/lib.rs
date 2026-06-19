@@ -499,11 +499,25 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
     // over the lowered HIR (§6.3 forced-handling proof obligation), then run the
     // per-function lifetime/deps/move pass with those summaries in hand so
     // `(some_fn())!` is accepted iff every return path in `some_fn` is provably
-    // non-null.
+    // non-null.  Capture-site non-null facts harvested from `Closure` exprs are
+    // forwarded into the corresponding lifted body so its own pass starts with
+    // those captures proven (§6.3 closure-capture flow).
     let summaries = lifetime::compute_return_summaries(&sym, &funcs);
+    // Pre-pass to harvest capture-site non-null facts.  Lifted closure funcs
+    // live *earlier* in `funcs[]` than their parent (they're pushed during the
+    // parent's type-check, before the parent's own push), so a single forward
+    // walk wouldn't see the parent's facts in time for the child.  This pre-pass
+    // walks every function looking only for `Closure` exprs and records their
+    // non-null env_values; the main pass below then applies the collected facts
+    // as each function's initial state regardless of vec order.
+    let mut capture_inits: std::collections::HashMap<u32, Vec<hir::LocalId>> = std::collections::HashMap::new();
+    for hf in &funcs {
+        lifetime::harvest_capture_nonnull(&sym, hf, &summaries, &mut capture_inits);
+    }
     for hf in &mut funcs {
-        match lifetime::analyze_func(&sym, hf, &summaries) {
-            Ok(ws) => warnings.extend(ws),
+        let initial: Vec<hir::LocalId> = capture_inits.remove(&hf.id.0).unwrap_or_default();
+        match lifetime::analyze_func(&sym, hf, &summaries, &initial) {
+            Ok(ok) => warnings.extend(ok.warnings),
             Err(es) => errors.extend(es),
         }
     }

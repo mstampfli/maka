@@ -477,7 +477,16 @@ runtime null-check macro. Proof comes from:
   like `top` → `mid` → `leaf` converge as long as the leaf is provable.
   Functions whose return type is not a nullable carrier (`&T`, value types)
   are trivially `NeverNull`; functions returning `*T`/`own *T`/`raw *T` must
-  have every return expression statically classifiable as non-null.
+  have every return expression provably non-null *under flow tracking* —
+  the summary pass propagates per-LID `known_nonnull` through Let/Assign,
+  honours `if (p != null)` / `if (p == null) return;` narrowing, and joins
+  branches at if/else.  So `*T make() { *T p = alloc T; return p; }`
+  classifies as `NeverNull` even though the literal return expression is
+  just a `Local`.
+- The value is captured by a closure from an outer scope where it was
+  provably non-null at the capture site.  Captures of by-value or `&`-mode
+  locals carry the outer flow fact into the synthesized lifted body so the
+  closure's first use of the binding does not need a redundant guard.
 
 Without a proof, the compiler rejects the deref with a message that suggests
 the appropriate guard. **There is no `MAKA_UNWRAP` runtime macro** - the

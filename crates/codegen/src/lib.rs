@@ -7540,7 +7540,7 @@ impl<'a> Cx<'a> {
                     _ => "0".into(),
                 }
             }
-            HExprKind::Closure { lifted, env_struct, env_values } => {
+            HExprKind::Closure { lifted, env_struct, env_values, .. } => {
                 let sig = self.sym.func_sig(*lifted);
                 // We need the callable's fn-pointer signature to emit Callable_KEY{...}.
                 // The lambda's fn-ptr type is (lifted.ret, lifted_params_minus_env)

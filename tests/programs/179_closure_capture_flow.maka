@@ -1,0 +1,23 @@
+// §6.3 closure-capture flow: a by-value capture of an outer local that is
+// known-non-null at the capture site enters the synthesized lifted body
+// with `known_nonnull = true`, so `b!` inside the closure satisfies the
+// forced-handling rule without an explicit guard.
+
+import std.{ Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy };
+
+data Box { int v; }
+
+unit main() {
+    own *Box b = alloc Box { v = 7 };
+    Atomic    a = atomic_new(0);
+
+    *Thread t = thread(unit() [b, a] {
+        // `b` is captured by value; the harvest pass saw `b` was known-non-null
+        // at the capture site, so the closure body starts with `b` proven.
+        _ = atomic_add(a, b!.v);
+    });
+    join(t);
+
+    log(atomic_get(a));     // 7
+    atomic_destroy(a);
+}

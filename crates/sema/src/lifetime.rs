@@ -52,20 +52,41 @@ impl LocalState {
     }
 }
 
+/// Result of one function's lifetime/null-proof analysis.
+pub struct AnalyzeOk {
+    pub warnings: Vec<SemaWarning>,
+    /// `(lifted FuncId, LocalId inside lifted body)` pairs harvested from
+    /// `Closure` expressions in this function whose env_value was provably
+    /// non-null at the capture site.  The driver applies these to the
+    /// corresponding lifted closure's initial state before its own pass runs.
+    pub capture_nonnull: Vec<(FuncId, LocalId)>,
+}
+
 pub fn analyze_func(
     sym: &SymTab,
     f: &mut HFunc,
     summaries: &[bool],
-) -> Result<Vec<SemaWarning>, Vec<SemaError>> {
+    initial_nonnull: &[LocalId],
+) -> Result<AnalyzeOk, Vec<SemaError>> {
     let mut a = Analyzer::new(sym, f, summaries);
+    for lid in initial_nonnull {
+        if let Some(st) = a.state.get_mut(lid.0 as usize) {
+            st.known_nonnull = true;
+        }
+    }
     // analyze_block's `?` would early-return without surfacing warnings, but warnings
     // are only meaningful when analysis ran to completion, so this is fine.
     a.analyze_block(&mut Vec::new(), 0)?;
     let mut errors = std::mem::take(&mut a.errors);
     let warnings = std::mem::take(&mut a.warnings);
+    let capture_nonnull = std::mem::take(&mut a.capture_nonnull);
     // Final: walk the body and fill heap_to_free for each block in reverse scope-decl order.
     fill_heap_drops(sym, f);
-    if errors.is_empty() { Ok(warnings) } else { Err(std::mem::take(&mut errors)) }
+    if errors.is_empty() {
+        Ok(AnalyzeOk { warnings, capture_nonnull })
+    } else {
+        Err(std::mem::take(&mut errors))
+    }
 }
 
 /// True iff a value of this type can never be null at the language level —
@@ -98,7 +119,7 @@ pub fn compute_return_summaries(sym: &SymTab, funcs: &[HFunc]) -> Vec<bool> {
         for f in funcs {
             let id = f.id.0 as usize;
             if summaries[id] { continue; }
-            if function_returns_nonnull(&f.body, &summaries) {
+            if function_returns_nonnull(f, &summaries) {
                 summaries[id] = true;
                 changed = true;
             }
@@ -108,68 +129,293 @@ pub fn compute_return_summaries(sym: &SymTab, funcs: &[HFunc]) -> Vec<bool> {
     summaries
 }
 
-fn function_returns_nonnull(b: &HBlock, summaries: &[bool]) -> bool {
-    let mut any_return = false;
-    let result = block_returns_nonnull(b, summaries, &mut any_return);
-    // Fall-off-the-end: if the body never hits an explicit return, the
-    // implicit return is unit — non-nullable trivially.  Otherwise honour
-    // what we collected.
-    result && any_return
+/// Result of walking a block / statement during summary computation.
+#[derive(Clone, Copy)]
+struct WalkRes {
+    /// Every return seen on this path so far is non-null.
+    ok: bool,
+    /// Every path through this block exits (return / break / continue / propagate).
+    /// Used so the post-`if` join state correctly carries the non-terminating
+    /// branch's state instead of meeting against an unreachable continuation.
+    terminates: bool,
 }
 
-fn block_returns_nonnull(b: &HBlock, summaries: &[bool], any: &mut bool) -> bool {
-    for s in &b.stmts {
-        if !stmt_returns_nonnull(s, summaries, any) {
-            return false;
+fn function_returns_nonnull(f: &HFunc, summaries: &[bool]) -> bool {
+    let mut state: Vec<bool> = vec![false; f.locals.len()];
+    // Function parameters whose declared type is non-nullable (`&T`, `&mut T`,
+    // value types) start known-non-null.  Pointer parameters stay false until
+    // proven by flow.
+    for (i, li) in f.locals.iter().enumerate() {
+        if matches!(li.storage, StorageClass::Param) && return_type_nonnull(&li.ty) {
+            state[i] = true;
         }
     }
-    true
+    let mut any_return = false;
+    let r = block_walk(&f.body, &mut state, summaries, &mut any_return);
+    r.ok && any_return
 }
 
-fn stmt_returns_nonnull(s: &HStmt, summaries: &[bool], any: &mut bool) -> bool {
+fn block_walk(b: &HBlock, state: &mut Vec<bool>, summaries: &[bool], any: &mut bool) -> WalkRes {
+    let mut terminates = false;
+    for s in &b.stmts {
+        let r = stmt_walk(s, state, summaries, any);
+        if !r.ok { return WalkRes { ok: false, terminates: terminates || r.terminates }; }
+        if r.terminates { terminates = true; break; }
+    }
+    WalkRes { ok: true, terminates }
+}
+
+fn stmt_walk(s: &HStmt, state: &mut Vec<bool>, summaries: &[bool], any: &mut bool) -> WalkRes {
     match s {
+        HStmt::Let { local, init, .. } => {
+            state[local.0 as usize] = expr_nonnull_flow(init, state, summaries);
+            WalkRes { ok: true, terminates: false }
+        }
+        HStmt::Assign { place, value, .. } => {
+            if let HExprKind::Local(id) = &place.kind {
+                state[id.0 as usize] = expr_nonnull_flow(value, state, summaries);
+            }
+            WalkRes { ok: true, terminates: false }
+        }
         HStmt::Return { value: Some(v), .. } => {
             *any = true;
-            static_nonnull(v, summaries)
+            WalkRes { ok: expr_nonnull_flow(v, state, summaries), terminates: true }
         }
-        HStmt::Return { value: None, .. } => { *any = true; true }
-        HStmt::If { then_b, else_b, .. } => {
-            if !block_returns_nonnull(then_b, summaries, any) { return false; }
-            if let Some(eb) = else_b {
-                if !block_returns_nonnull(eb, summaries, any) { return false; }
+        HStmt::Return { value: None, .. } => {
+            *any = true;
+            WalkRes { ok: true, terminates: true }
+        }
+        HStmt::If { cond, then_b, else_b, .. } => {
+            let (then_nn, else_nn) = detect_null_narrow(cond);
+            // Walk then-branch with narrowed state.
+            let mut then_state = state.clone();
+            if let Some(id) = then_nn { then_state[id.0 as usize] = true; }
+            let then_r = block_walk(then_b, &mut then_state, summaries, any);
+            if !then_r.ok { return WalkRes { ok: false, terminates: false }; }
+
+            // Walk else-branch (or treat absent else as falling through).
+            let mut else_state = state.clone();
+            if let Some(id) = else_nn { else_state[id.0 as usize] = true; }
+            let (else_r, has_else) = match else_b {
+                Some(eb) => (block_walk(eb, &mut else_state, summaries, any), true),
+                None => (WalkRes { ok: true, terminates: false }, false),
+            };
+            if !else_r.ok { return WalkRes { ok: false, terminates: false }; }
+
+            // Join: post-if state depends on which branches terminate.
+            for i in 0..state.len() {
+                state[i] = match (then_r.terminates, else_r.terminates) {
+                    (true, true) => state[i], // both terminate; post-if unreachable
+                    (true, false) => else_state[i], // only then terminates — else's state continues
+                    (false, true) => then_state[i],
+                    (false, false) => then_state[i] && else_state[i], // meet
+                };
             }
-            true
+            let terminates = if has_else { then_r.terminates && else_r.terminates } else { false };
+            WalkRes { ok: true, terminates }
         }
-        HStmt::While { body, .. } => block_returns_nonnull(body, summaries, any),
-        HStmt::Block(b) | HStmt::Unsafe(b, _) => block_returns_nonnull(b, summaries, any),
-        HStmt::ForC { body, .. } | HStmt::ForEach { body, .. } => block_returns_nonnull(body, summaries, any),
-        // Propagate exits the *caller* frame via the inline expansion site;
-        // its nullness for the current function's summary is irrelevant.
-        HStmt::Propagate { .. } => true,
-        _ => true,
+        HStmt::While { body, .. } => {
+            // Loop body might execute 0+ times.  Walk it to surface inner returns,
+            // then meet its post-state with the pre-state (which holds if the loop
+            // doesn't iterate).
+            let mut body_state = state.clone();
+            let r = block_walk(body, &mut body_state, summaries, any);
+            if !r.ok { return WalkRes { ok: false, terminates: false }; }
+            for i in 0..state.len() {
+                state[i] = state[i] && body_state[i];
+            }
+            WalkRes { ok: true, terminates: false }
+        }
+        HStmt::ForC { body, .. } | HStmt::ForEach { body, .. } => {
+            let mut body_state = state.clone();
+            let r = block_walk(body, &mut body_state, summaries, any);
+            if !r.ok { return WalkRes { ok: false, terminates: false }; }
+            for i in 0..state.len() {
+                state[i] = state[i] && body_state[i];
+            }
+            WalkRes { ok: true, terminates: false }
+        }
+        HStmt::Block(b) | HStmt::Unsafe(b, _) => block_walk(b, state, summaries, any),
+        HStmt::Break(_) | HStmt::Continue(_) => WalkRes { ok: true, terminates: true },
+        HStmt::Propagate { .. } => WalkRes { ok: true, terminates: true },
+        HStmt::ExprStmt(_) => WalkRes { ok: true, terminates: false },
     }
 }
 
-/// Structural non-null classifier used by both summary fixpoint and per-func
-/// `expr_nonnull`.  Pure tree walk: does NOT consult flow facts.
-fn static_nonnull(e: &HExpr, summaries: &[bool]) -> bool {
+/// Flow-aware non-null classifier — consults per-LID state for Local
+/// references.  Used by the summary fixpoint.
+fn expr_nonnull_flow(e: &HExpr, state: &[bool], summaries: &[bool]) -> bool {
     match &e.kind {
         HExprKind::HeapAlloc(_) => true,
         HExprKind::AddrOfRef { .. } => true,
+        HExprKind::Local(id) => state.get(id.0 as usize).copied().unwrap_or(false),
         HExprKind::LitNull => false,
         HExprKind::Cast { expr, kind, .. } | HExprKind::CheckedCast { expr, kind, .. } => {
             if matches!(kind, CastKind::IntPtrToEnumPtrChecked) { return false; }
-            // For wrapping casts (`p as *Foo`), the result's nullness follows the source.
-            // `int as Enum` lowers to a Maka value, but it's unconditional (panics on bad
-            // tag, never produces null), so recursing into `static_nonnull` on it gives the
-            // right answer for source pointer cases.
-            static_nonnull(expr, summaries)
+            expr_nonnull_flow(expr, state, summaries)
         }
         HExprKind::Call { callee, .. } | HExprKind::InlineCall { callee, .. } => {
             summaries.get(callee.0 as usize).copied().unwrap_or(false)
         }
-        HExprKind::DerefRef(inner) => static_nonnull(inner, summaries),
+        HExprKind::DerefRef(inner) => expr_nonnull_flow(inner, state, summaries),
         _ => false,
+    }
+}
+
+/// Pre-pass: walk a function's body with flow tracking and record
+/// `(lifted FuncId, lifted LocalId)` pairs for every `Closure` expression
+/// whose env_value is provably non-null at the capture site.  The driver
+/// applies these as the lifted body's initial state.  Independent of the
+/// per-func `Analyzer` so it can run before any function's main pass.
+pub fn harvest_capture_nonnull(
+    sym: &SymTab,
+    f: &HFunc,
+    summaries: &[bool],
+    out: &mut std::collections::HashMap<u32, Vec<LocalId>>,
+) {
+    let _ = sym;
+    let mut state: Vec<bool> = vec![false; f.locals.len()];
+    for (i, li) in f.locals.iter().enumerate() {
+        if matches!(li.storage, StorageClass::Param) && return_type_nonnull(&li.ty) {
+            state[i] = true;
+        }
+    }
+    harvest_block(&f.body, &mut state, summaries, out);
+}
+
+fn harvest_block(
+    b: &HBlock,
+    state: &mut Vec<bool>,
+    summaries: &[bool],
+    out: &mut std::collections::HashMap<u32, Vec<LocalId>>,
+) {
+    for s in &b.stmts { harvest_stmt(s, state, summaries, out); }
+}
+
+fn harvest_stmt(
+    s: &HStmt,
+    state: &mut Vec<bool>,
+    summaries: &[bool],
+    out: &mut std::collections::HashMap<u32, Vec<LocalId>>,
+) {
+    match s {
+        HStmt::Let { local, init, .. } => {
+            harvest_expr(init, state, summaries, out);
+            state[local.0 as usize] = expr_nonnull_flow(init, state, summaries);
+        }
+        HStmt::Assign { place, value, .. } => {
+            harvest_expr(place, state, summaries, out);
+            harvest_expr(value, state, summaries, out);
+            if let HExprKind::Local(id) = &place.kind {
+                state[id.0 as usize] = expr_nonnull_flow(value, state, summaries);
+            }
+        }
+        HStmt::ExprStmt(e) => harvest_expr(e, state, summaries, out),
+        HStmt::Return { value: Some(v), .. } => harvest_expr(v, state, summaries, out),
+        HStmt::Return { value: None, .. } => {}
+        HStmt::If { cond, then_b, else_b, .. } => {
+            harvest_expr(cond, state, summaries, out);
+            let (then_nn, else_nn) = detect_null_narrow(cond);
+            let mut then_state = state.clone();
+            if let Some(id) = then_nn { then_state[id.0 as usize] = true; }
+            harvest_block(then_b, &mut then_state, summaries, out);
+            let mut else_state = state.clone();
+            if let Some(id) = else_nn { else_state[id.0 as usize] = true; }
+            if let Some(eb) = else_b {
+                harvest_block(eb, &mut else_state, summaries, out);
+            }
+            for i in 0..state.len() {
+                state[i] = then_state[i] && else_state[i];
+            }
+        }
+        HStmt::While { cond, body, .. } => {
+            harvest_expr(cond, state, summaries, out);
+            let mut body_state = state.clone();
+            harvest_block(body, &mut body_state, summaries, out);
+            for i in 0..state.len() { state[i] = state[i] && body_state[i]; }
+        }
+        HStmt::Block(b) | HStmt::Unsafe(b, _) => harvest_block(b, state, summaries, out),
+        HStmt::ForC { init, cond, step, body, .. } => {
+            harvest_stmt(init, state, summaries, out);
+            harvest_expr(cond, state, summaries, out);
+            harvest_stmt(step, state, summaries, out);
+            let mut body_state = state.clone();
+            harvest_block(body, &mut body_state, summaries, out);
+            for i in 0..state.len() { state[i] = state[i] && body_state[i]; }
+        }
+        HStmt::ForEach { src, body, .. } => {
+            harvest_expr(src, state, summaries, out);
+            let mut body_state = state.clone();
+            harvest_block(body, &mut body_state, summaries, out);
+            for i in 0..state.len() { state[i] = state[i] && body_state[i]; }
+        }
+        HStmt::Propagate { value: Some(v), .. } => harvest_expr(v, state, summaries, out),
+        HStmt::Propagate { value: None, .. } | HStmt::Break(_) | HStmt::Continue(_) => {}
+    }
+}
+
+fn harvest_expr(
+    e: &HExpr,
+    state: &[bool],
+    summaries: &[bool],
+    out: &mut std::collections::HashMap<u32, Vec<LocalId>>,
+) {
+    match &e.kind {
+        HExprKind::Closure { lifted, env_values, capture_lids, .. } => {
+            for (i, v) in env_values.iter().enumerate() {
+                harvest_expr(v, state, summaries, out);
+                if let Some(lid) = capture_lids.get(i) {
+                    if expr_nonnull_flow(v, state, summaries) {
+                        out.entry(lifted.0).or_default().push(*lid);
+                    }
+                }
+            }
+        }
+        HExprKind::Bin { lhs, rhs, .. } => {
+            harvest_expr(lhs, state, summaries, out);
+            harvest_expr(rhs, state, summaries, out);
+        }
+        HExprKind::Un { expr, .. } => harvest_expr(expr, state, summaries, out),
+        HExprKind::Unwrap { expr, .. } => harvest_expr(expr, state, summaries, out),
+        HExprKind::AddrOfRef { place, .. } => harvest_expr(place, state, summaries, out),
+        HExprKind::Field { base, .. } => harvest_expr(base, state, summaries, out),
+        HExprKind::Index { base, idx } => { harvest_expr(base, state, summaries, out); harvest_expr(idx, state, summaries, out); }
+        HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } | HExprKind::CallIndirect { args, .. } => {
+            for a in args { harvest_expr(a, state, summaries, out); }
+        }
+        HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. } => harvest_expr(expr, state, summaries, out),
+        HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => {
+            for (_, fe) in fields { harvest_expr(fe, state, summaries, out); }
+        }
+        HExprKind::ArrayLit(elems) => for el in elems { harvest_expr(el, state, summaries, out); },
+        HExprKind::DropWrite(inner) | HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner)
+            | HExprKind::Free(inner) | HExprKind::Transfer(inner) | HExprKind::SliceLen(inner)
+            | HExprKind::EnumTag(inner) => harvest_expr(inner, state, summaries, out),
+        HExprKind::ArrayToSlice { base, .. } => harvest_expr(base, state, summaries, out),
+        HExprKind::Match { scrutinee, arms, .. } => {
+            harvest_expr(scrutinee, state, summaries, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard { harvest_expr(g, state, summaries, out); }
+                harvest_block(&arm.body, &mut state.to_vec(), summaries, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Detect a `Local cmp null` shape and return which branch narrows it to non-null:
+/// `p != null`  → then-branch narrows `p`
+/// `p == null`  → else-branch narrows `p`
+fn detect_null_narrow(cond: &HExpr) -> (Option<LocalId>, Option<LocalId>) {
+    let HExprKind::Bin { op, lhs, rhs } = &cond.kind else { return (None, None); };
+    let local_id = match (&lhs.kind, &rhs.kind) {
+        (HExprKind::Local(id), HExprKind::LitNull) | (HExprKind::LitNull, HExprKind::Local(id)) => *id,
+        _ => return (None, None),
+    };
+    match op {
+        HBinOp::Ne => (Some(local_id), None),
+        HBinOp::Eq => (None, Some(local_id)),
+        _ => (None, None),
     }
 }
 
@@ -187,6 +433,13 @@ struct Analyzer<'a> {
     /// Populated by `compute_return_summaries` before the per-func pass runs.
     /// `expr_nonnull` consults this on `Call` / `InlineCall` arms.
     summaries: &'a [bool],
+    /// Capture-site non-null facts harvested while walking `Closure` exprs:
+    /// `(lifted FuncId, LocalId inside the lifted body)` pairs whose
+    /// corresponding `env_value` was provably non-null at the capture site.
+    /// The driver applies these as the lifted function's initial state before
+    /// running its per-func pass — bridges (§6.3) capture flow into the
+    /// synthesized closure body.
+    capture_nonnull: Vec<(FuncId, LocalId)>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -199,6 +452,7 @@ impl<'a> Analyzer<'a> {
             errors: Vec::new(),
             warnings: Vec::new(),
             summaries,
+            capture_nonnull: Vec::new(),
         }
     }
 
@@ -581,8 +835,18 @@ impl<'a> Analyzer<'a> {
                     }
                 }
             }
-            HExprKind::Closure { env_values, .. } => {
-                for v in env_values { self.walk_expr(v); }
+            HExprKind::Closure { env_values, lifted, capture_lids, .. } => {
+                for (i, v) in env_values.iter_mut().enumerate() {
+                    self.walk_expr(v);
+                    // Propagate capture-site non-null facts into the lifted body
+                    // so its per-func pass starts with `state[capture_lid]` proven
+                    // when the captured expression is provably non-null here.
+                    if let Some(lid) = capture_lids.get(i) {
+                        if self.expr_nonnull(v) {
+                            self.capture_nonnull.push((*lifted, *lid));
+                        }
+                    }
+                }
             }
             HExprKind::Transfer(inner) => {
                 // Treat the source-local as moved (use after this point is a compile error).

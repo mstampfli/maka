@@ -3804,7 +3804,12 @@ impl<'a> TypeChecker<'a> {
 
         let fn_ty = HType::FnPtr { ret: Box::new(resolved_ret), params: resolved_params };
         HExpr {
-            kind: HExprKind::Closure { lifted: lifted_fid, env_struct: env_struct_id, env_values: env_inits },
+            kind: HExprKind::Closure {
+                lifted: lifted_fid,
+                env_struct: env_struct_id,
+                env_values: env_inits,
+                capture_lids: capture_local_ids,
+            },
             ty: fn_ty,
             span: sp,
         }
