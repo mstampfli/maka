@@ -9,10 +9,12 @@ enum Move { Idle, Walking = 1, Running = 2 }
 
 unit main() {
     // In-range tag: 1 == Walking.  The cast yields a non-null *Move
-    // that aliases the same storage as the int.
+    // that aliases the same storage as the int.  `!` requires a null
+    // guard — the cast result is definitionally nullable.
     mut int good = 1;
     *int gp = &mut good;
     *Move mp = gp as *Move;
+    if (mp == null) { return; }
     log(mp! as int);                // 1
 
     // Out-of-range tag: 42 is not a Move variant.  The cast yields null.

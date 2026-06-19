@@ -597,7 +597,16 @@ impl<'a> Analyzer<'a> {
                 let st = &self.state[id.0 as usize];
                 st.known_nonnull || st.narrowed_until.is_some()
             }
-            HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. } => self.expr_nonnull(expr),
+            HExprKind::Cast { expr, kind, .. } | HExprKind::CheckedCast { expr, kind, .. } => {
+                // The tag-checked `*int → *Enum` cast can yield null even when
+                // the source pointer is non-null — failure rides in the result
+                // type (§6.6).  Bail out so `(p as *Enum)!` is rejected unless
+                // the cast result is first null-checked.
+                if matches!(kind, CastKind::IntPtrToEnumPtrChecked) {
+                    return false;
+                }
+                self.expr_nonnull(expr)
+            }
             _ => false,
         }
     }
