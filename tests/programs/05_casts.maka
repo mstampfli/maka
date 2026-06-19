@@ -1,6 +1,7 @@
-// §3 — Type casts: `as`.  The cast can fail iff the target is a pointer
-// (`*T`) — Maka's pointer-is-nullable convention is what carries the
-// "this might fail" signal.  No separate sigil.
+// §3 — Type casts.  `as` is the cast operator.  Whether a check fires is
+// read off the *types*, not from a separate sigil: `int as Enum` is
+// runtime-bounds-checked against the variant set (panics on OOB, same
+// shape as `arr[i]`); `int as char` truncates to the low 8 bits.
 enum MovementState {
     Idle,
     Walking,
@@ -21,14 +22,6 @@ unit main() {
     log(code);                               // 1
 
     int tag_val = 2;
-    *MovementState parsed = tag_val as *MovementState;
-    if (parsed != null) {
-        log(parsed! as int);                 // 2 (= Running)
-    }
-
-    int bad = 99;
-    *MovementState p2 = bad as *MovementState;
-    if (p2 == null) {
-        log("not a movement state");
-    }
+    MovementState parsed = tag_val as MovementState;
+    log(parsed as int);                      // 2 (= Running)
 }

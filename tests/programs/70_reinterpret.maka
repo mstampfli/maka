@@ -1,7 +1,7 @@
 // Reinterpret cast — three flavors:
-//   *T → usize : safe (reading an address is harmless).
-//   *T → *U    : safe (still aliases the same memory; lifetime tracking flows).
-//   usize → *T : UNSAFE — synthesizes a pointer the compiler can't track.
+//   *T → usize  : safe (reading an address is harmless).
+//   *T → *U     : safe iff U is a structural prefix of T (§3); otherwise unsafe.
+//   usize → *T  : UNSAFE — synthesizes a pointer the compiler can't track.
 
 data Vec3 { float x; float y; float z; }
 
@@ -29,10 +29,13 @@ unit main() {
     log(next!);                    // 20
 
     // 3. Type pun: read a float through an int pointer (the bit pattern).
-    // *T → *U is allowed in safe code: both sides alias the same memory.
+    // *float → *int is NOT a structural prefix, so it requires `unsafe`.
     mut float f = 1.5;
     *float fp = &mut f;
-    *int ip = fp as *int;
+    *int ip = null;
+    unsafe {
+        ip = fp as *int;
+    }
     if (ip == null) { return; }
     // 1.5 as IEEE-754 double has bit pattern 0x3FF8000000000000.
     if (ip! == 4609434218613702656) {

@@ -245,13 +245,20 @@ Standard infix and unary operators with conventional precedence. Maka-specific:
   this site - see §6.
 - `&x` / `&mut x` - borrow.
 - `alloc value` - heap allocation (see §2.3).
-- `expr as Type` — cast.  Whether the cast can fail is read off the **target
-  type**, not a separate sigil.  When the target is a pointer (`*T`), the
-  result is nullable: failures produce `null`.  Currently the runtime-check
-  paths are `int → *Enum` (validates the tag) and `int → *char` (currently
-  no encoding validation).  When the target is a non-pointer value type,
-  the cast must succeed at the type level — `int → float`, `MyEnum → int`,
-  primitive ↔ primitive reinterprets, etc.
+- `expr as Type` — cast.  Whether and how the cast is checked is
+  determined by the **type pair**, not by a separate sigil:
+  - **Numeric / primitive** (`int → float`, `MyEnum → int`, `int → char`,
+    sized ↔ unsized): plain conversion, no runtime check.  `int → char`
+    truncates to the low 8 bits (C semantics — same as `(unsigned char)x`).
+  - **`int → Enum`**: runtime bounds-checked against the variant count.
+    Same shape as `arr[i]` — panics on out-of-range with
+    `\`int as <Enum>\`: tag out of range`.  Result is the `Enum` value
+    itself (no `*`, no nullable wrapper).
+  - **`*T → *U`** (between `data` structs): allowed in safe code iff `U`'s
+    field list is a structural prefix of `T`'s — same names, same types,
+    same order, identical offsets.  See §6.6.  Otherwise must be inside
+    `unsafe { ... }`.
+  - **`int → *T`**, **`raw *T` observation**, etc.: unchanged per §6.5.
 - `transfer x` / `share x` - only at direct argument positions of `gate`
   function calls (see §7).
 - `match (expr) { arms }` - pattern matching, can appear as expression or
@@ -495,7 +502,7 @@ compile error** (`poisoned`).
 
 ### 6.5 `unsafe { }`
 
-`unsafe { ... }` permits exactly five operations otherwise forbidden:
+`unsafe { ... }` permits exactly six operations otherwise forbidden:
 
 1. Casting an integer to a pointer (`usize as *T`, `int as *T`).
 2. Casting a reference to `raw *T` (`&T as raw *T` — drops borrow tracking).
@@ -511,10 +518,13 @@ compile error** (`poisoned`).
    `TlsConn`, etc.) carry the runtime handle.  Inside `unsafe { }` the
    bare `*unit` is allowed for raw FFI plumbing.  `*unit` also remains
    allowed in `extern` declarations and inside `cblock`.
+6. Casting between pointer types whose inner types are not structurally
+   prefix-compatible (`*Foo → *Bar` where `Bar`'s fields are not a prefix
+   of `Foo`'s).  Safe in-prefix casts are documented in §6.6.
 
 Inside `unsafe`, `raw *T` still has to be narrowed (forced-handling — §6.3)
 before deref.  `unsafe` does not turn off the lifetime pass; it just unlocks
-those five operations.
+those six operations.
 
 ### 6.6 Pointer-kind conversions and the `&(p!)` pattern
 
@@ -522,6 +532,28 @@ Maka's pointer kinds (`own *T`, `own &T`, `*T`, `&T`, `&mut T`, `raw *T`) are
 **lifetime annotations** on top of the same C-level address; the data shape
 is identical across kinds.  Converting between them is therefore a no-op at
 codegen — only the type-system tag changes.
+
+Cross-type pointer casts (`*T → *U` where `T ≠ U`) follow a separate rule:
+in safe code they're allowed iff `U`'s field list is a **structural prefix**
+of `T`'s — both must be `data` types, and `U`'s fields must match the first
+|U.fields| of `T`'s by name, type, and order (which guarantees identical
+C-level offsets).  This makes the common header-extraction pattern safe:
+
+```maka
+data NetHeader { u8 version; int length; }
+data NetPacket { u8 version; int length; int payload_len; }
+
+unit handle(*NetPacket p) {
+    *NetHeader hdr = p as *NetHeader;  // prefix-safe, no unsafe needed
+    log(hdr!.length);
+}
+```
+
+Cross-type casts that don't satisfy the prefix rule (`*Foo → *Bar` between
+unrelated layouts, `*float → *int` for bit-pattern punning, etc.) require
+`unsafe { }` (§6.5 item 6).  The prefix rule avoids the strict-aliasing
+hazard: every access through `*hdr` goes through one of the shared prefix
+fields, so the C compiler's TBAA sees identical type access on both sides.
 
 The implicit-coercion table is governed by a single principle: **loosening
 flags is implicit, tightening a flag requires proof**.

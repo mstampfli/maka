@@ -3385,26 +3385,6 @@ impl<'a> TypeChecker<'a> {
         if let HType::Dyn { traits } = &to {
             return self.check_to_dyn(h, traits.clone(), false, sp);
         }
-
-        // §3 fallible cast: when the source needs runtime validation and the
-        // target is a pointer (`*T`), produce a nullable result — null on
-        // failure.  The pointer-ness of the target is the signal that the
-        // cast can fail; no separate `?` sigil.  Currently fires for
-        // `int → *Enum` and `int → *char`.
-        if let HType::Ptr { inner: to_inner, .. } = &to {
-            let from = &h.ty;
-            let needs_check = matches!(
-                (from, to_inner.as_ref()),
-                (HType::Int, HType::Enum(_)) | (HType::Int, HType::Char)
-            );
-            if needs_check {
-                let inner = (**to_inner).clone();
-                let kind = self.classify_cast(from, &inner, true, sp);
-                let res_ty = to.clone();
-                return HExpr { kind: HExprKind::CheckedCast { expr: Box::new(h), kind, to: inner }, ty: res_ty, span: sp };
-            }
-        }
-
         // `own &T` (Heap) is never a valid cast target — synthesizing an
         // owning binding from somewhere else would create a phantom free
         // obligation.  `&T` targets are handled per-arm by classify_cast
@@ -3496,16 +3476,36 @@ impl<'a> TypeChecker<'a> {
                     | (SizedInt { .. }, SizedInt { .. })
                     | (SizedInt { .. }, Float) | (Float, SizedInt { .. }) => CastKind::Numeric,
                 (Enum(_), Int) => CastKind::EnumToInt,
+                // §3 `int as Enum` — runtime bounds-checked against the
+                // variant count, panics on out-of-range (same shape as
+                // array indexing).  Result is the Enum value itself, NOT
+                // a nullable pointer.
+                (Int, Enum(_)) | (SizedInt { .. }, Enum(_)) => CastKind::IntToEnumChecked,
                 (Char, Int) | (Int, Char) => CastKind::CharIntInt,
                 (Char, SizedInt { .. }) | (SizedInt { .. }, Char) => CastKind::CharIntInt,
                 // Reinterpret cast.  Three flavors:
                 //   *T → integer     — safe (reading an address is harmless).
-                //   *T → *U          — safe (still aliases the same memory, lifetime
-                //                       tracking flows through).
+                //   *T → *U          — §3 prefix rule: safe iff U is a structural
+                //                       prefix of T (data → data, U's fields match
+                //                       T's first |U.fields| fields by name and
+                //                       type).  Otherwise must be inside `unsafe { }`.
                 //   integer → *T     — UNSAFE: synthesizes an arbitrary pointer with no
                 //                       dep tracking.  Must be inside `unsafe { }`.
                 (Ptr { .. }, SizedInt { bits: 0, .. }) | (Ptr { .. }, Int) => CastKind::Reinterpret,
-                (Ptr { .. }, Ptr { .. }) => CastKind::Reinterpret,
+                (Ptr { inner: from_inner, .. }, Ptr { inner: to_inner, .. }) => {
+                    if self.in_unsafe == 0 && !self.is_structural_prefix(from_inner, to_inner) {
+                        self.err(
+                            format!(
+                                "cast `{}` → `{}` is not a structural prefix and requires \
+                                 `unsafe {{ ... }}` — target must be a `data` whose fields are \
+                                 a prefix (same names, types, order) of the source's `data`",
+                                type_str(from), type_str(to),
+                            ),
+                            sp,
+                        );
+                    }
+                    CastKind::Reinterpret
+                }
                 // References can be read as addresses — safe, just looking at the pointer value.
                 (Ref { .. }, SizedInt { bits: 0, .. }) | (Ref { .. }, Int) => CastKind::Reinterpret,
                 // &T  →  *T  is the FFI bridge: same address, narrower lifetime tracking
@@ -3595,15 +3595,31 @@ impl<'a> TypeChecker<'a> {
                 }
             }
         } else {
-            match (from, to) {
-                (Int, Enum(_)) => CastKind::IntToEnumChecked,
-                (Int, Char) => CastKind::IntToCharChecked,
-                _ => {
-                    self.err(format!("invalid checked cast: {:?} as? {:?}", from, to), sp);
-                    CastKind::Identity
-                }
-            }
+            // `as?` is gone — checked casts are now spelled `as` and
+            // dispatched by the type pair (see int → Enum above).
+            self.err("internal: classify_cast called with checked=true after `as?` removal", sp);
+            CastKind::Identity
         }
+    }
+
+    /// §3 prefix rule: returns true iff a `*from → *to` reinterpret is safe.
+    /// Identity (`type_eq(from, to)`) trivially is — that's a mutness-only
+    /// adjustment, not a real reinterpret.  Different structs are safe iff
+    /// `to`'s field list is a prefix of `from`'s (same names + types + order).
+    /// All other type-pair combinations return false and the cast falls
+    /// through to the `unsafe` requirement.
+    fn is_structural_prefix(&self, from: &HType, to: &HType) -> bool {
+        if type_eq(from, to) { return true; }
+        let (HType::Struct(from_id), HType::Struct(to_id)) = (from, to) else { return false; };
+        let from_info = self.sym.struct_info(*from_id);
+        let to_info = self.sym.struct_info(*to_id);
+        if to_info.fields.len() > from_info.fields.len() { return false; }
+        for (i, tf) in to_info.fields.iter().enumerate() {
+            let ff = &from_info.fields[i];
+            if ff.name != tf.name { return false; }
+            if !type_eq(&ff.ty, &tf.ty) { return false; }
+        }
+        true
     }
 
     fn check_capturing_lambda(&mut self,

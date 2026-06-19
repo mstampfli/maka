@@ -1,0 +1,24 @@
+// §3 prefix rule: `*T → *U` is allowed in safe code iff U's fields are
+// a structural prefix of T's (same names + types + order).  Other shapes
+// require `unsafe`.
+
+data NetHeader { u8 version; int length; }
+data NetPacket { u8 version; int length; int payload_len; }
+
+unit main() {
+    mut NetPacket p = { version = 1, length = 256, payload_len = 248 };
+    *NetPacket pp = &mut p;
+    // Safe prefix cast — NetHeader is exactly the first two fields of
+    // NetPacket, in order, with matching types.
+    *NetHeader hp = pp as *NetHeader;
+    log(hp!.version as int);    // 1
+    log(hp!.length);            // 256
+
+    // `int as Enum` is bounds-checked: a tag in range succeeds and
+    // yields the variant value (no `*`, no `null`).
+    int tag = 1;
+    Move m = tag as Move;
+    log(m as int);              // 1
+}
+
+enum Move { Idle, Walking, Running }

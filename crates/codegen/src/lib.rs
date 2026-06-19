@@ -8520,6 +8520,28 @@ impl<'a> Cx<'a> {
             CastKind::Numeric | CastKind::SignChange | CastKind::EnumToInt | CastKind::CharIntInt | CastKind::Identity => {
                 format!("(({}){})", to_c, s)
             }
+            // §3 `int as Enum` — runtime bounds-check against the variant
+            // count, panic on out-of-range, return the Enum value.  Same
+            // shape as `arr[i]`: a fail-fast guard, not a fallibility carrier.
+            CastKind::IntToEnumChecked => {
+                if let HType::Enum(eid) = to {
+                    let info = self.sym.enum_info(*eid);
+                    let cond = if info.variants.is_empty() {
+                        "0".to_string()
+                    } else {
+                        info.variants.iter()
+                            .map(|v| format!("__v == {}", v.tag))
+                            .collect::<Vec<_>>()
+                            .join(" || ")
+                    };
+                    let ec = c_ident(&info.name);
+                    return format!(
+                        "(__extension__ ({{ maka_int __v = ({0}); if (!({1})) {{ maka_panic(\"`int as {2}`: tag out of range\"); }} ({3})__v; }}))",
+                        s, cond, info.name, ec,
+                    );
+                }
+                format!("(({}){})", to_c, s)
+            }
             // Reinterpret: a plain C cast — works for ptr↔ptr, ptr↔intptr_t, etc.
             // The `(uintptr_t)` round-trip silences GCC's "incompatible pointer types"
             // warnings on direct *T↔*U casts.
