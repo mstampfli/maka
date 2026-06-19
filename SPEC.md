@@ -470,6 +470,14 @@ runtime null-check macro. Proof comes from:
 - The local is currently inside a narrowing window opened by `if (p != null)`.
 - The local appears after a guarding early-exit: `if (p == null) { return; }`.
 - The local appears inside a `while (p != null)` body.
+- The value is the result of a call to a function whose **interprocedural
+  summary** is `NeverNull` — i.e. every return path in the callee is itself
+  provably non-null.  Summaries are computed via fixpoint over the lowered
+  HIR after every function (including instantiations) is checked, so chains
+  like `top` → `mid` → `leaf` converge as long as the leaf is provable.
+  Functions whose return type is not a nullable carrier (`&T`, value types)
+  are trivially `NeverNull`; functions returning `*T`/`own *T`/`raw *T` must
+  have every return expression statically classifiable as non-null.
 
 Without a proof, the compiler rejects the deref with a message that suggests
 the appropriate guard. **There is no `MAKA_UNWRAP` runtime macro** - the

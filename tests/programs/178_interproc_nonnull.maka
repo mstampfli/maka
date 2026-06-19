@@ -1,0 +1,22 @@
+// §6.3 interprocedural null-proof: a function whose every return path is
+// provably non-null is summarised as NeverNull; calls to it satisfy the
+// `!` proof obligation at the call site without an explicit null guard.
+// Summaries are computed via fixpoint over the lowered HIR, so transitive
+// chains (`top` → `mid` → `leaf`) all converge.
+
+own *int leaf() {
+    return alloc 7;
+}
+
+own *int mid() {
+    return leaf();
+}
+
+own *int top() {
+    return mid();
+}
+
+unit main() {
+    int x = top()!;             // ok — top→mid→leaf chain all proven non-null
+    log(x);                     // 7
+}

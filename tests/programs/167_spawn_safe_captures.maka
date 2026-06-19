@@ -12,6 +12,11 @@ unit main() {
     // [b]: moves the owner into the thread (transfer).
     // [a]: copies the opaque atomic handle (share).
     *Thread t = thread(unit() [b, a] {
+        // The lifetime pass treats captured `*T` / `own *T` as nullable at
+        // closure entry — flow info from the capture site doesn't propagate
+        // through synthesized closure bodies yet.  Explicit guard satisfies
+        // the §6.3 forced-handling rule.
+        if (b == null) { return; }
         _ = atomic_add(a, b!.v);
     });
     join(t);

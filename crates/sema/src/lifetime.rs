@@ -55,8 +55,9 @@ impl LocalState {
 pub fn analyze_func(
     sym: &SymTab,
     f: &mut HFunc,
+    summaries: &[bool],
 ) -> Result<Vec<SemaWarning>, Vec<SemaError>> {
-    let mut a = Analyzer::new(sym, f);
+    let mut a = Analyzer::new(sym, f, summaries);
     // analyze_block's `?` would early-return without surfacing warnings, but warnings
     // are only meaningful when analysis ran to completion, so this is fine.
     a.analyze_block(&mut Vec::new(), 0)?;
@@ -65,6 +66,111 @@ pub fn analyze_func(
     // Final: walk the body and fill heap_to_free for each block in reverse scope-decl order.
     fill_heap_drops(sym, f);
     if errors.is_empty() { Ok(warnings) } else { Err(std::mem::take(&mut errors)) }
+}
+
+/// True iff a value of this type can never be null at the language level —
+/// i.e. it is not one of Maka's nullable pointer carriers (`*T`, `own *T`,
+/// `raw *T`, `heap T`).  Used as the initial fact for interprocedural
+/// return-value-non-null summaries.
+fn return_type_nonnull(t: &HType) -> bool {
+    !matches!(t, HType::Ptr { .. } | HType::OwnPtr { .. } | HType::RawPtr { .. } | HType::Heap { .. })
+}
+
+/// Compute per-function "never-returns-null" summaries by fixpoint over the
+/// lowered HIR.  Result is a `Vec<bool>` indexed by `FuncId.0`, where `true`
+/// means every return path in this function is provably non-null.
+///
+/// Algorithm: initialise from the static return type (non-pointer = NeverNull),
+/// then iterate.  For each not-yet-NeverNull function, check whether every
+/// `Return { value }` expression is `static_nonnull` *under the current
+/// summary table*.  Functions with no explicit return on a fall-off path are
+/// safe iff they return `unit` (which is non-pointer, so already true).
+///
+/// Conservative: a returned `Local(_)` of pointer type is not treated as
+/// non-null here — flow-sensitive Local tracking lives in the per-function
+/// pass that runs *after* summary computation.
+pub fn compute_return_summaries(sym: &SymTab, funcs: &[HFunc]) -> Vec<bool> {
+    let n = sym.sigs.len();
+    let mut summaries: Vec<bool> = (0..n).map(|i| return_type_nonnull(&sym.sigs[i].ret)).collect();
+    // Extern signatures stay at their type-derived value; only Maka bodies can be proven.
+    loop {
+        let mut changed = false;
+        for f in funcs {
+            let id = f.id.0 as usize;
+            if summaries[id] { continue; }
+            if function_returns_nonnull(&f.body, &summaries) {
+                summaries[id] = true;
+                changed = true;
+            }
+        }
+        if !changed { break; }
+    }
+    summaries
+}
+
+fn function_returns_nonnull(b: &HBlock, summaries: &[bool]) -> bool {
+    let mut any_return = false;
+    let result = block_returns_nonnull(b, summaries, &mut any_return);
+    // Fall-off-the-end: if the body never hits an explicit return, the
+    // implicit return is unit — non-nullable trivially.  Otherwise honour
+    // what we collected.
+    result && any_return
+}
+
+fn block_returns_nonnull(b: &HBlock, summaries: &[bool], any: &mut bool) -> bool {
+    for s in &b.stmts {
+        if !stmt_returns_nonnull(s, summaries, any) {
+            return false;
+        }
+    }
+    true
+}
+
+fn stmt_returns_nonnull(s: &HStmt, summaries: &[bool], any: &mut bool) -> bool {
+    match s {
+        HStmt::Return { value: Some(v), .. } => {
+            *any = true;
+            static_nonnull(v, summaries)
+        }
+        HStmt::Return { value: None, .. } => { *any = true; true }
+        HStmt::If { then_b, else_b, .. } => {
+            if !block_returns_nonnull(then_b, summaries, any) { return false; }
+            if let Some(eb) = else_b {
+                if !block_returns_nonnull(eb, summaries, any) { return false; }
+            }
+            true
+        }
+        HStmt::While { body, .. } => block_returns_nonnull(body, summaries, any),
+        HStmt::Block(b) | HStmt::Unsafe(b, _) => block_returns_nonnull(b, summaries, any),
+        HStmt::ForC { body, .. } | HStmt::ForEach { body, .. } => block_returns_nonnull(body, summaries, any),
+        // Propagate exits the *caller* frame via the inline expansion site;
+        // its nullness for the current function's summary is irrelevant.
+        HStmt::Propagate { .. } => true,
+        _ => true,
+    }
+}
+
+/// Structural non-null classifier used by both summary fixpoint and per-func
+/// `expr_nonnull`.  Pure tree walk: does NOT consult flow facts.
+fn static_nonnull(e: &HExpr, summaries: &[bool]) -> bool {
+    match &e.kind {
+        HExprKind::HeapAlloc(_) => true,
+        HExprKind::AddrOfRef { .. } => true,
+        HExprKind::LitNull => false,
+        HExprKind::Cast { expr, kind, .. } | HExprKind::CheckedCast { expr, kind, .. } => {
+            if matches!(kind, CastKind::IntPtrToEnumPtrChecked) { return false; }
+            // For wrapping casts (`p as *Foo`), the result's nullness follows the source.
+            // `int as Enum` lowers to a Maka value, but it's unconditional (panics on bad
+            // tag, never produces null), so recursing into `static_nonnull` on it gives the
+            // right answer for source pointer cases.
+            static_nonnull(expr, summaries)
+        }
+        HExprKind::Call { callee, .. } | HExprKind::InlineCall { callee, .. } => {
+            summaries.get(callee.0 as usize).copied().unwrap_or(false)
+        }
+        HExprKind::DerefRef(inner) => static_nonnull(inner, summaries),
+        _ => false,
+    }
 }
 
 struct Analyzer<'a> {
@@ -77,10 +183,14 @@ struct Analyzer<'a> {
     /// Non-fatal diagnostics — surfaced when an auto-nulled pointer is observed
     /// at a use site without intervening re-assignment on every code path.
     warnings: Vec<SemaWarning>,
+    /// Interprocedural "never-returns-null" facts, indexed by `FuncId.0`.
+    /// Populated by `compute_return_summaries` before the per-func pass runs.
+    /// `expr_nonnull` consults this on `Call` / `InlineCall` arms.
+    summaries: &'a [bool],
 }
 
 impl<'a> Analyzer<'a> {
-    fn new(sym: &'a SymTab, f: &mut HFunc) -> Self {
+    fn new(sym: &'a SymTab, f: &mut HFunc, summaries: &'a [bool]) -> Self {
         let n = f.locals.len();
         Self {
             sym,
@@ -88,6 +198,7 @@ impl<'a> Analyzer<'a> {
             state: (0..n).map(|_| LocalState::fresh()).collect(),
             errors: Vec::new(),
             warnings: Vec::new(),
+            summaries,
         }
     }
 
@@ -606,6 +717,13 @@ impl<'a> Analyzer<'a> {
                     return false;
                 }
                 self.expr_nonnull(expr)
+            }
+            // Interprocedural: a call result is proven non-null when the global
+            // summary for that callee says so (every return path in the callee
+            // is non-null).  `compute_return_summaries` runs before the per-func
+            // pass populates these facts.
+            HExprKind::Call { callee, .. } | HExprKind::InlineCall { callee, .. } => {
+                self.summaries.get(callee.0 as usize).copied().unwrap_or(false)
             }
             _ => false,
         }

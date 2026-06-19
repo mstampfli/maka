@@ -254,10 +254,6 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                         for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
                         sym.send_probes.extend(synth.send_probes);
                         sym.sync_probes.extend(synth.sync_probes);
-                        match lifetime::analyze_func(&sym, &mut hfunc) {
-                            Ok(ws) => warnings.extend(ws),
-                            Err(es) => errors.extend(es),
-                        }
                         pending_reqs.push(reqs);
                         funcs.push(hfunc);
                     }
@@ -271,15 +267,12 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                     let forced = logic.get(i).copied();
                     let tc = TypeChecker::new_with_logic(&sym, Some(&l.name));
                     match tc.check_func_with_id(f, forced) {
-                        Ok((mut hfunc, reqs, synth)) => {
+                        Ok((hfunc, reqs, synth)) => {
                             for s in synth.structs { sym.structs.push(s); }
                             for s in synth.sigs { sym.sigs.push(s); }
                             for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
                             sym.send_probes.extend(synth.send_probes);
                             sym.sync_probes.extend(synth.sync_probes);
-                            if let Err(es) = lifetime::analyze_func(&sym, &mut hfunc) {
-                                errors.extend(es);
-                            }
                             pending_reqs.push(reqs);
                             funcs.push(hfunc);
                         }
@@ -314,15 +307,12 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                     if !f_decl.type_params.is_empty() { continue; }
                     let tc = TypeChecker::new_with_logic(&sym, Some(&h.attr_name));
                     match tc.check_func_with_id(&f_decl, Some(fid)) {
-                        Ok((mut hfunc, reqs, synth)) => {
+                        Ok((hfunc, reqs, synth)) => {
                             for s in synth.structs { sym.structs.push(s); }
                             for s in synth.sigs { sym.sigs.push(s); }
                             for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
                             sym.send_probes.extend(synth.send_probes);
                             sym.sync_probes.extend(synth.sync_probes);
-                            if let Err(es) = lifetime::analyze_func(&sym, &mut hfunc) {
-                                errors.extend(es);
-                            }
                             pending_reqs.push(reqs);
                             funcs.push(hfunc);
                         }
@@ -484,16 +474,12 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                 }
                 let tc = TypeChecker::new_with_logic(&sym, template_sig.logic.as_deref()).with_subst(env);
                 match tc.check_func_with_id(&f_ast, Some(new_fid)) {
-                    Ok((mut hf, reqs2, synth)) => {
+                    Ok((hf, reqs2, synth)) => {
                         for s in synth.structs { sym.structs.push(s); }
                         for s in synth.sigs { sym.sigs.push(s); }
                         for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
                         sym.send_probes.extend(synth.send_probes);
                         sym.sync_probes.extend(synth.sync_probes);
-                        match lifetime::analyze_func(&sym, &mut hf) {
-                            Ok(ws) => warnings.extend(ws),
-                            Err(es) => errors.extend(es),
-                        }
                         pending_reqs.push(reqs2);
                         funcs.push(hf);
                     }
@@ -507,6 +493,20 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
     detect_inline_recursion(&sym, &funcs, &mut errors);
     // Validate every `propagate X;` against the *caller's* return type at each InlineCall site.
     check_inline_propagate_compat(&sym, &funcs, &mut errors);
+
+    // Interprocedural pass — runs after every function (including instantiations)
+    // is fully lowered.  First compute "never returns null" summaries by fixpoint
+    // over the lowered HIR (§6.3 forced-handling proof obligation), then run the
+    // per-function lifetime/deps/move pass with those summaries in hand so
+    // `(some_fn())!` is accepted iff every return path in `some_fn` is provably
+    // non-null.
+    let summaries = lifetime::compute_return_summaries(&sym, &funcs);
+    for hf in &mut funcs {
+        match lifetime::analyze_func(&sym, hf, &summaries) {
+            Ok(ws) => warnings.extend(ws),
+            Err(es) => errors.extend(es),
+        }
+    }
 
     if !errors.is_empty() {
         sym.funcs = funcs;

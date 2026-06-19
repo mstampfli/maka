@@ -1,0 +1,11 @@
+// `maybe` has a branch that returns `null`, so the interprocedural summary
+// stays MaybeNull — `maybe(b)!` cannot satisfy the `!` proof obligation.
+own *int maybe(bool b) {
+    if (b) { return null; }
+    return alloc 1;
+}
+
+unit main() {
+    int y = maybe(false)!;   // ❌ summary is MaybeNull, must guard first
+    log(y);
+}
