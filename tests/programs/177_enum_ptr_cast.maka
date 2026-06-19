@@ -1,0 +1,29 @@
+// §6.6 enum-pointer cast pair:
+//   `*int → *Enum` — safe, runtime tag-check at the pointee.  On hit:
+//   the same pointer cast to `*Enum`.  On miss: `null`.  Failure rides in
+//   the result type — Maka's "pointer is the nullable carrier" rule.
+//   `*Enum → *int` — safe, unconditional reinterpret.  Every enum variant
+//   has a valid int representation, so no check is needed.
+
+enum Move { Idle, Walking = 1, Running = 2 }
+
+unit main() {
+    // In-range tag: 1 == Walking.  The cast yields a non-null *Move
+    // that aliases the same storage as the int.
+    mut int good = 1;
+    *int gp = &mut good;
+    *Move mp = gp as *Move;
+    log(mp! as int);                // 1
+
+    // Out-of-range tag: 42 is not a Move variant.  The cast yields null.
+    mut int bad = 42;
+    *int bp = &mut bad;
+    *Move np = bp as *Move;
+    if (np == null) { log("null"); }        // null
+
+    // Reverse direction is always valid — every Move encodes as int.
+    mut Move m = Move.Running;
+    *Move emp = &mut m;
+    *int ip = emp as *int;
+    log(ip!);                       // 2
+}

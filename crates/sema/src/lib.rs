@@ -400,7 +400,7 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                             // type vars (via receiver_unify against recv_concrete),
                             // then compare each binding's value.
                             if !bindings_concrete.is_empty() {
-                                let env = match hir::receiver_unify(&h.receiver_pattern, &recv_concrete, &h.receiver_tyvars) {
+                                let env = match hir::receiver_unify_with_sym(&h.receiver_pattern, &recv_concrete, &h.receiver_tyvars, &sym) {
                                     Some(e) => e,
                                     None => return false,
                                 };

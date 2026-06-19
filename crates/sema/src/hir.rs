@@ -555,10 +555,16 @@ pub enum CastKind {
     EnumToInt,
     /// Char ↔ int.
     CharIntInt,
-    /// `as?` int→enum
+    /// §3 `int → Enum` — runtime bounds-check against the variant set
+    /// (same shape as `arr[i]`); panics on out-of-range and returns the
+    /// `Enum` value.  Result HType is the `Enum`, never wrapped in a
+    /// pointer.
     IntToEnumChecked,
-    /// `as?` int→char (well, we currently don't validate encoding — accept)
-    IntToCharChecked,
+    /// §6.6 `*int → *Enum` — runtime peek-and-tag-check at the pointee.
+    /// On in-range: returns the **same** pointer cast to `*Enum`.  On
+    /// out-of-range: returns `null`.  Maka's "pointer is the nullable
+    /// carrier" convention — failure rides in the result type, no panic.
+    IntPtrToEnumPtrChecked,
     /// implicit (used by codegen when source==target type)
     Identity,
     /// `&T as dyn Trait` / `&mut T as dyn Trait` / `T as dyn Trait`: produces a fat pointer.

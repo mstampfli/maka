@@ -8214,8 +8214,11 @@ impl<'a> Cx<'a> {
                 self.emit_cast(s, kind.clone(), to)
             }
             HExprKind::CheckedCast { expr, kind, to } => {
+                // Dead path: the parser no longer constructs CheckedCast.
+                // Fall back to the regular cast emitter; new int→Enum and
+                // *int→*Enum live in `emit_cast` (see CastKind cases).
                 let s = self.emit_expr(f, expr);
-                self.emit_checked_cast(s, kind.clone(), &expr.ty, to)
+                self.emit_cast(s, kind.clone(), to)
             }
             HExprKind::Struct { id, fields } => {
                 let info = self.sym.struct_info(*id);
@@ -8542,6 +8545,31 @@ impl<'a> Cx<'a> {
                 }
                 format!("(({}){})", to_c, s)
             }
+            // §6.6 `*int → *Enum` — peek at the pointee, validate the tag,
+            // return the same pointer cast to `*Enum` (in range) or NULL
+            // (out of range).  Failure-via-nullability — no panic, no
+            // wrapping; the result *is* the requested `*Enum`.
+            CastKind::IntPtrToEnumPtrChecked => {
+                if let HType::Ptr { inner, .. } = to {
+                    if let HType::Enum(eid) = inner.as_ref() {
+                        let info = self.sym.enum_info(*eid);
+                        let cond = if info.variants.is_empty() {
+                            "0".to_string()
+                        } else {
+                            info.variants.iter()
+                                .map(|v| format!("__v == {}", v.tag))
+                                .collect::<Vec<_>>()
+                                .join(" || ")
+                        };
+                        let ec = c_ident(&info.name);
+                        return format!(
+                            "(__extension__ ({{ maka_int* __p = ({0}); maka_int __v = *__p; ({1}) ? ({2}*)__p : ({2}*)0; }}))",
+                            s, cond, ec,
+                        );
+                    }
+                }
+                format!("(({}){})", to_c, s)
+            }
             // Reinterpret: a plain C cast — works for ptr↔ptr, ptr↔intptr_t, etc.
             // The `(uintptr_t)` round-trip silences GCC's "incompatible pointer types"
             // warnings on direct *T↔*U casts.
@@ -8550,30 +8578,6 @@ impl<'a> Cx<'a> {
         }
     }
 
-    fn emit_checked_cast(&self, s: String, kind: CastKind, _from: &HType, to: &HType) -> String {
-        match kind {
-            CastKind::IntToEnumChecked => {
-                if let HType::Enum(eid) = to {
-                    let info = self.sym.enum_info(*eid);
-                    // Build a runtime check expression: result = (s in {variants...}) ? new T(s) : NULL.
-                    // Since result type is *T (Enum) — represented as `T*` — we malloc a temp and return its addr.
-                    let mut cond_parts = Vec::new();
-                    for v in &info.variants {
-                        cond_parts.push(format!("__v == {}", v.tag));
-                    }
-                    let cond = if cond_parts.is_empty() { "0".to_string() } else { cond_parts.join(" || ") };
-                    let ec = c_ident(&info.name);
-                    return format!("(__extension__ ({{ maka_int __v = ({0}); {1}* __r = NULL; if ({2}) {{ __r = ({1}*)malloc(sizeof({1})); *__r = ({1})__v; }} __r; }}))", s, ec, cond);
-                }
-                format!("({})", s)
-            }
-            CastKind::IntToCharChecked => {
-                // Accept any non-negative int < 0x110000
-                format!("(__extension__ ({{ maka_int __v = ({0}); maka_char* __r = NULL; if (__v >= 0 && __v < 0x110000) {{ __r = (maka_char*)malloc(sizeof(maka_char)); *__r = (maka_char)__v; }} __r; }}))", s)
-            }
-            _ => format!("({})", s),
-        }
-    }
 }
 
 fn binop_c(op: HBinOp) -> &'static str {

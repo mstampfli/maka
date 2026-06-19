@@ -258,6 +258,12 @@ Standard infix and unary operators with conventional precedence. Maka-specific:
     field list is a structural prefix of `T`'s — same names, same types,
     same order, identical offsets.  See §6.6.  Otherwise must be inside
     `unsafe { ... }`.
+  - **`*int → *Enum`**: runtime peek-and-tag-check at the pointee.  In
+    range: yields the same address typed as `*Enum`.  Out of range:
+    yields `null`.  Failure rides in the result type — no panic.
+    The "pointer is the nullable carrier" convention.
+  - **`*Enum → *int`**: unconditional reinterpret.  Every enum variant
+    has a valid `int` representation, so no check is required.
   - **`int → *T`**, **`raw *T` observation**, etc.: unchanged per §6.5.
 - `transfer x` / `share x` - only at direct argument positions of `gate`
   function calls (see §7).
@@ -554,6 +560,24 @@ unrelated layouts, `*float → *int` for bit-pattern punning, etc.) require
 `unsafe { }` (§6.5 item 6).  The prefix rule avoids the strict-aliasing
 hazard: every access through `*hdr` goes through one of the shared prefix
 fields, so the C compiler's TBAA sees identical type access on both sides.
+
+The `*int ↔ *Enum` pair is exempt from the prefix rule because an `Enum`
+is just one of the integer's valid tag values.  `*int → *Enum` reads the
+pointee, checks it against the variant set, and returns either the same
+pointer cast to `*Enum` (in range) or `null` (out of range) — failure is
+carried in the nullable result, not as a panic.  `*Enum → *int` is
+unconditional: every variant is by construction a valid `int`.  Both
+directions are no-ops at the bit level; only the type tag changes.
+
+```maka
+enum Move { Idle, Walking = 1, Running = 2 }
+
+unit handle(*int tag) {
+    *Move m = tag as *Move;          // null if *tag ∉ {0,1,2}
+    if (m == null) { return; }
+    log(m! as int);                  // safe: *Enum → int via deref + cast
+}
+```
 
 The implicit-coercion table is governed by a single principle: **loosening
 flags is implicit, tightening a flag requires proof**.

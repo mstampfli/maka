@@ -3493,6 +3493,21 @@ impl<'a> TypeChecker<'a> {
                 //                       dep tracking.  Must be inside `unsafe { }`.
                 (Ptr { .. }, SizedInt { bits: 0, .. }) | (Ptr { .. }, Int) => CastKind::Reinterpret,
                 (Ptr { inner: from_inner, .. }, Ptr { inner: to_inner, .. }) => {
+                    // §6.6 safe pointer-to-pointer cast cases (between
+                    // different inner types — identity is already covered
+                    // via the structural-prefix helper):
+                    //   `*int → *Enum`  — runtime tag check, null on fail.
+                    //   `*Enum → *int`  — always valid (every variant has
+                    //                     a valid int representation).
+                    //   `*T → *U` between `data` structs where U is a
+                    //   structural prefix of T.
+                    // Everything else requires `unsafe { ... }`.
+                    if matches!(from_inner.as_ref(), Int) && matches!(to_inner.as_ref(), Enum(_)) {
+                        return CastKind::IntPtrToEnumPtrChecked;
+                    }
+                    if matches!(from_inner.as_ref(), Enum(_)) && matches!(to_inner.as_ref(), Int) {
+                        return CastKind::Reinterpret;
+                    }
                     if self.in_unsafe == 0 && !self.is_structural_prefix(from_inner, to_inner) {
                         self.err(
                             format!(
