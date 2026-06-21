@@ -1253,16 +1253,25 @@ well-defined because the indirection is finite.
 
 **Disambiguating assoc types under multiple bounds.**  When a generic
 parameter has multiple bounds and two of them declare an associated type
-with the same name, the bare `T::Name` syntax is **rejected** as
-ambiguous.  Disambiguation via `T::AttrName::Name` (a fully-qualified
-form) is reserved for a future revision; until then, the user must
-rename one of the conflicting assoc types in their own attr declaration.
-The error:
+with the same name, write `T::AttrName::Name` to pin the lookup to a
+specific attr's slot:
 
+```maka
+attr A { type Slot; Slot a_get(&_ self); }
+attr B { type Slot; Slot b_get(&_ self); }
+
+data Pick<T> where T has A, T has B {
+    T::A::Slot a_val;
+    T::B::Slot b_val;
+}
 ```
-T::Slot is ambiguous: both `Stored` and `Cellable` declare it.
-Rename one attr's `Slot` until qualified paths are supported.
-```
+
+Both `T::A::Slot` and `T::B::Slot` resolve cleanly because each path
+names exactly one attr.  Bare `T::Slot` under two bounds that both
+declare it is still ambiguous and surfaces as a downstream type-mismatch
+diagnostic; rename or qualify.
+
+See `180_qualified_assoc_path.maka` for the worked example.
 
 **Errors and hints (parity with §10.1).**
 

@@ -80,8 +80,18 @@ pub fn resolve_assoc_type(
         })
         .collect();
     if matching.is_empty() { return None; }
-    // Pick the first matching impl (coherence guarantees uniqueness once
-    // the overlap checker is in; until then we tolerate first-match).
+    // §10.5: when bare `T::Slot` matches more than one impl on distinct
+    // attrs (e.g. T has A and T has B both declaring `Slot`), the lookup
+    // is ambiguous.  We can't `errors.push` from here without a sink, so
+    // return `None` — the caller's downstream type-mismatch will surface,
+    // and the user should disambiguate via `T::A::Slot`.  Same-attr
+    // overlap is already rejected at impl-registration time (overlap
+    // coherence — §10.4).
+    let distinct_attrs: std::collections::HashSet<&str> =
+        matching.iter().map(|h| h.attr_name.as_str()).collect();
+    if attr_hint.is_none() && distinct_attrs.len() > 1 {
+        return None;
+    }
     let h = matching[0];
     let env = receiver_unify_with_sym(&h.receiver_pattern, on, &h.receiver_tyvars, sym)?;
     let (_, raw) = h.assoc_type_defs.iter().find(|(n, _)| n == segment)?;
@@ -105,17 +115,38 @@ pub fn resolve_assoc_types_in(sym: &SymTab, t: &HType) -> HType {
     }
     match t {
         HType::AssocType { on, segment, attr_hint } => {
-            let on_resolved = resolve_assoc_types_in(sym, on);
-            if has_tyvar(&on_resolved) {
+            // §10.5 disambiguated form: `T::A::Slot` parsed as nested AssocPaths
+            // and was kept as a nested `AssocType` by the early resolver because
+            // `sym.attrs` wasn't populated yet.  Collapse it now if the inner
+            // segment is a registered attr name.
+            let (effective_on, effective_hint): (HType, Option<String>) =
+                if attr_hint.is_none() {
+                    if let HType::AssocType { on: inner, segment: maybe_attr, attr_hint: None } = on.as_ref() {
+                        if sym.attr_by_name(maybe_attr).is_some() {
+                            (resolve_assoc_types_in(sym, inner), Some(maybe_attr.clone()))
+                        } else {
+                            (resolve_assoc_types_in(sym, on), attr_hint.clone())
+                        }
+                    } else {
+                        (resolve_assoc_types_in(sym, on), attr_hint.clone())
+                    }
+                } else {
+                    (resolve_assoc_types_in(sym, on), attr_hint.clone())
+                };
+            if has_tyvar(&effective_on) {
                 return HType::AssocType {
-                    on: Box::new(on_resolved),
+                    on: Box::new(effective_on),
                     segment: segment.clone(),
-                    attr_hint: attr_hint.clone(),
+                    attr_hint: effective_hint,
                 };
             }
-            match resolve_assoc_type(sym, &on_resolved, segment, attr_hint.as_deref()) {
+            match resolve_assoc_type(sym, &effective_on, segment, effective_hint.as_deref()) {
                 Some(r) => resolve_assoc_types_in(sym, &r),
-                None => t.clone(),
+                None => HType::AssocType {
+                    on: Box::new(effective_on),
+                    segment: segment.clone(),
+                    attr_hint: effective_hint,
+                },
             }
         }
         HType::Ref { mutable, inner } => HType::Ref { mutable: *mutable, inner: Box::new(resolve_assoc_types_in(sym, inner)) },
@@ -388,6 +419,13 @@ pub fn resolve_type_in(
             // it as an AssocType placeholder that monomorphization resolves
             // by looking up the impl whose receiver pattern unifies with the
             // base's concrete substitution.
+            //
+            // §10.5 disambiguated form: `T::A::Slot` parses as a nested
+            // `AssocPath` whose inner segment is the attr name (e.g. `A`).
+            // We can't collapse here in general because attrs are registered
+            // in Pass 3 but struct/function field resolution runs in Pass 2.
+            // The collapse happens later in `resolve_assoc_types_in` (Pass 5)
+            // once `sym.attrs` is populated.
             let on = resolve_type_in(sym, base, type_params, errors);
             HType::AssocType { on: Box::new(on), segment: segment.clone(), attr_hint: None }
         }
@@ -1213,15 +1251,24 @@ impl SymTab {
             }
         }
 
-        // Pass 5: walk all struct instantiations and re-resolve any AssocType
-        // placeholders in their field types.  Struct instantiation happened
-        // in Pass 2b — before Pass 3 registered `has` impls — so any
-        // `T::Slot` field types were left abstract.  Now that impls are
-        // registered, we can resolve them concretely.
+        // Pass 5: walk all struct instantiations AND function signatures, and
+        // re-resolve any AssocType placeholders.  Struct instantiation and
+        // signature resolution happened in earlier passes — before Pass 3
+        // registered `has` impls — so any `T::Slot` references were left
+        // abstract.  Now that impls are registered, we can resolve them
+        // concretely (or, for unmonomorphized signatures, collapse nested
+        // `T::A::Slot` into `attr_hint: Some("A")` so the eventual
+        // instantiation site sees the disambiguated form).
         let sym_snapshot = sym.clone();
         for s in sym.structs.iter_mut() {
             for f in s.fields.iter_mut() {
                 f.ty = resolve_assoc_types_in(&sym_snapshot, &f.ty);
+            }
+        }
+        for sig in sym.sigs.iter_mut() {
+            sig.ret = resolve_assoc_types_in(&sym_snapshot, &sig.ret);
+            for pt in sig.param_tys.iter_mut() {
+                *pt = resolve_assoc_types_in(&sym_snapshot, pt);
             }
         }
 
@@ -1641,9 +1688,19 @@ pub fn check_attr_shape_ty(
     // Substitute `_` in the attr decl to the receiver Type tree, then resolve
     // with attr type-params AND receiver tyvars in scope.
     let attr_subst = substitute_func_placeholders_ty(attr_decl, receiver);
+    // Attr-declared assoc-type names (e.g. `Slot` in `attr Stored { type Slot; }`)
+    // are bare `Named(...)` in the attr method signatures.  Add them to the
+    // type-params scope so the resolver treats them as TyVars rather than
+    // silently falling back to Int — `resolve_assoc_via_impl` below maps each
+    // TyVar matching an assoc-type name to the impl's `type X = R;` value.
+    let attr_assoc_names: Vec<String> = sym
+        .attr_by_name(attr_name)
+        .map(|a| a.assoc_type_decls.iter().map(|(n, _, _)| n.clone()).collect())
+        .unwrap_or_default();
     let combined: Vec<String> = attr_type_params.iter()
         .chain(attr_subst.type_params.iter())
         .chain(receiver_tyvars.iter())
+        .chain(attr_assoc_names.iter())
         .cloned().collect();
     let (a_params_raw, a_ret_raw) = resolve_signature(sym, &attr_subst.params, &attr_subst.ret, &combined, &mut Vec::new());
     let env: std::collections::HashMap<String, HType> = attr_type_params.iter().cloned().zip(attr_args.iter().cloned()).collect();
@@ -1660,6 +1717,15 @@ pub fn check_attr_shape_ty(
                 if defs.iter().any(|(n, _)| n == segment) {
                     let (_, v) = defs.iter().find(|(n, _)| n == segment).unwrap();
                     let _ = on;
+                    return v.clone();
+                }
+                t.clone()
+            }
+            // Bare attr-side assoc-type names (e.g. `Slot` in `Slot value(&_ self);`)
+            // resolve to TyVars in the contract check — see `attr_assoc_names`
+            // above.  Map each one to the impl's `type X = R;` value.
+            HType::TyVar(name) => {
+                if let Some((_, v)) = defs.iter().find(|(n, _)| n == name) {
                     return v.clone();
                 }
                 t.clone()

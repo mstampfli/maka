@@ -1,0 +1,25 @@
+// §10.5 disambiguated assoc-type path: `T::A::Slot` pins the lookup to
+// the `A` impl when both bounds declare a `Slot`.  The collapse runs in
+// the Pass-5 assoc-type resolver once `sym.attrs` is populated.
+//
+// Also exercises the assoc-name-as-TyVar fix in `check_attr_shape_ty` —
+// without it, contract-matching `Foo has B`'s `b_get` returns `string`
+// against attr B's expected `Slot` silently fell back to `int`.
+
+attr A { type Slot; Slot a_get(&_ self); }
+attr B { type Slot; Slot b_get(&_ self); }
+
+data Foo { int v; }
+Foo has A { type Slot = int;    int    a_get(&Foo self) { return self.v; } }
+Foo has B { type Slot = string; string b_get(&Foo self) { return "hi";   } }
+
+data Pick<T> where T has A, T has B {
+    T::A::Slot a_val;
+    T::B::Slot b_val;
+}
+
+unit main() {
+    Pick<Foo> p = { a_val = 99, b_val = "yo" };
+    log(p.a_val);    // 99
+    log(p.b_val);    // yo
+}
