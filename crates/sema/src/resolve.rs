@@ -1541,6 +1541,10 @@ fn substitute_expr_placeholders_ty(e: &mut ast::Expr, recv: &ast::Type) {
             }
         }
         WallMod { expr, .. } => substitute_expr_placeholders_ty(expr, recv),
+        AttrCall { receiver, args, .. } => {
+            if let Some(r) = receiver.as_mut() { substitute_expr_placeholders_ty(r, recv); }
+            for a in args { substitute_expr_placeholders_ty(a, recv); }
+        }
     }
 }
 
@@ -1649,6 +1653,10 @@ fn substitute_expr_placeholders(e: &mut ast::Expr, impl_ty: &str) {
             }
         }
         WallMod { expr, .. } => substitute_expr_placeholders(expr, impl_ty),
+        AttrCall { receiver, args, .. } => {
+            if let Some(r) = receiver.as_mut() { substitute_expr_placeholders(r, impl_ty); }
+            for a in args { substitute_expr_placeholders(a, impl_ty); }
+        }
     }
 }
 

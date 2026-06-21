@@ -46,6 +46,14 @@ pub struct TypeChecker<'a> {
     call_arg_depth: u32,
     /// True when the immediate enclosing call's callee is a `gate` function.
     cur_call_is_gate: bool,
+    /// §10.5 attr-qualified call (`Attr::method`).  When `Some(_)`, the next
+    /// `check_call_inner` skips local-shadow lookup on the callee's qualifier
+    /// — the `::` parse already committed to the qualified form.
+    force_qualifier: Option<String>,
+    /// §10.5: set together with `force_qualifier` for the postfix form
+    /// `recv.Attr::method(args)`.  When true the synthesized call is treated
+    /// as postfix (auto-borrow on arg 0).
+    force_postfix: bool,
     /// Substitution for generic type parameters of the current function being checked.
     pub subst: std::collections::HashMap<String, HType>,
     /// Instantiation requests queued during type checking; drained by `analyze`.
@@ -266,6 +274,8 @@ impl<'a> TypeChecker<'a> {
             cur_logic: logic.map(|s| s.to_string()),
             call_arg_depth: 0,
             cur_call_is_gate: false,
+            force_qualifier: None,
+            force_postfix: false,
             subst: std::collections::HashMap::new(),
             instantiation_requests: Vec::new(),
             synth_structs: Vec::new(),
@@ -797,6 +807,9 @@ impl<'a> TypeChecker<'a> {
             ast::Expr::Field { base, name, span } => self.check_field(base, name, expected, *span),
             ast::Expr::Index { base, idx, span } => self.check_index(base, idx, *span),
             ast::Expr::Call { callee, args, span } => self.check_call(callee, args, *span),
+            ast::Expr::AttrCall { attr, name, receiver, args, span } => {
+                self.check_attr_call(attr, name, receiver.as_deref(), args, *span)
+            }
             ast::Expr::Cast { expr, ty, span } => self.check_cast(expr, ty, false, *span),
             ast::Expr::CheckedCast { expr, ty, span } => self.check_cast(expr, ty, true, *span),
             ast::Expr::Struct { ty, fields, span } => self.check_struct_lit(ty.as_deref(), fields, expected, *span),
@@ -1815,6 +1828,45 @@ impl<'a> TypeChecker<'a> {
         result
     }
 
+    /// §10.5 attr-qualified call: `Attr::method(args)` or
+    /// `receiver.Attr::method(args)`.  Synthesizes a Field callee shaped
+    /// like the legacy `Attr.method` form and routes through `check_call`,
+    /// but unlike a bare `Attr.method` it bypasses the local-shadow check
+    /// inside `check_call_inner` (the `::` parse guaranteed the user meant
+    /// the attr).  Postfix receiver becomes arg 0 with auto-borrow.
+    fn check_attr_call(
+        &mut self,
+        attr: &str,
+        name: &str,
+        receiver: Option<&ast::Expr>,
+        args: &[ast::Expr],
+        sp: Span,
+    ) -> HExpr {
+        if self.sym.attr_by_name(attr).is_none() && self.sym.logic_by_name(attr).is_none() {
+            self.err(format!("unknown attr `{}` in qualified call `{}::{}`", attr, attr, name), sp);
+            return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
+        }
+        let mut all_args: Vec<ast::Expr> = Vec::new();
+        if let Some(recv) = receiver { all_args.push(recv.clone()); }
+        all_args.extend(args.iter().cloned());
+        // Synthesise the existing qualified-call shape so the rest of
+        // dispatch picks up unchanged.  The local-shadow check in
+        // `check_call_inner` only fires when the bare-Ident lookup
+        // succeeds; here we pre-tag this as a qualified call by setting
+        // `force_qualifier`, which suppresses the shadow lookup.
+        let callee = ast::Expr::Field {
+            base: Box::new(ast::Expr::Ident(attr.to_string(), sp)),
+            name: name.to_string(),
+            span: sp,
+        };
+        self.force_qualifier = Some(attr.to_string());
+        self.force_postfix = receiver.is_some();
+        let r = self.check_call(&callee, &all_args, sp);
+        self.force_qualifier = None;
+        self.force_postfix = false;
+        r
+    }
+
     /// Is `n` the last segment of any module declared in this build?  Used to
     /// distinguish module-qualified calls (`mod.func()`) from postfix method calls.
     fn is_module_name(&self, n: &str) -> bool {
@@ -1864,13 +1916,36 @@ impl<'a> TypeChecker<'a> {
         // 3. `module.fn(args)`             — module-qualified call (NEW)
         // 4. `receiver.fn(args)`           — postfix call: rewrite as `fn(receiver, args)`
         let mut module_qualifier: Option<String> = None;
+        let forced_qual = self.force_qualifier.take();
+        let forced_postfix = std::mem::take(&mut self.force_postfix);
         let (name, qualifier, postfix_receiver) = match callee {
             ast::Expr::Ident(n, _) => (n.clone(), None, None),
             ast::Expr::Field { base, name, .. } => {
-                if let ast::Expr::Ident(qual, _) = base.as_ref() {
-                    if self.sym.logic_by_name(qual).is_some() || self.sym.attr_by_name(qual).is_some() {
-                        (name.clone(), Some(qual.clone()), None)
-                    } else if let Some(id) = self.lookup(qual) {
+                // §10.5: `Attr::method` (and `recv.Attr::method`) skip the
+                // local-shadow check — the `::` form unambiguously names a
+                // qualified attr method.  In the postfix case, the receiver
+                // was already prepended to the args list by `check_attr_call`,
+                // and we set `forced_postfix` so auto-borrow can fire.
+                if let Some(q) = forced_qual.clone() {
+                    if forced_postfix {
+                        // Receiver lives at args[0]; treat as postfix without
+                        // a separate `postfix_receiver` slot — the args list
+                        // already carries it.
+                        (name.clone(), Some(q), None)
+                    } else {
+                        (name.clone(), Some(q), None)
+                    }
+                } else if let ast::Expr::Ident(qual, _) = base.as_ref() {
+                    // Locals shadow `logic`/`attr` names: when `qual` resolves
+                    // to a value in scope, `qual.method(args)` is a postfix
+                    // call on the instance, NOT an attr-qualified call.  This
+                    // matches Maka's normal scoping rule and removes the
+                    // ambiguity between `LogicName.fn(args)` (legacy qualified
+                    // call) and `instance.fn(args)` when `instance` happens to
+                    // share its name with a registered attr/logic.  Users who
+                    // need the unambiguous qualified form can write
+                    // `Attr::fn(args)` (§10.5).
+                    if let Some(id) = self.lookup(qual) {
                         // Local variable as receiver: postfix call.  When the
                         // receiver is a `Rust<T>` opaque, the bridge emits its
                         // methods as free functions named `T_<method>` — look
@@ -1887,6 +1962,8 @@ impl<'a> TypeChecker<'a> {
                         } else {
                             (name.clone(), None, Some((**base).clone()))
                         }
+                    } else if self.sym.logic_by_name(qual).is_some() || self.sym.attr_by_name(qual).is_some() {
+                        (name.clone(), Some(qual.clone()), None)
                     } else if self.is_module_name(qual) {
                         // Module-qualified call: filter candidates by module path.
                         module_qualifier = Some(qual.clone());
@@ -1908,10 +1985,14 @@ impl<'a> TypeChecker<'a> {
         };
 
         // If this is a postfix call, prepend the receiver to args and treat as a normal call by name.
+        // For `recv.Attr::method(args)` the receiver was already prepended by
+        // `check_attr_call` and `forced_postfix` flags this so auto-borrow can fire.
         let (args_owned, is_postfix): (Vec<ast::Expr>, bool) = if let Some(recv) = postfix_receiver {
             let mut v = vec![recv];
             v.extend(args.iter().cloned());
             (v, true)
+        } else if forced_postfix {
+            (args.iter().cloned().collect(), true)
         } else {
             (args.iter().cloned().collect(), false)
         };

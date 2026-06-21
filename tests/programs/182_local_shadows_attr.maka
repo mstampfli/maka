@@ -1,0 +1,15 @@
+// §10.5 ambiguity rule: locals shadow attr/logic names.  When a binding
+// `A` is in scope, `A.run(args)` is a postfix call on the instance, NOT
+// an attr-qualified call.  For the unambiguous qualifier, use `::`.
+
+attr Stored { int run(&_ self); }
+
+data Box { int v; }
+Box has Stored { int run(&Box self) { return self.v * 2; } }
+
+unit main() {
+    // Local named after the attr — shadows the qualifier.
+    Box Stored = { v = 21 };
+    log(Stored.run());          // 42 — postfix call on the local
+    log(Stored::run(&Stored));  // 42 — `::` form unambiguously qualified
+}

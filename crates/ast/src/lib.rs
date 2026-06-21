@@ -269,6 +269,12 @@ pub enum Expr {
     },
     /// `transfer expr` / `share expr` — D11 wall-crossing modifiers at call sites.
     WallMod { mode: WallMode, expr: Box<Expr>, span: Span },
+    /// `Attr::method(args)` / `receiver.Attr::method(args)` — attr-qualified call.
+    /// Distinct from `Expr::Call { Field { Ident(Attr), method }, args }` because
+    /// the `::` form must bypass local-shadowing (so `Stored::run(&Stored)` still
+    /// reaches attr `Stored` even when a local named `Stored` is in scope).
+    /// `receiver = Some(_)` for the postfix form `r.Attr::method()`.
+    AttrCall { attr: String, name: String, receiver: Option<Box<Expr>>, args: Vec<Expr>, span: Span },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,6 +306,7 @@ impl Expr {
             | Expr::Field { span: s, .. }
             | Expr::Index { span: s, .. }
             | Expr::Call { span: s, .. }
+            | Expr::AttrCall { span: s, .. }
             | Expr::Cast { span: s, .. }
             | Expr::CheckedCast { span: s, .. }
             | Expr::Struct { span: s, .. }

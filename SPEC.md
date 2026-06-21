@@ -953,18 +953,30 @@ auto-borrowed — `x.show()` matches `show(&Foo)` without the user spelling
 `(&x).show()`.
 
 **Disambiguation under multiple bounds.** When two attrs in scope both
-declare a method with the same name, qualify the call with the attr name:
+declare a method with the same name, qualify the call with the attr name
+via `::`:
 
 ```maka
-A::run(&f)        // prefix `::`, synonym for `A.run(&f)` (existing dot form)
-A.run(&f)
+A::run(&f)        // prefix qualified
 f.A::run()        // postfix qualified — auto-borrows the receiver
 ```
 
 The bare `run(&f)` form errors as `ambiguous call to \`run\`: N candidates`;
 the qualified forms filter candidates to a specific attr's impl before
-overload resolution.  No `T::` prefix — the receiver type is already at
-the call site.  See `181_attr_qualified_call.maka` for the worked example.
+overload resolution.
+
+**Dot-form vs. `::` form.** `Attr.method(args)` (dot) is still accepted
+for legacy reasons (it was the original `Logic.fn(args)` qualified-call
+spelling).  But the dot form is **shadowed by locals**: when a binding
+of the same name is in scope, `name.method(args)` is a postfix call on
+the local, not an attr-qualified call.  The `::` form is **never
+shadowed** — it always names the attr.  Prefer `::` for new code; the
+dot form remains for compatibility with the legacy `logic` block call
+style (§10.2).
+
+See `181_attr_qualified_call.maka` (the qualified forms) and
+`182_local_shadows_attr.maka` (shadowing rule) for worked examples.
+No `T::` prefix — the receiver type is already at the call site.
 
 **Visibility.** `has` impls are file-private by default. To use a `has` impl
 in another module:

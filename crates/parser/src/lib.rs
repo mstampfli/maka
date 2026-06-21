@@ -1545,19 +1545,16 @@ impl Parser {
                         }
                     }
                     // `receiver.Attr::method(args)` — attr-qualified postfix
-                    // call (§10.5).  Lower to `Call { callee: Attr.method,
-                    // args: receiver :: args }` so the existing qualified-call
-                    // path handles dispatch and the receiver flows through as
-                    // arg 0 (with postfix auto-borrow).
+                    // call (§10.5).  Stored as `AttrCall { receiver: Some(_) }`
+                    // so dispatch bypasses local shadowing on the qualifier.
                     if self.at(&TokKind::ColonColon) {
                         let save = self.pos;
                         self.bump();
                         if let TokKind::Ident(meth) = self.peek().clone() {
-                            let meth_span = self.peek_span();
                             self.bump();
                             if self.at(&TokKind::LParen) {
                                 self.bump();
-                                let mut call_args = vec![e];
+                                let mut call_args = Vec::new();
                                 if !self.at(&TokKind::RParen) {
                                     loop {
                                         call_args.push(self.parse_expr()?);
@@ -1565,12 +1562,13 @@ impl Parser {
                                     }
                                 }
                                 self.expect(&TokKind::RParen, "`)`")?;
-                                let callee = Expr::Field {
-                                    base: Box::new(Expr::Ident(name, span)),
+                                e = Expr::AttrCall {
+                                    attr: name,
                                     name: meth,
-                                    span: meth_span,
+                                    receiver: Some(Box::new(e)),
+                                    args: call_args,
+                                    span,
                                 };
-                                e = Expr::Call { callee: Box::new(callee), args: call_args, span };
                                 continue;
                             }
                         }
@@ -1691,21 +1689,31 @@ impl Parser {
                 if self.at(&TokKind::LBrace) && Self::is_struct_lit_context(self) {
                     return Ok(self.parse_struct_lit(Some(name), span)?);
                 }
-                // `Attr::method(...)` — attr-qualified prefix call, synonym for
-                // the existing `Attr.method(...)` shape (§10.5).  Lower to the
-                // same Field node so the qualified-call path in `check_call`
-                // picks it up unchanged.
+                // `Attr::method(args)` — attr-qualified prefix call (§10.5).
+                // Distinct from `Attr.method(args)`: `::` bypasses local
+                // shadowing so the qualifier always reaches the attr even when
+                // a local of the same name is in scope.
                 if self.at(&TokKind::ColonColon) {
                     let save = self.pos;
                     self.bump();
                     if let TokKind::Ident(seg) = self.peek().clone() {
-                        let seg_span = self.peek_span();
                         self.bump();
                         if self.at(&TokKind::LParen) {
-                            return Ok(Expr::Field {
-                                base: Box::new(Expr::Ident(name, span)),
+                            self.bump();
+                            let mut call_args = Vec::new();
+                            if !self.at(&TokKind::RParen) {
+                                loop {
+                                    call_args.push(self.parse_expr()?);
+                                    if !self.eat(&TokKind::Comma) { break; }
+                                }
+                            }
+                            self.expect(&TokKind::RParen, "`)`")?;
+                            return Ok(Expr::AttrCall {
+                                attr: name,
                                 name: seg,
-                                span: seg_span,
+                                receiver: None,
+                                args: call_args,
+                                span,
                             });
                         }
                     }
