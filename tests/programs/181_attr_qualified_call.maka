@@ -1,0 +1,26 @@
+// §10.5 attr-qualified method calls.  Two attrs that both declare a
+// method `run` — bare `run(&f)` is ambiguous; the qualified forms pin
+// the lookup to a specific attr:
+//
+//   Prefix : `A::run(&f)`  / `A.run(&f)`  (`.` and `::` are synonyms)
+//   Postfix: `f.A::run()`                  (auto-borrows the receiver)
+//
+// Postfix qualifies *and* takes advantage of auto-borrow — the receiver
+// is wrapped in `&` when the candidate's first param is `&_ self` /
+// `&mut _ self`.
+
+attr A { int run(&_ self); }
+attr B { int run(&_ self); }
+
+data Foo { int v; }
+Foo has A { int run(&Foo self) { return self.v + 1;   } }
+Foo has B { int run(&Foo self) { return self.v + 100; } }
+
+unit main() {
+    Foo f = { v = 10 };
+    log(A::run(&f));     // 11 — prefix `::`
+    log(B::run(&f));     // 110
+    log(A.run(&f));      // 11 — prefix `.`
+    log(f.A::run());     // 11 — postfix, auto-borrow
+    log(f.B::run());     // 110
+}

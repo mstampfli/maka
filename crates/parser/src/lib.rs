@@ -1544,6 +1544,39 @@ impl Parser {
                             continue;
                         }
                     }
+                    // `receiver.Attr::method(args)` — attr-qualified postfix
+                    // call (§10.5).  Lower to `Call { callee: Attr.method,
+                    // args: receiver :: args }` so the existing qualified-call
+                    // path handles dispatch and the receiver flows through as
+                    // arg 0 (with postfix auto-borrow).
+                    if self.at(&TokKind::ColonColon) {
+                        let save = self.pos;
+                        self.bump();
+                        if let TokKind::Ident(meth) = self.peek().clone() {
+                            let meth_span = self.peek_span();
+                            self.bump();
+                            if self.at(&TokKind::LParen) {
+                                self.bump();
+                                let mut call_args = vec![e];
+                                if !self.at(&TokKind::RParen) {
+                                    loop {
+                                        call_args.push(self.parse_expr()?);
+                                        if !self.eat(&TokKind::Comma) { break; }
+                                    }
+                                }
+                                self.expect(&TokKind::RParen, "`)`")?;
+                                let callee = Expr::Field {
+                                    base: Box::new(Expr::Ident(name, span)),
+                                    name: meth,
+                                    span: meth_span,
+                                };
+                                e = Expr::Call { callee: Box::new(callee), args: call_args, span };
+                                continue;
+                            }
+                        }
+                        // Not a qualified-method-call shape; rewind.
+                        self.pos = save;
+                    }
                     e = Expr::Field { base: Box::new(e), name, span };
                 }
                 TokKind::LBracket => {
@@ -1657,6 +1690,28 @@ impl Parser {
                 // If immediately followed by `{` then this is a struct literal with named type
                 if self.at(&TokKind::LBrace) && Self::is_struct_lit_context(self) {
                     return Ok(self.parse_struct_lit(Some(name), span)?);
+                }
+                // `Attr::method(...)` — attr-qualified prefix call, synonym for
+                // the existing `Attr.method(...)` shape (§10.5).  Lower to the
+                // same Field node so the qualified-call path in `check_call`
+                // picks it up unchanged.
+                if self.at(&TokKind::ColonColon) {
+                    let save = self.pos;
+                    self.bump();
+                    if let TokKind::Ident(seg) = self.peek().clone() {
+                        let seg_span = self.peek_span();
+                        self.bump();
+                        if self.at(&TokKind::LParen) {
+                            return Ok(Expr::Field {
+                                base: Box::new(Expr::Ident(name, span)),
+                                name: seg,
+                                span: seg_span,
+                            });
+                        }
+                    }
+                    // Not a qualified call shape — rewind so the type parser
+                    // (or whoever) gets a clean look.
+                    self.pos = save;
                 }
                 // Module-scope constexpr substitution: if this ident names a constexpr and it's
                 // used in a plain value position (not a call, indexing, field, generic, struct lit),

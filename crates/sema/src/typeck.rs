@@ -3096,9 +3096,25 @@ impl<'a> TypeChecker<'a> {
                 if sig.param_tys.len() != probed.len() { return false; }
             }
             for (i, ph) in probed.iter().take(sig.param_tys.len()).enumerate() {
-                if !param_compatible_with_sym(&sig.param_tys[i], &ph.ty, &sig.type_params, self.sym) {
-                    return false;
+                if param_compatible_with_sym(&sig.param_tys[i], &ph.ty, &sig.type_params, self.sym) {
+                    continue;
                 }
+                // Auto-borrow on the receiver slot: accepted in both call
+                // shapes that name an attr-style method on a value:
+                //   * postfix `f.method()` — receiver becomes arg 0
+                //   * attr-qualified `Attr.method(f)` / `Attr::method(f)` —
+                //     same dispatch, just a different surface
+                // The arg-build step below inserts the `AddrOfRef`.  Only the
+                // receiver slot benefits — non-receiver args still require an
+                // explicit `&`.
+                if (is_postfix || qualifier.is_some()) && i == 0 {
+                    if let HType::Ref { inner, .. } = &sig.param_tys[i] {
+                        if param_compatible_with_sym(inner, &ph.ty, &sig.type_params, self.sym) {
+                            continue;
+                        }
+                    }
+                }
+                return false;
             }
             true
         });
@@ -3353,6 +3369,24 @@ impl<'a> TypeChecker<'a> {
                 if let Some(promoted) = embed_promoted_first.take() {
                     hargs.push(promoted);
                     continue;
+                }
+                // Auto-borrow on receiver slot (matches the candidate filter
+                // above): postfix call OR attr-qualified call.
+                if is_postfix || qualifier.is_some() {
+                    if let Some(want) = final_param_tys.get(0) {
+                        if let HType::Ref { mutable, inner } = want {
+                            let h = self.check_expr(a, None);
+                            if type_eq(&h.ty, inner) {
+                                let sp = h.span;
+                                hargs.push(HExpr {
+                                    kind: HExprKind::AddrOfRef { mutable: *mutable, place: Box::new(h.clone()) },
+                                    ty: HType::Ref { mutable: *mutable, inner: Box::new(h.ty.clone()) },
+                                    span: sp,
+                                });
+                                continue;
+                            }
+                        }
+                    }
                 }
             }
             if i < final_param_tys.len() {

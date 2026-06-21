@@ -947,7 +947,24 @@ impl for the named attr - otherwise the call is rejected.
 **Method dispatch.** `x.show()` on a value of type `T` with bound `T: Show`
 resolves to the `has` impl chosen by the receiver's concrete type at
 instantiation. Postfix method calls also dispatch to attr-namespaced methods
-when no top-level function of that name exists.
+when no top-level function of that name exists.  When the candidate's
+first parameter is `&_ self` or `&mut _ self`, the receiver is
+auto-borrowed — `x.show()` matches `show(&Foo)` without the user spelling
+`(&x).show()`.
+
+**Disambiguation under multiple bounds.** When two attrs in scope both
+declare a method with the same name, qualify the call with the attr name:
+
+```maka
+A::run(&f)        // prefix `::`, synonym for `A.run(&f)` (existing dot form)
+A.run(&f)
+f.A::run()        // postfix qualified — auto-borrows the receiver
+```
+
+The bare `run(&f)` form errors as `ambiguous call to \`run\`: N candidates`;
+the qualified forms filter candidates to a specific attr's impl before
+overload resolution.  No `T::` prefix — the receiver type is already at
+the call site.  See `181_attr_qualified_call.maka` for the worked example.
 
 **Visibility.** `has` impls are file-private by default. To use a `has` impl
 in another module:
