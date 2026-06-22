@@ -354,9 +354,88 @@ cinclude     := cinclude "header.h";
 cblock       := cblock "raw C source";
 rblock       := rblock "raw Rust source";
 rdep         := rdep NAME = "version";
-constexpr    := [pub]? constexpr Type NAME = constant_int_expr;
+constexpr    := [pub]? constexpr Type NAME = constant_int_expr;   // named constant
+            |  [pub]? constexpr RetType NAME(params) { body }     // compile-time function
 global       := [pub]? [mut]? Type NAME = expr;
 ```
+
+### Compile-time functions (`constexpr fn`)
+
+A `constexpr` function is an ordinary function that may *also* be evaluated at
+compile time.  When a call to one appears in a constant position - an array
+length `[fib(6)]T`, an array-fill count `[e; fib(6)]`, or a `constexpr NAME =`
+initializer - the parser interprets the body and folds the call to an integer.
+The same function is emitted as a normal C function, so it remains callable at
+run time:
+
+```maka
+constexpr int fib(int n) {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+constexpr int TABLE = fib(10) + 1;     // folded to 56 at compile time
+
+unit main() {
+    [fib(6)]int row = [0; fib(6)];     // length folded to 8
+    log(fib(10));                      // 55 - same function, called at run time
+}
+```
+
+The compile-time interpreter is integer-valued.  It supports `int` / `bool` /
+`char` parameters and locals, `let`, assignment (including `+= -= *= /= %=`),
+`if`/`else`, `while` (with `break`/`continue`), `return`, recursion, and calls
+to other `constexpr` functions, over the full integer/comparison/logical/bitwise
+operator set.  Constructs it cannot evaluate (`alloc`, pointers, `match`, string
+ops, calls to non-`constexpr` functions) make the fold fail; the use site then
+reports that the value is not a compile-time constant.  Runaway recursion or
+loops are bounded by a step budget.  Generic `constexpr` functions are not folded
+(generics do not cross the compile-time boundary).
+
+### Compile-time reflection (`inline for` over `fields`)
+
+`inline for (f in fields(value)) { body }` is a compile-time loop: the body is
+unrolled once per field of `value`'s struct type, and never appears as a loop in
+the generated C.  Inside the body the loop variable exposes the current field:
+
+| accessor  | meaning                                              |
+|-----------|------------------------------------------------------|
+| `f.name`  | the field's name, as a `string` literal              |
+| `f.value` | the field itself (`value.<field>`), with its own type |
+| `f.index` | the field's zero-based position, as an `int`         |
+| `f.ty`    | the field's type rendered as a `string`              |
+
+`ty` is spelled `ty`, not `type` (`type` is a reserved keyword).
+
+Because each iteration is unrolled separately, `f.value` may have a *different
+type* per field, which a runtime loop could not express.  This is the mechanism
+for writing derive-style code once and having it apply to every `data`:
+
+```maka
+data Vec3 { int x; int y; int z; }
+
+int sum<T>(&T v) {
+    mut int total = 0;
+    inline for (f in fields(v)) { total = total + f.value; }   // unrolled x/y/z
+    return total;
+}
+
+unit dump<T>(&T v) {
+    inline for (f in fields(v)) { log(f.name); log(f.value); }
+}
+```
+
+The unroll happens during type checking and rides on monomorphization: in a
+generic function the fields are only known once a concrete type is bound, so the
+body is unrolled (and checked) per instantiation, not on the generic template.
+Rules and limits:
+
+- `fields(x)` takes a single argument that must be a plain variable (it is
+  re-read once per field, so side effects are not duplicated).
+- The argument's type must resolve to a `data` struct (peeling `&`/`own &`);
+  a concrete non-struct receiver is an error.
+- Only struct fields are reflected; enum-variant reflection is not yet provided.
+- Embedded (`embed`) fields are reached as ordinary fields of the outer struct.
 
 A module-scope `Type NAME = expr;` declares a global.  Without `mut` the
 global is read-only; with `mut` it is writable from any function in the

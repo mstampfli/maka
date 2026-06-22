@@ -1,0 +1,9 @@
+// A non-`constexpr` function cannot be evaluated at compile time, so using it as
+// an array length must be rejected (the length is not foldable).
+
+int sz() { return 4; }
+
+unit main() {
+    [sz()]int a = [0; sz()];
+    log(a.len);
+}

@@ -467,6 +467,9 @@ impl<'a> TypeChecker<'a> {
             ast::Stmt::ForEach { var_ty, var_name, src, body, span } => {
                 self.check_for_each(var_ty, var_name, src, body, *span)
             }
+            ast::Stmt::InlineFor { var_name, iter, body, span } => {
+                self.check_inline_for(var_name, iter, body, *span)
+            }
             ast::Stmt::Break(span) => HStmt::Break(*span),
             ast::Stmt::Continue(span) => HStmt::Continue(*span),
             ast::Stmt::Unsafe(b, span) => {
@@ -3981,6 +3984,63 @@ impl<'a> TypeChecker<'a> {
         HStmt::Block(h)
     }
 
+    fn empty_block_stmt(&self, sp: Span) -> HStmt {
+        HStmt::Block(HBlock { stmts: Vec::new(), heap_to_free: Vec::new(), ptr_nulls: Vec::new(), span: sp })
+    }
+
+    /// Tier-2 compile-time reflection: `inline for (f in fields(value)) { body }`.
+    /// The body is unrolled once per field of `value`'s struct type, with
+    /// `f.name`/`f.value`/`f.index`/`f.type` substituted per field, then checked
+    /// as an ordinary block.  Lowers entirely to `HStmt::Block`, so codegen never
+    /// sees an inline-for.
+    fn check_inline_for(&mut self, var_name: &str, iter: &ast::Expr, body: &ast::Block, sp: Span) -> HStmt {
+        // The iterable must be `fields(receiver)`.
+        let recv = match iter {
+            ast::Expr::Call { callee, args, .. } => match callee.as_ref() {
+                ast::Expr::Ident(fname, _) if fname == "fields" && args.len() == 1 => Some(&args[0]),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(recv) = recv else {
+            self.err("`inline for` expects `fields(value)` as its iterable", sp);
+            return self.empty_block_stmt(sp);
+        };
+        // The receiver is re-read once per field (as `recv.<field>`), so restrict
+        // it to a plain variable to avoid duplicating side effects.
+        if !matches!(recv, ast::Expr::Ident(_, _)) {
+            self.err("`fields(...)` argument must be a variable", recv.span());
+            return self.empty_block_stmt(sp);
+        }
+
+        let recv_h = self.check_expr(recv, None);
+        let ty = concretize_generic_patterns(&recv_h.ty.subst(&self.subst), self.sym);
+        let Some(sid) = struct_id_of(&ty) else {
+            // A still-generic receiver means we're checking the generic template
+            // before monomorphization; the real unroll happens once the function
+            // is instantiated with a concrete type.  A concrete non-struct is a
+            // genuine error.
+            if !has_tyvar(&ty) {
+                self.err("`inline for` over `fields(...)` requires a struct value", recv.span());
+            }
+            return self.empty_block_stmt(sp);
+        };
+
+        let fields = self.sym.struct_info(sid).fields.clone();
+        let mut stmts: Vec<ast::Stmt> = Vec::with_capacity(fields.len());
+        for (i, fld) in fields.iter().enumerate() {
+            let type_str = htype_display(self.sym, &fld.ty);
+            let mut b = body.clone();
+            let ctx = FieldCtx { var: var_name, recv, fname: &fld.name, index: i as i64, tystr: &type_str };
+            rewrite_field_refs(&mut b, &ctx);
+            // Each field's body gets its own block so `let` bindings don't clash
+            // across iterations.
+            stmts.push(ast::Stmt::Block(b));
+        }
+        let unrolled = ast::Block { stmts, span: sp };
+        self.check_block_stmt(unrolled)
+    }
+
     /// Is there a `next` method registered for the given struct whose return is
     /// `Option<elem_ty>`?  The iterator protocol is: receiver = `&mut Self`,
     /// return = `Option<T>` where T matches the loop variable's declared type.
@@ -4746,6 +4806,158 @@ fn struct_id_of(t: &HType) -> Option<StructId> {
         HType::Struct(id) => Some(*id),
         HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::Heap { inner } => struct_id_of(inner),
         _ => None,
+    }
+}
+
+/// Does this type still contain an unresolved generic parameter?  Used by the
+/// `inline for` unroll to tell a not-yet-monomorphized template (skip) apart
+/// from a concrete non-struct receiver (error).
+fn has_tyvar(t: &HType) -> bool {
+    match t {
+        HType::TyVar(_) | HType::GenericPattern { .. } => true,
+        HType::Ref { inner, .. }
+        | HType::Ptr { inner, .. }
+        | HType::RawPtr { inner, .. }
+        | HType::OwnPtr { inner, .. }
+        | HType::Heap { inner } => has_tyvar(inner),
+        HType::Array { elem, .. } | HType::Slice { elem, .. } | HType::Vec { elem } => has_tyvar(elem),
+        _ => false,
+    }
+}
+
+/// Human-readable rendering of a type, used for the `f.type` reflection string.
+fn htype_display(sym: &SymTab, t: &HType) -> String {
+    match t {
+        HType::Int => "int".to_string(),
+        HType::Float => "float".to_string(),
+        HType::Bool => "bool".to_string(),
+        HType::Char => "char".to_string(),
+        HType::Unit => "unit".to_string(),
+        HType::Str => "string".to_string(),
+        HType::SizedInt { signed, bits } => format!("{}{}", if *signed { "i" } else { "u" }, bits),
+        HType::SizedFloat { bits } => format!("f{}", bits),
+        HType::Struct(id) => sym.struct_info(*id).name.clone(),
+        HType::Enum(id) => sym.enum_info(*id).name.clone(),
+        HType::Ref { mutable, inner } => format!("&{}{}", if *mutable { "mut " } else { "" }, htype_display(sym, inner)),
+        HType::Ptr { inner, .. } => format!("*{}", htype_display(sym, inner)),
+        HType::OwnPtr { inner, .. } => format!("own *{}", htype_display(sym, inner)),
+        HType::RawPtr { inner, .. } => format!("raw *{}", htype_display(sym, inner)),
+        HType::Heap { inner } => format!("own &{}", htype_display(sym, inner)),
+        HType::Array { len, elem } => format!("[{}]{}", len, htype_display(sym, elem)),
+        HType::Slice { elem, .. } => format!("[]{}", htype_display(sym, elem)),
+        HType::Vec { elem } => format!("[*]{}", htype_display(sym, elem)),
+        HType::TyVar(n) => n.clone(),
+        _ => "_".to_string(),
+    }
+}
+
+/// One field's substitution context for an `inline for` unroll.
+struct FieldCtx<'a> {
+    var: &'a str,
+    recv: &'a ast::Expr,
+    fname: &'a str,
+    index: i64,
+    tystr: &'a str,
+}
+
+/// Replace `var.name` / `var.value` / `var.index` / `var.type` throughout an
+/// AST block with the current field's name literal, field access, index, and
+/// type string respectively.
+fn rewrite_field_refs(b: &mut ast::Block, c: &FieldCtx) {
+    for s in &mut b.stmts {
+        rw_stmt(s, c);
+    }
+}
+
+fn rw_stmt(s: &mut ast::Stmt, c: &FieldCtx) {
+    use ast::Stmt::*;
+    match s {
+        Let { init, .. } => rw_expr(init, c),
+        Assign { place, value, .. } => { rw_expr(place, c); rw_expr(value, c); }
+        ExprStmt(e, _) => rw_expr(e, c),
+        Return(Some(e), _) => rw_expr(e, c),
+        Return(None, _) => {}
+        If { cond, then_block, else_block, .. } => {
+            rw_expr(cond, c);
+            rewrite_field_refs(then_block, c);
+            if let Some(eb) = else_block { rewrite_field_refs(eb, c); }
+        }
+        While { cond, body, .. } => { rw_expr(cond, c); rewrite_field_refs(body, c); }
+        Block(b) => rewrite_field_refs(b, c),
+        Unsafe(b, _) => rewrite_field_refs(b, c),
+        Match { scrutinee, arms, .. } => {
+            rw_expr(scrutinee, c);
+            for a in arms {
+                if let Some(g) = &mut a.guard { rw_expr(g, c); }
+                match &mut a.body {
+                    ast::ArmBody::Expr(e) => rw_expr(e, c),
+                    ast::ArmBody::Block(b) => rewrite_field_refs(b, c),
+                }
+            }
+        }
+        Yield(e, _) => rw_expr(e, c),
+        Propagate(Some(e), _) => rw_expr(e, c),
+        Propagate(None, _) => {}
+        ForRange { start, end, body, .. } => { rw_expr(start, c); rw_expr(end, c); rewrite_field_refs(body, c); }
+        ForEach { src, body, .. } => { rw_expr(src, c); rewrite_field_refs(body, c); }
+        InlineFor { iter, body, .. } => { rw_expr(iter, c); rewrite_field_refs(body, c); }
+        Break(_) | Continue(_) => {}
+    }
+}
+
+fn rw_expr(e: &mut ast::Expr, c: &FieldCtx) {
+    use ast::Expr::*;
+    // The magic `var.{name,value,index,type}` field accesses.
+    if let Field { base, name, span } = e {
+        if let Ident(b, _) = base.as_ref() {
+            if b == c.var {
+                let sp = *span;
+                match name.as_str() {
+                    "name" => { *e = ast::Expr::Lit(ast::Lit::Str(c.fname.to_string()), sp); return; }
+                    "index" => { *e = ast::Expr::Lit(ast::Lit::Int(c.index), sp); return; }
+                    // `ty` not `type` - `type` is a reserved keyword and won't parse after `.`.
+                    "ty" => { *e = ast::Expr::Lit(ast::Lit::Str(c.tystr.to_string()), sp); return; }
+                    "value" => { *e = ast::Expr::Field { base: Box::new(c.recv.clone()), name: c.fname.to_string(), span: sp }; return; }
+                    _ => {}
+                }
+            }
+        }
+    }
+    match e {
+        Lit(..) | Ident(..) => {}
+        Bin { lhs, rhs, .. } => { rw_expr(lhs, c); rw_expr(rhs, c); }
+        Un { expr, .. } => rw_expr(expr, c),
+        Unwrap { expr, .. } => rw_expr(expr, c),
+        Ref { expr, .. } => rw_expr(expr, c),
+        Field { base, .. } => rw_expr(base, c),
+        Index { base, idx, .. } => { rw_expr(base, c); rw_expr(idx, c); }
+        Call { callee, args, .. } => { rw_expr(callee, c); for a in args { rw_expr(a, c); } }
+        Cast { expr, .. } => rw_expr(expr, c),
+        CheckedCast { expr, .. } => rw_expr(expr, c),
+        Struct { fields, .. } => { for (_, fe) in fields { rw_expr(fe, c); } }
+        ArrayLit { elems, .. } => { for el in elems { rw_expr(el, c); } }
+        HeapAlloc { value, .. } => rw_expr(value, c),
+        Free { value, .. } => rw_expr(value, c),
+        VariantCtor { fields, .. } => { for (_, fe) in fields { rw_expr(fe, c); } }
+        Match { scrutinee, arms, .. } => {
+            rw_expr(scrutinee, c);
+            for a in arms {
+                if let Some(g) = &mut a.guard { rw_expr(g, c); }
+                match &mut a.body {
+                    ast::ArmBody::Expr(e2) => rw_expr(e2, c),
+                    ast::ArmBody::Block(b) => rewrite_field_refs(b, c),
+                }
+            }
+        }
+        Lambda { body, .. } => match body {
+            ast::LambdaBody::Expr(e2) => rw_expr(e2, c),
+            ast::LambdaBody::Block(b) => rewrite_field_refs(b, c),
+        },
+        WallMod { expr, .. } => rw_expr(expr, c),
+        AttrCall { receiver, args, .. } => {
+            if let Some(r) = receiver { rw_expr(r, c); }
+            for a in args { rw_expr(a, c); }
+        }
     }
 }
 
