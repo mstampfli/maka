@@ -1,0 +1,45 @@
+// Tier 1: `constexpr` functions evaluated at compile time, and also callable at
+// run time (they flow through as ordinary functions).
+
+constexpr int fib(int n) {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+constexpr int fact(int n) {
+    mut int acc = 1;
+    mut int i = 2;
+    while (i <= n) {
+        acc = acc * i;
+        i = i + 1;
+    }
+    return acc;
+}
+
+constexpr int gcd(int a0, int b0) {
+    mut int a = a0;
+    mut int b = b0;
+    while (b != 0) {
+        int t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+// A constexpr function call inside a constexpr-constant initializer.
+constexpr int TABLE_SIZE = fib(10) + 1;
+
+unit main() {
+    // Compile-time-folded array length produced by a constexpr function.
+    [fib(6)]int arr = [0; fib(6)];
+    log(arr.len);            // 8
+
+    // Named constant computed by a constexpr function.
+    log(TABLE_SIZE);         // 56
+
+    // The same functions used at run time.
+    log(fact(5));            // 120
+    log(gcd(48, 36));        // 12
+    log(fib(10));            // 55
+}

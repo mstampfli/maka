@@ -16,15 +16,35 @@ impl fmt::Display for ParseError {
     }
 }
 
+/// Control-flow result of interpreting a statement during compile-time function
+/// evaluation (CTFE).  Integer-valued; `Return` carries the produced value.
+enum CtFlow {
+    Normal,
+    Return(i64),
+    Break,
+    Continue,
+}
+
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
     constexprs: std::collections::HashMap<String, i64>,
+    /// `constexpr` functions captured by the pre-scan, keyed by name.  Bodies are
+    /// evaluated by the compile-time interpreter when a call appears in a
+    /// constant context (array sizes, `constexpr` initializers, fill counts).
+    /// The same functions are also parsed as normal `Item::Func`s so they remain
+    /// callable at run time.
+    constexpr_fns: std::collections::HashMap<String, FuncDecl>,
 }
 
 impl Parser {
     pub fn new(toks: Vec<Token>) -> Self {
-        Self { toks, pos: 0, constexprs: std::collections::HashMap::new() }
+        Self {
+            toks,
+            pos: 0,
+            constexprs: std::collections::HashMap::new(),
+            constexpr_fns: std::collections::HashMap::new(),
+        }
     }
 
     pub fn parse_module(mut self) -> Result<Module, ParseError> {
@@ -107,8 +127,10 @@ impl Parser {
             self.expect(&TokKind::Semicolon, "`;`")?;
             has_imports.push(HasImport { module_path, type_name, attr_name, span: kw.span });
         }
-        // Pre-pass: scan tokens from current position for top-level `constexpr T NAME = INT;` decls.
-        // Bracket-depth-aware so we only pick up module-scope ones, not anything nested.
+        // Pre-pass: capture `constexpr` function definitions first (so constant
+        // folds below can call them), then scan `constexpr T NAME = expr;` decls.
+        // Both are bracket-depth-aware so only module-scope ones are picked up.
+        self.prescan_constexpr_fns();
         self.prescan_constexprs();
         let mut items = Vec::new();
         while !self.at(&TokKind::Eof) {
@@ -119,7 +141,15 @@ impl Parser {
             // we additionally emit an `Item::Constexpr` so the resolver can
             // register it as a cross-module-importable symbol.
             if self.at(&TokKind::Constexpr) {
-                if let Some(decl) = self.parse_constexpr_decl(is_pub)? {
+                // `constexpr RetType NAME(...) { ... }` is a compile-time
+                // function; it also flows through as a normal `Item::Func` so it
+                // stays callable at run time.  `constexpr T NAME = expr;` is the
+                // older named-constant form.
+                if self.constexpr_kw_starts_fn() {
+                    let mut f = self.parse_func()?;
+                    f.is_pub = is_pub;
+                    items.push(Item::Func(f));
+                } else if let Some(decl) = self.parse_constexpr_decl(is_pub)? {
                     items.push(Item::Constexpr(decl));
                 }
                 continue;
@@ -160,6 +190,13 @@ impl Parser {
                 TokKind::LBrace | TokKind::LParen | TokKind::LBracket => { depth += 1; self.pos += 1; }
                 TokKind::RBrace | TokKind::RParen | TokKind::RBracket => { depth -= 1; self.pos += 1; }
                 TokKind::Constexpr if depth == 0 => {
+                    // A `constexpr` function (captured separately by
+                    // prescan_constexpr_fns) must be consumed wholesale here so we
+                    // don't wander into its body and corrupt the depth counter.
+                    if self.constexpr_kw_starts_fn() {
+                        if self.parse_func().is_err() { self.pos += 1; }
+                        continue;
+                    }
                     self.pos += 1;
                     // Skip type tokens until we see an Ident followed by `=`.
                     while self.pos < self.toks.len() {
@@ -238,6 +275,7 @@ impl Parser {
             match self.peek() {
                 TokKind::Star => { self.bump(); let r = self.fold_atom()?; left = left.wrapping_mul(r); }
                 TokKind::Slash => { self.bump(); let r = self.fold_atom()?; if r == 0 { return None; } left /= r; }
+                TokKind::Percent => { self.bump(); let r = self.fold_atom()?; if r == 0 { return None; } left %= r; }
                 _ => return Some(left),
             }
         }
@@ -247,7 +285,228 @@ impl Parser {
             TokKind::Int(n) => { self.bump(); Some(n) }
             TokKind::Minus => { self.bump(); let n = self.fold_atom()?; Some(-n) }
             TokKind::LParen => { self.bump(); let v = self.fold_addsub()?; if !self.eat(&TokKind::RParen) { return None; } Some(v) }
-            TokKind::Ident(name) => { self.bump(); self.constexprs.get(&name).copied() }
+            TokKind::Ident(name) => {
+                self.bump();
+                // `NAME(args...)` — a call into a `constexpr` function, evaluated
+                // now by the compile-time interpreter.  Plain `NAME` is a folded
+                // named constant lookup.
+                if self.at(&TokKind::LParen) {
+                    self.bump(); // `(`
+                    let mut args = Vec::new();
+                    if !self.at(&TokKind::RParen) {
+                        loop {
+                            let a = self.fold_addsub()?;
+                            args.push(a);
+                            if !self.eat(&TokKind::Comma) { break; }
+                        }
+                    }
+                    if !self.eat(&TokKind::RParen) { return None; }
+                    let mut budget: u64 = 5_000_000;
+                    self.eval_const_fn(&name, &args, &mut budget)
+                } else {
+                    self.constexprs.get(&name).copied()
+                }
+            }
+            _ => None,
+        }
+    }
+
+    // ---- compile-time function evaluation (CTFE) ----
+
+    // Pre-scan: capture every module-scope `constexpr RetType NAME(...) { ... }`
+    // into `self.constexpr_fns` so the constant folder can call them.  Scans
+    // forward from the current position and restores it.  Bracket-depth-aware so
+    // only top-level functions are captured.
+    fn prescan_constexpr_fns(&mut self) {
+        let save = self.pos;
+        let mut depth = 0i32;
+        while self.pos < self.toks.len() && !matches!(self.toks[self.pos].kind, TokKind::Eof) {
+            match &self.toks[self.pos].kind {
+                TokKind::LBrace | TokKind::LParen | TokKind::LBracket => { depth += 1; self.pos += 1; }
+                TokKind::RBrace | TokKind::RParen | TokKind::RBracket => { depth -= 1; self.pos += 1; }
+                TokKind::Constexpr if depth == 0 && self.constexpr_kw_starts_fn() => {
+                    // `self.pos` is at `constexpr`; parse_func consumes the whole
+                    // function (modifier, signature, and balanced `{ ... }` body),
+                    // leaving depth balanced.
+                    if let Ok(f) = self.parse_func() {
+                        self.constexpr_fns.insert(f.name.clone(), f);
+                    } else {
+                        self.pos += 1;
+                    }
+                }
+                _ => self.pos += 1,
+            }
+        }
+        self.pos = save;
+    }
+
+    // Lookahead from a `constexpr` token: is this a function (`... NAME(`) rather
+    // than a named constant (`... NAME =`)?  Only non-generic forms are treated
+    // as constexpr functions; generics do not cross the compile-time boundary.
+    fn constexpr_kw_starts_fn(&self) -> bool {
+        let mut i = self.pos + 1; // skip `constexpr`
+        while i < self.toks.len() {
+            match &self.toks[i].kind {
+                TokKind::Eq | TokKind::Semicolon | TokKind::Eof | TokKind::LBrace => return false,
+                TokKind::Ident(_) => {
+                    if matches!(self.toks.get(i + 1).map(|t| &t.kind), Some(TokKind::LParen)) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    // Evaluate a `constexpr` function call to an integer.  Returns None when the
+    // function is unknown, the arity mismatches, the body uses a construct the
+    // interpreter does not support, or the step budget is exhausted (guards
+    // against runaway recursion / loops at compile time).
+    fn eval_const_fn(&self, name: &str, args: &[i64], budget: &mut u64) -> Option<i64> {
+        let f = self.constexpr_fns.get(name)?;
+        if f.params.len() != args.len() { return None; }
+        let mut env: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for (p, a) in f.params.iter().zip(args) { env.insert(p.name.clone(), *a); }
+        match self.ct_block(&f.body, &mut env, budget)? {
+            CtFlow::Return(v) => Some(v),
+            CtFlow::Normal => Some(0), // fell off the end (unit-ish) -> 0
+            _ => None,                 // stray break/continue cannot escape a function
+        }
+    }
+
+    fn ct_block(
+        &self,
+        b: &Block,
+        env: &mut std::collections::HashMap<String, i64>,
+        budget: &mut u64,
+    ) -> Option<CtFlow> {
+        for s in &b.stmts {
+            match self.ct_stmt(s, env, budget)? {
+                CtFlow::Normal => {}
+                other => return Some(other),
+            }
+        }
+        Some(CtFlow::Normal)
+    }
+
+    fn ct_stmt(
+        &self,
+        s: &Stmt,
+        env: &mut std::collections::HashMap<String, i64>,
+        budget: &mut u64,
+    ) -> Option<CtFlow> {
+        if *budget == 0 { return None; }
+        *budget -= 1;
+        match s {
+            Stmt::Let { name, init, .. } => {
+                let v = self.ct_expr(init, env, budget)?;
+                env.insert(name.clone(), v);
+                Some(CtFlow::Normal)
+            }
+            Stmt::Assign { op, place, value, .. } => {
+                let name = match place { Expr::Ident(n, _) => n.clone(), _ => return None };
+                let rhs = self.ct_expr(value, env, budget)?;
+                let cur = *env.get(&name).unwrap_or(&0);
+                let nv = match op {
+                    AssignOp::Assign => rhs,
+                    AssignOp::AddAssign => cur.wrapping_add(rhs),
+                    AssignOp::SubAssign => cur.wrapping_sub(rhs),
+                    AssignOp::MulAssign => cur.wrapping_mul(rhs),
+                    AssignOp::DivAssign => { if rhs == 0 { return None; } cur / rhs }
+                    AssignOp::ModAssign => { if rhs == 0 { return None; } cur % rhs }
+                };
+                env.insert(name, nv);
+                Some(CtFlow::Normal)
+            }
+            Stmt::ExprStmt(e, _) => { self.ct_expr(e, env, budget)?; Some(CtFlow::Normal) }
+            Stmt::Return(e, _) => {
+                let v = match e { Some(e) => self.ct_expr(e, env, budget)?, None => 0 };
+                Some(CtFlow::Return(v))
+            }
+            Stmt::If { cond, then_block, else_block, .. } => {
+                if self.ct_expr(cond, env, budget)? != 0 {
+                    self.ct_block(then_block, env, budget)
+                } else if let Some(eb) = else_block {
+                    self.ct_block(eb, env, budget)
+                } else {
+                    Some(CtFlow::Normal)
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                while self.ct_expr(cond, env, budget)? != 0 {
+                    if *budget == 0 { return None; }
+                    *budget -= 1;
+                    match self.ct_block(body, env, budget)? {
+                        CtFlow::Normal | CtFlow::Continue => {}
+                        CtFlow::Break => break,
+                        CtFlow::Return(v) => return Some(CtFlow::Return(v)),
+                    }
+                }
+                Some(CtFlow::Normal)
+            }
+            Stmt::Block(b) => self.ct_block(b, env, budget),
+            Stmt::Break(_) => Some(CtFlow::Break),
+            Stmt::Continue(_) => Some(CtFlow::Continue),
+            // match / yield / propagate / for / unsafe are not evaluable here.
+            _ => None,
+        }
+    }
+
+    fn ct_expr(
+        &self,
+        e: &Expr,
+        env: &mut std::collections::HashMap<String, i64>,
+        budget: &mut u64,
+    ) -> Option<i64> {
+        if *budget == 0 { return None; }
+        *budget -= 1;
+        match e {
+            Expr::Lit(Lit::Int(n), _) => Some(*n),
+            Expr::Lit(Lit::Bool(b), _) => Some(if *b { 1 } else { 0 }),
+            Expr::Lit(Lit::Char(c), _) => Some(*c as i64),
+            Expr::Ident(n, _) => env.get(n).copied().or_else(|| self.constexprs.get(n).copied()),
+            Expr::Un { op, expr, .. } => {
+                let v = self.ct_expr(expr, env, budget)?;
+                Some(match op { UnOp::Neg => v.wrapping_neg(), UnOp::Not => if v == 0 { 1 } else { 0 } })
+            }
+            Expr::Bin { op, lhs, rhs, .. } => {
+                // Short-circuit logical operators.
+                if matches!(op, BinOp::And) {
+                    return Some(if self.ct_expr(lhs, env, budget)? != 0 && self.ct_expr(rhs, env, budget)? != 0 { 1 } else { 0 });
+                }
+                if matches!(op, BinOp::Or) {
+                    return Some(if self.ct_expr(lhs, env, budget)? != 0 || self.ct_expr(rhs, env, budget)? != 0 { 1 } else { 0 });
+                }
+                let l = self.ct_expr(lhs, env, budget)?;
+                let r = self.ct_expr(rhs, env, budget)?;
+                Some(match op {
+                    BinOp::Add => l.wrapping_add(r),
+                    BinOp::Sub => l.wrapping_sub(r),
+                    BinOp::Mul => l.wrapping_mul(r),
+                    BinOp::Div => { if r == 0 { return None; } l / r }
+                    BinOp::Mod => { if r == 0 { return None; } l % r }
+                    BinOp::Eq => (l == r) as i64,
+                    BinOp::Ne => (l != r) as i64,
+                    BinOp::Lt => (l < r) as i64,
+                    BinOp::Le => (l <= r) as i64,
+                    BinOp::Gt => (l > r) as i64,
+                    BinOp::Ge => (l >= r) as i64,
+                    BinOp::BitAnd => l & r,
+                    BinOp::BitOr => l | r,
+                    BinOp::BitXor => l ^ r,
+                    BinOp::Shl => l.wrapping_shl(r as u32),
+                    BinOp::Shr => l.wrapping_shr(r as u32),
+                    BinOp::And | BinOp::Or => unreachable!(),
+                })
+            }
+            Expr::Call { callee, args, .. } => {
+                let name = match callee.as_ref() { Expr::Ident(n, _) => n.clone(), _ => return None };
+                let mut vals = Vec::with_capacity(args.len());
+                for a in args { vals.push(self.ct_expr(a, env, budget)?); }
+                self.eval_const_fn(&name, &vals, budget)
+            }
             _ => None,
         }
     }
@@ -769,6 +1028,10 @@ impl Parser {
         loop {
             if self.eat(&TokKind::Inline) { is_inline = true; }
             else if self.eat(&TokKind::Gate) { is_gate = true; }
+            // `constexpr` on a function means "also evaluable at compile time".
+            // The pre-scan captured the body for the interpreter; here we just
+            // consume the keyword so it parses as an ordinary function.
+            else if self.eat(&TokKind::Constexpr) { }
             else { break; }
         }
         let ret = self.parse_type()?;

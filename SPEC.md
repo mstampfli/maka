@@ -354,9 +354,43 @@ cinclude     := cinclude "header.h";
 cblock       := cblock "raw C source";
 rblock       := rblock "raw Rust source";
 rdep         := rdep NAME = "version";
-constexpr    := [pub]? constexpr Type NAME = constant_int_expr;
+constexpr    := [pub]? constexpr Type NAME = constant_int_expr;   // named constant
+            |  [pub]? constexpr RetType NAME(params) { body }     // compile-time function
 global       := [pub]? [mut]? Type NAME = expr;
 ```
+
+### Compile-time functions (`constexpr fn`)
+
+A `constexpr` function is an ordinary function that may *also* be evaluated at
+compile time.  When a call to one appears in a constant position - an array
+length `[fib(6)]T`, an array-fill count `[e; fib(6)]`, or a `constexpr NAME =`
+initializer - the parser interprets the body and folds the call to an integer.
+The same function is emitted as a normal C function, so it remains callable at
+run time:
+
+```maka
+constexpr int fib(int n) {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+constexpr int TABLE = fib(10) + 1;     // folded to 56 at compile time
+
+unit main() {
+    [fib(6)]int row = [0; fib(6)];     // length folded to 8
+    log(fib(10));                      // 55 - same function, called at run time
+}
+```
+
+The compile-time interpreter is integer-valued.  It supports `int` / `bool` /
+`char` parameters and locals, `let`, assignment (including `+= -= *= /= %=`),
+`if`/`else`, `while` (with `break`/`continue`), `return`, recursion, and calls
+to other `constexpr` functions, over the full integer/comparison/logical/bitwise
+operator set.  Constructs it cannot evaluate (`alloc`, pointers, `match`, string
+ops, calls to non-`constexpr` functions) make the fold fail; the use site then
+reports that the value is not a compile-time constant.  Runaway recursion or
+loops are bounded by a step budget.  Generic `constexpr` functions are not folded
+(generics do not cross the compile-time boundary).
 
 A module-scope `Type NAME = expr;` declares a global.  Without `mut` the
 global is read-only; with `mut` it is writable from any function in the
