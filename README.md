@@ -20,6 +20,10 @@ Maka is opinionated about a small set of things:
 - **Inline functions splice into the caller's frame.** `inline fn f() {
   propagate X; }` returns `X` from *the outer function*, not from `f`. Useful
   for shaped early-exit. Recursion among inline functions is forbidden.
+- **Compile-time evaluation.** A `constexpr` function folds to a value in
+  constant positions (array sizes, `constexpr` initializers) and is still a
+  normal function at run time. `inline for (f in fields(v))` unrolls once per
+  struct field, so derive-style code (print, sum, serialize) is written once.
 
 ## Hello, Maka
 
@@ -92,6 +96,33 @@ unit main() {
 }
 ```
 
+Compile-time evaluation and reflection:
+
+```maka
+// Folded at compile time; also a normal function at run time.
+constexpr int fib(int n) {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+data Vec3 { int x; int y; int z; }
+
+// `inline for` unrolls once per field; `f.value` has each field's own type,
+// so one body covers every struct.
+int sum<T>(&T v) {
+    mut int total = 0;
+    inline for (f in fields(v)) { total = total + f.value; }
+    return total;
+}
+
+unit main() {
+    [fib(6)]int row = [0; fib(6)];     // length folded to 8 at compile time
+    log(row.len);                      // 8
+    Vec3 p = { x = 7, y = 8, z = 9 };
+    log(sum(&p));                      // 24
+}
+```
+
 ## Project layout
 
 ```
@@ -155,9 +186,10 @@ bash tests/run_neg.sh        # negative suite, every neg_*.maka must reject
 
 ## Status
 
-Early but real. Positive suite passes 95 programs; negative suite passes 40.
+Early but real. Positive suite passes 183 programs; negative suite passes 57.
 The language is implemented in Rust as a workspace; the generated C builds
-with any reasonably recent gcc/clang.
+cleanly with modern gcc/clang (including gcc 14, which treats implicit
+declarations and void value-returns as hard errors).
 
 What's intentionally *not* in v1, but is on the road:
 
