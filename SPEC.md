@@ -392,6 +392,51 @@ reports that the value is not a compile-time constant.  Runaway recursion or
 loops are bounded by a step budget.  Generic `constexpr` functions are not folded
 (generics do not cross the compile-time boundary).
 
+### Compile-time reflection (`inline for` over `fields`)
+
+`inline for (f in fields(value)) { body }` is a compile-time loop: the body is
+unrolled once per field of `value`'s struct type, and never appears as a loop in
+the generated C.  Inside the body the loop variable exposes the current field:
+
+| accessor  | meaning                                              |
+|-----------|------------------------------------------------------|
+| `f.name`  | the field's name, as a `string` literal              |
+| `f.value` | the field itself (`value.<field>`), with its own type |
+| `f.index` | the field's zero-based position, as an `int`         |
+| `f.ty`    | the field's type rendered as a `string`              |
+
+`ty` is spelled `ty`, not `type` (`type` is a reserved keyword).
+
+Because each iteration is unrolled separately, `f.value` may have a *different
+type* per field, which a runtime loop could not express.  This is the mechanism
+for writing derive-style code once and having it apply to every `data`:
+
+```maka
+data Vec3 { int x; int y; int z; }
+
+int sum<T>(&T v) {
+    mut int total = 0;
+    inline for (f in fields(v)) { total = total + f.value; }   // unrolled x/y/z
+    return total;
+}
+
+unit dump<T>(&T v) {
+    inline for (f in fields(v)) { log(f.name); log(f.value); }
+}
+```
+
+The unroll happens during type checking and rides on monomorphization: in a
+generic function the fields are only known once a concrete type is bound, so the
+body is unrolled (and checked) per instantiation, not on the generic template.
+Rules and limits:
+
+- `fields(x)` takes a single argument that must be a plain variable (it is
+  re-read once per field, so side effects are not duplicated).
+- The argument's type must resolve to a `data` struct (peeling `&`/`own &`);
+  a concrete non-struct receiver is an error.
+- Only struct fields are reflected; enum-variant reflection is not yet provided.
+- Embedded (`embed`) fields are reached as ordinary fields of the outer struct.
+
 A module-scope `Type NAME = expr;` declares a global.  Without `mut` the
 global is read-only; with `mut` it is writable from any function in the
 module.  Globals are emitted as `static <ctype> __maka_global__NAME = init;`

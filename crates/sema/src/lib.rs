@@ -116,6 +116,10 @@ fn lift_stmt(s: &mut maka_ast::Stmt, counter: &mut u32, out: &mut Vec<maka_ast::
             lift_expr(src, counter, out, in_unsafe);
             lift_block(body, counter, out, in_unsafe);
         }
+        InlineFor { iter, body, .. } => {
+            lift_expr(iter, counter, out, in_unsafe);
+            lift_block(body, counter, out, in_unsafe);
+        }
         ForRange { start, end, body, .. } => {
             lift_expr(start, counter, out, in_unsafe);
             lift_expr(end, counter, out, in_unsafe);

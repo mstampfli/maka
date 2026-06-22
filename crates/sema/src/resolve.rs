@@ -1350,6 +1350,10 @@ fn scan_stmt(sym: &SymTab, s: &ast::Stmt, tp: &[String], out: &mut Vec<(String, 
             scan_struct_insts_expr(sym, src, tp, out, errors);
             scan_block(sym, body, tp, out, errors);
         }
+        ast::Stmt::InlineFor { iter, body, .. } => {
+            scan_struct_insts_expr(sym, iter, tp, out, errors);
+            scan_block(sym, body, tp, out, errors);
+        }
         ast::Stmt::Break(_) | ast::Stmt::Continue(_) => {}
         ast::Stmt::Match { scrutinee, arms, .. } => {
             scan_struct_insts_expr(sym, scrutinee, tp, out, errors);
@@ -1476,6 +1480,10 @@ fn substitute_stmt_placeholders_ty(s: &mut ast::Stmt, recv: &ast::Type) {
             substitute_expr_placeholders_ty(src, recv);
             substitute_block_placeholders_ty(body, recv);
         }
+        InlineFor { iter, body, .. } => {
+            substitute_expr_placeholders_ty(iter, recv);
+            substitute_block_placeholders_ty(body, recv);
+        }
         Block(b) | Unsafe(b, _) => substitute_block_placeholders_ty(b, recv),
         Match { scrutinee, arms, .. } => {
             substitute_expr_placeholders_ty(scrutinee, recv);
@@ -1585,6 +1593,10 @@ fn substitute_stmt_placeholders(s: &mut ast::Stmt, impl_ty: &str) {
         ForEach { var_ty, src, body, .. } => {
             *var_ty = var_ty.subst_placeholder(impl_ty);
             substitute_expr_placeholders(src, impl_ty);
+            substitute_block_placeholders(body, impl_ty);
+        }
+        InlineFor { iter, body, .. } => {
+            substitute_expr_placeholders(iter, impl_ty);
             substitute_block_placeholders(body, impl_ty);
         }
         Block(b) => substitute_block_placeholders(b, impl_ty),

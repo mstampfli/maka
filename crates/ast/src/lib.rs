@@ -382,6 +382,17 @@ pub enum Stmt {
         body: Block,
         span: Span,
     },
+    /// `inline for (name in fields(value)) { body }` — a compile-time loop,
+    /// unrolled once per field of `value`'s struct type.  Inside the body
+    /// `name.name`, `name.value`, `name.index`, and `name.ty` refer to the
+    /// current field (`ty` rather than `type`, which is a reserved keyword).
+    /// Lowered by sema; never reaches codegen.
+    InlineFor {
+        var_name: String,
+        iter: Expr,
+        body: Block,
+        span: Span,
+    },
     Break(Span),
     Continue(Span),
 }

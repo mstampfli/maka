@@ -1,0 +1,9 @@
+// `inline for` over `fields(...)` requires a struct value; a concrete non-struct
+// receiver must be rejected.
+
+unit main() {
+    int x = 5;
+    inline for (f in fields(x)) {
+        log(f.name);
+    }
+}

@@ -1253,6 +1253,8 @@ impl Parser {
             TokKind::If => self.parse_if(),
             TokKind::While => self.parse_while(),
             TokKind::For => self.parse_for(),
+            // `inline for (name in fields(value)) { ... }` — compile-time unroll.
+            TokKind::Inline => self.parse_inline_for(),
             TokKind::Break => { self.bump(); self.expect(&TokKind::Semicolon, "`;`")?; Ok(Stmt::Break(start)) }
             TokKind::Continue => { self.bump(); self.expect(&TokKind::Semicolon, "`;`")?; Ok(Stmt::Continue(start)) }
             TokKind::Match => {
@@ -1489,6 +1491,23 @@ impl Parser {
             }
         } else { None };
         Ok(Stmt::If { cond, then_block, else_block, span: start })
+    }
+
+    // `inline for (name in fields(value)) { body }` — the only statement-level
+    // use of `inline`.  Unlike a normal `for`, the loop variable has no type
+    // (it varies per field); the type is recovered during the compile-time
+    // unroll in sema.
+    fn parse_inline_for(&mut self) -> Result<Stmt, ParseError> {
+        let start = self.peek_span();
+        self.expect(&TokKind::Inline, "`inline`")?;
+        self.expect(&TokKind::For, "`for` (after `inline`)")?;
+        self.expect(&TokKind::LParen, "`(`")?;
+        let (var_name, _) = self.expect_ident("loop variable")?;
+        self.expect(&TokKind::In, "`in`")?;
+        let iter = self.parse_expr()?;
+        self.expect(&TokKind::RParen, "`)`")?;
+        let body = self.parse_block()?;
+        Ok(Stmt::InlineFor { var_name, iter, body, span: start })
     }
 
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {

@@ -1,0 +1,39 @@
+// Tier 2: `inline for (f in fields(v))` - compile-time reflection over a
+// struct's fields, unrolled once per field.  `f.name` / `f.value` / `f.index` /
+// `f.ty` describe the current field.
+
+data Vec3 { int x; int y; int z; }
+data Mix { string tag; int n; }
+
+// Generic: one body, unrolled per field when monomorphized for a concrete type.
+unit dump<T>(&T v) {
+    inline for (f in fields(v)) {
+        log(f.index);
+        log(f.name);
+        log(f.ty);
+        log(f.value);
+    }
+}
+
+// A generic that computes a value by folding over every field.
+int sum<T>(&T v) {
+    mut int total = 0;
+    inline for (f in fields(v)) {
+        total = total + f.value;
+    }
+    return total;
+}
+
+unit main() {
+    Vec3 p = { x = 7, y = 8, z = 9 };
+    dump(&p);
+    log(sum(&p));        // 24
+
+    // Non-generic use over a struct with heterogeneous field types: `f.value`
+    // is the field's own type each iteration (string, then int).
+    Mix m = { tag = "hp", n = 42 };
+    inline for (f in fields(m)) {
+        log(f.name);
+        log(f.value);
+    }
+}
