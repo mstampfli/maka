@@ -265,10 +265,35 @@ impl<'a> Cx<'a> {
         self.w("#define _DARWIN_C_SOURCE 1\n");
         self.w("#define _POSIX_C_SOURCE 200809L\n");
         self.w("#define _XOPEN_SOURCE 700\n");
-        self.w("#else\n");
+        self.w("#elif defined(_WIN32)\n");
         self.w("#define _XOPEN_SOURCE 600\n");
+        self.w("#else\n");
+        // glibc: _GNU_SOURCE exposes getline, syscall, the socket/inet helpers
+        // (send/recv/ntohl), and waitpid.  It must be defined before any libc
+        // include.  Older `_XOPEN_SOURCE 600` (POSIX 2004) hid getline/syscall,
+        // which modern gcc (14+) then rejects as implicit declarations.
+        self.w("#ifndef _GNU_SOURCE\n#define _GNU_SOURCE 1\n#endif\n");
         self.w("#endif\n");
         self.w("#include <stdio.h>\n#include <stdlib.h>\n#include <stdint.h>\n#include <stdbool.h>\n#include <string.h>\n#include <wchar.h>\n");
+        // POSIX system headers used by the runtime: process control, fds, and
+        // process wait.  Emitted up front so the functions are declared before
+        // any runtime code calls them (modern gcc rejects implicit decls).
+        // Socket/inet headers are deliberately NOT pulled here on Linux - they
+        // declare `accept`, which would clash with a user function named
+        // `accept` (test 114); the socket runtime self-declares its ABI and
+        // calls accept via syscall.  Windows uses the winsock shims below.
+        self.w("#ifndef _WIN32\n");
+        self.w("#include <unistd.h>\n");
+        self.w("#include <fcntl.h>\n");
+        self.w("#include <sys/types.h>\n");
+        self.w("#include <sys/wait.h>\n");
+        // The scheduler's wake-pipe drain calls send/recv early (before the
+        // socket runtime is emitted), so forward-declare them here.  Using the
+        // POSIX ssize_t/size_t signature keeps this compatible with the real
+        // <sys/socket.h> the macOS/BSD socket runtime pulls in later.
+        self.w("extern ssize_t send(int, const void*, size_t, int);\n");
+        self.w("extern ssize_t recv(int, void*, size_t, int);\n");
+        self.w("#endif\n");
         // Windows compatibility headers must come BEFORE any code that uses
         // POSIX functions (read_line, etc.), since the shim provides the
         // declarations.  On non-Windows this expands to a couple of POSIX
@@ -4781,7 +4806,10 @@ impl<'a> Cx<'a> {
                 } else {
                     self.wl(&format!("(void){};", target_name));
                 }
-                self.wl("return MAKA_UNIT;");
+                // The trampoline's C return type is `void` (c_ret_type maps unit
+                // to void), so a bare `return;` - not `return MAKA_UNIT;`, which
+                // modern gcc rejects as a value-return from a void function.
+                self.wl("return;");
             } else {
                 self.wl(&format!("return {}({});", target_name, call_args.join(", ")));
             }
@@ -4828,7 +4856,8 @@ impl<'a> Cx<'a> {
             self.wl(&format!("{}* __es = ({}*)__env;", env_struct_name, env_struct_name));
             if matches!(sig.ret, HType::Unit) {
                 self.wl(&format!("{}({});", lifted_c, call_args.join(", ")));
-                self.wl("return MAKA_UNIT;");
+                // void trampoline -> bare `return;` (see emit_trampolines).
+                self.wl("return;");
             } else {
                 self.wl(&format!("return {}({});", lifted_c, call_args.join(", ")));
             }
@@ -5096,6 +5125,8 @@ impl<'a> Cx<'a> {
         self.w("#endif\n");
         self.w("extern unsigned short htons(unsigned short);\n");
         self.w("extern unsigned int   htonl(unsigned int);\n");
+        self.w("extern unsigned short ntohs(unsigned short);\n");
+        self.w("extern unsigned int   ntohl(unsigned int);\n");
         self.w("#else\n");
         self.w("typedef int __maka_socklen_t;\n");
         self.w("#define __MAKA_SA_LEN_INIT(sa) ((void)0)\n");
