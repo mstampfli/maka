@@ -173,6 +173,9 @@ pub fn finish(
             v.hash(&mut hasher);
         }
         prep.rustc_version_bytes.hash(&mut hasher);
+        // Bridge codegen version: bump when the generated shim/drop-shim/container
+        // code changes, so a stale cached sidecar is regenerated.
+        "bridge-codegen-v2-rust-drop-shims".hash(&mut hasher);
         for p in &local_send { ("send", p).hash(&mut hasher); }
         for p in &local_sync { ("sync", p).hash(&mut hasher); }
         let hash = format!("{:016x}", hasher.finish());
@@ -325,6 +328,23 @@ fn build_sidecar_with_probes(
     for f in &surface.fns {
         lib_rs.push_str(&emit_shim(f));
         lib_rs.push('\n');
+    }
+    // Drop shims for opaque `Rust<T>` handles: Maka hands the boxed pointer back
+    // here at scope exit so the Rust value is dropped (otherwise it leaks).
+    let mut opaque_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for f in &surface.fns {
+        let mut v = Vec::new();
+        for p in &f.params { collect_opaque_names(&p.ty, &mut v); }
+        collect_opaque_names(&f.ret, &mut v);
+        for n in v { opaque_names.insert(n); }
+    }
+    if !opaque_names.is_empty() {
+        lib_rs.push_str("\n// auto-generated Rust<T> drop shims\n");
+        for n in &opaque_names {
+            lib_rs.push_str(&format!(
+                "#[no_mangle]\npub extern \"C\" fn __maka_drop_{0}(p: *mut u8) {{ if !p.is_null() {{ unsafe {{ drop(Box::from_raw(p as *mut {0})); }} }} }}\n",
+                n));
+        }
     }
     // Per-call-site Send / Sync probes routed from sema.  A `Send` probe
     // is emitted for every `Rust<T>` that's `transfer`'d, spawn-captured,

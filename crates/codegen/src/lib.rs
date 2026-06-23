@@ -45,6 +45,8 @@ struct Cx<'a> {
     /// Map of (slice/vec elem type-key) → emitted typedef name.
     slice_types: std::collections::BTreeSet<String>,
     vec_types: std::collections::BTreeSet<String>,
+    /// `Rust<T>` opaque type labels seen — emit an `extern __maka_drop_<T>` decl.
+    rust_drop_types: std::collections::BTreeSet<String>,
     /// Dyn instantiations seen: (Trait, StructId) — generate vtables for these.
     dyn_insts: std::collections::BTreeSet<(String, u32)>,
     /// Traits seen — generate Dyn_Trait struct typedef for these.
@@ -85,6 +87,7 @@ impl<'a> Cx<'a> {
             module_cincludes: cincludes,
             module_cblocks: cblocks,
             slice_types: Default::default(), vec_types: Default::default(),
+            rust_drop_types: Default::default(),
             dyn_insts: Default::default(), dyn_traits: Default::default(),
             callable_sigs: Default::default(),
             fn_trampolines: Default::default(),
@@ -149,6 +152,11 @@ impl<'a> Cx<'a> {
                 }
             }
             self.wl(&format!("extern {} {}({});", ret, s.c_name, params));
+        }
+
+        // Drop shims for `Rust<T>` opaque handles (generated in the Rust sidecar).
+        for label in &self.rust_drop_types.clone() {
+            self.wl(&format!("extern void __maka_drop_{}(void*);", c_ident(label)));
         }
 
         // Forward decls (non-extern)
@@ -4570,6 +4578,8 @@ impl<'a> Cx<'a> {
             HType::OwnPtr { .. } | HType::Heap { .. } => true,
             // A by-value `Vec<T>` owns its malloc'd buffer.
             HType::Vec { .. } => true,
+            // `Rust<T>` owns a boxed Rust value, dropped via a generated shim.
+            HType::RustOpaque(_) => true,
             HType::Struct(id) => self.drop_owns.contains(&self.sym.struct_info(*id).name),
             HType::Enum(id) => self.drop_owns.contains(&self.sym.enum_info(*id).name),
             HType::Array { elem, .. } => self.drop_ty_owns(elem),
@@ -4717,6 +4727,10 @@ impl<'a> Cx<'a> {
                     self.wl("}");
                 }
                 self.wl(&format!("free({}.data);", lv));
+            }
+            // `Rust<T>`: hand the boxed pointer back to Rust to drop (generated shim).
+            HType::RustOpaque(label) => {
+                self.wl(&format!("if ({0}) {{ __maka_drop_{1}((void*)({0})); }}", lv, c_ident(label)));
             }
             _ => {}
         }
@@ -4981,6 +4995,7 @@ impl<'a> Cx<'a> {
         match t {
             HType::Slice { elem, .. } => { self.slice_types.insert(self.type_key(elem)); self.note_type(elem); }
             HType::Vec { elem } => { self.vec_types.insert(self.type_key(elem)); self.note_type(elem); }
+            HType::RustOpaque(label) => { self.rust_drop_types.insert(label.clone()); }
             HType::Heap { inner } => self.note_type(inner),
             HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::RawPtr { inner, .. } | HType::OwnPtr { inner, .. } => self.note_type(inner),
             HType::Array { elem, .. } => self.note_type(elem),
