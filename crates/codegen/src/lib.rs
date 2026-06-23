@@ -6080,6 +6080,44 @@ impl<'a> Cx<'a> {
         self.w("    return (int64_t)st.st_size;\n");
         self.w("#endif\n");
         self.w("}\n");
+        // Whole-file read: returns a freshly-malloc'd, NUL-terminated buffer of
+        // the file's contents (NULL on error).  Maka's `read_file` wraps this as
+        // an owned String, so the return type is `maka_char*` to match.
+        self.w("maka_char* __maka_rt_read_file(const char* path) {\n");
+        self.w("    FILE* fp = fopen(path, \"rb\"); if (!fp) return (maka_char*)0;\n");
+        self.w("    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return (maka_char*)0; }\n");
+        self.w("    long n = ftell(fp); if (n < 0) { fclose(fp); return (maka_char*)0; }\n");
+        self.w("    rewind(fp);\n");
+        self.w("    char* buf = (char*)malloc((size_t)n + 1); if (!buf) { fclose(fp); return (maka_char*)0; }\n");
+        self.w("    size_t rd = fread(buf, 1, (size_t)n, fp); fclose(fp); buf[rd] = 0; return (maka_char*)buf;\n");
+        self.w("}\n");
+        // Owned substring: a freshly-malloc'd copy of s[start .. start+len].
+        // Returns `maka_char*` so Maka can own/free it (the borrowed
+        // `__maka_rt_str_substring` would leak it inside a Vec<String>).
+        self.w("maka_char* __maka_rt_substr_owned(const char* s, int64_t start, int64_t len) {\n");
+        self.w("    if (start < 0) start = 0; if (len < 0) len = 0;\n");
+        self.w("    char* r = (char*)malloc((size_t)len + 1);\n");
+        self.w("    for (int64_t k = 0; k < len; k++) r[k] = s[start + k];\n");
+        self.w("    r[len] = 0; return (maka_char*)r;\n");
+        self.w("}\n");
+        // Whole-file write: writes `len` bytes; returns 0 on success, -1 on error.
+        self.w("int64_t __maka_rt_write_file(const char* path, const char* data, int64_t len) {\n");
+        self.w("    FILE* fp = fopen(path, \"wb\"); if (!fp) return -1;\n");
+        self.w("    size_t wr = fwrite(data, 1, (size_t)len, fp); fclose(fp);\n");
+        self.w("    return (wr == (size_t)len) ? 0 : -1;\n");
+        self.w("}\n");
+        // FNV-1a 64-bit hash of a NUL-terminated string (for HashMap).
+        self.w("int64_t __maka_rt_str_hash(const char* s) {\n");
+        self.w("    uint64_t h = 1469598103934665603ULL;\n");
+        self.w("    while (*s) { h ^= (unsigned char)(*s++); h *= 1099511628211ULL; }\n");
+        self.w("    return (int64_t)(h & 0x7fffffffffffffffULL);\n");
+        self.w("}\n");
+        // Byte at index `i` of a string (0..len-1), or -1 out of range.  Gives
+        // Maka byte-level read access to strings (which aren't indexable).
+        self.w("int64_t __maka_rt_str_byte(const char* s, int64_t i) {\n");
+        self.w("    if (i < 0) return -1;\n");
+        self.w("    return (int64_t)(unsigned char)s[i];\n");
+        self.w("}\n");
         self.w("int64_t __maka_rt_file_sync(int64_t fd) {\n");
         self.w("#ifdef _WIN32\n");
         self.w("    HANDLE h = (HANDLE)_get_osfhandle((int)fd);\n");
@@ -7091,25 +7129,36 @@ impl<'a> Cx<'a> {
                 self.wl(&format!("(void)({});", s));
             }
             HStmt::Return { value, heap_drops, .. } => {
-                // Drop heap locals first.
-                for id in heap_drops {
-                    let (n, ty) = {
-                        let li = &f.locals[id.0 as usize];
-                        (local_name(*id, &li.name), li.ty.clone())
-                    };
-                    self.wl("/* drop on return */");
-                    self.emit_field_drop(&n, &ty, 0);
-                }
+                // Evaluate the return value BEFORE dropping heap locals: the
+                // expression may read a local that is about to be freed (e.g.
+                // `return split_lines(text)`).  Stash it in a temp, then drop,
+                // then return.  Locals moved out via the return value are not in
+                // `heap_drops`, so their ownership transfers cleanly.
+                let drops: Vec<(String, HType)> = heap_drops.iter().map(|id| {
+                    let li = &f.locals[id.0 as usize];
+                    (local_name(*id, &li.name), li.ty.clone())
+                }).collect();
                 match value {
+                    Some(e) if !matches!(e.ty, HType::Unit) => {
+                        self.wl("{");
+                        self.open();
+                        let s = self.emit_expr(f, e);
+                        self.wl(&format!("{} = {};", self.c_decl(&e.ty, "__ret"), s));
+                        for (n, ty) in &drops { self.wl("/* drop on return */"); self.emit_field_drop(n, ty, 0); }
+                        self.wl("return __ret;");
+                        self.close();
+                        self.wl("}");
+                    }
                     Some(e) => {
                         let s = self.emit_expr(f, e);
-                        if matches!(e.ty, HType::Unit) {
-                            self.wl(&format!("(void)({}); return;", s));
-                        } else {
-                            self.wl(&format!("return {};", s));
-                        }
+                        self.wl(&format!("(void)({});", s));
+                        for (n, ty) in &drops { self.wl("/* drop on return */"); self.emit_field_drop(n, ty, 0); }
+                        self.wl("return;");
                     }
-                    None => self.wl("return;"),
+                    None => {
+                        for (n, ty) in &drops { self.wl("/* drop on return */"); self.emit_field_drop(n, ty, 0); }
+                        self.wl("return;");
+                    }
                 }
             }
             HStmt::If { cond, then_b, else_b, .. } => {

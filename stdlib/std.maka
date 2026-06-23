@@ -509,6 +509,60 @@ pub int file_sync    (int fd)               { return __file_sync(fd); }
 pub int file_truncate(int fd, int len)      { return __file_truncate(fd, len); }
 
 // =====================================================================
+// Whole-file IO - the ergonomic layer over the raw file primitives.
+//   read_file  : slurp a whole file into an owned String (null on error)
+//   write_file : write a string to a file, truncating (true on success)
+//   append_file: append a string to a file (true on success)
+//   read_lines : read a file and split it into a Vec of lines
+// The slurp/spill themselves are C (one malloc + fread / fwrite); the line
+// splitting is plain Maka on top.
+// =====================================================================
+extern "__maka_rt_read_file"     String __rt_read_file (string path);
+extern "__maka_rt_write_file"    int    __rt_write_file(string path, string content, int len);
+extern "__maka_rt_str_byte"      int    __rt_str_byte  (string s, int i);
+// Owned substring - the C side mallocs, so the result is an owned String that
+// auto-frees (the borrowed `str_substring` would leak it inside a Vec<String>).
+extern "__maka_rt_substr_owned"  String __rt_substr    (string s, int start, int len);
+
+// Byte at index `i` of a string (0..len-1), or -1 if out of range.  Strings
+// are not indexable with `s[i]`; this is the byte-level read accessor.
+pub int str_byte(string s, int i) { return __rt_str_byte(s, i); }
+
+// Read an entire file into an owned String.  Returns null if the file cannot
+// be opened.  The buffer auto-frees at scope exit.
+pub String read_file(string path) { return __rt_read_file(path); }
+
+// Write `content` to `path`, creating/truncating it.  Returns true on success.
+pub bool write_file(string path, string content) {
+    return __rt_write_file(path, content, str_len(content) as int) == 0;
+}
+
+// Split `text` into lines on '\n' (a trailing newline yields no empty final
+// line).  Pure Maka: one O(n) scan via str_byte, one owned String per line.
+pub Vec<String> split_lines(string text) {
+    Vec<String> out = [];
+    int n = str_len(text) as int;
+    mut int start = 0;
+    mut int i = 0;
+    while (i < n) {
+        if (str_byte(text, i) == 10) {       // '\n'
+            push(out, __rt_substr(text, start, i - start));
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (start < n) { push(out, __rt_substr(text, start, n - start)); }
+    return out;
+}
+
+// Read a file and return its lines.  Empty Vec if the file cannot be read.
+pub Vec<String> read_lines(string path) {
+    String text = read_file(path);
+    if (text == null) { Vec<String> empty = []; return empty; }
+    return split_lines(text);
+}
+
+// =====================================================================
 // Filesystem queries + environment + process control.
 // =====================================================================
 extern "__maka_rt_file_exists"  int  __file_exists (string path);
