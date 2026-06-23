@@ -1,0 +1,10 @@
+// log of a string concat lowers to printf (no per-concat malloc); an owned
+// format() piece in the concat is freed; numeric `+` is unaffected.
+unit main() {
+    string name = "world";
+    log("hello " + name);
+    log("a" + "b" + name + "!");
+    log(name + format("[{}]", 42));
+    int x = 1 + 2 + 3;
+    log(x);
+}

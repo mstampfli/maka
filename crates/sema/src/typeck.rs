@@ -3155,6 +3155,41 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
             }
+            // Optimization: `log(a + b + ...)` string concat -> printf with a %s
+            // per piece, no per-concat malloc.  (`a + b` lowers to a chain of
+            // __maka_str_concat calls; flatten it back to the operands.)
+            if args.len() == 1 {
+                let h = self.check_expr(&args[0], None);
+                let is_concat = matches!(&h.kind, HExprKind::Call { callee, .. }
+                    if matches!(callee.0, c if c == u32::MAX - 5 || c == u32::MAX - 8 || c == u32::MAX - 9 || c == u32::MAX - 10));
+                if is_concat {
+                    let mut leaves = Vec::new();
+                    flatten_str_concat(h, &mut leaves);
+                    let mut pf = String::with_capacity(leaves.len() * 2 + 1);
+                    for leaf in &mut leaves {
+                        // Owned pieces become borrowed string views (printf reads
+                        // them); fresh-temp pieces are freed by the lifetime pass.
+                        if matches!(&leaf.ty, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char)) {
+                            leaf.ty = HType::Str;
+                        }
+                        pf.push_str("%s");
+                    }
+                    pf.push('\n');
+                    let mut hargs = Vec::with_capacity(leaves.len() + 1);
+                    hargs.push(HExpr { kind: HExprKind::LitStr(pf), ty: HType::Str, span: sp });
+                    hargs.extend(leaves);
+                    return HExpr { kind: HExprKind::Call { callee: FuncId(u32::MAX - 58), args: hargs }, ty: HType::Unit, span: sp };
+                }
+                // Not a concat: reuse the already-checked value for the normal path.
+                let h = match &h.ty {
+                    HType::Ref { inner, .. } if matches!(**inner, HType::Int | HType::SizedInt { .. } | HType::Float | HType::Bool | HType::Char | HType::Enum(_)) => self.auto_deref(h),
+                    _ => h,
+                };
+                let h = if matches!(&h.ty, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char)) {
+                    self.coerce(h, &HType::Str)
+                } else { h };
+                return HExpr { kind: HExprKind::Call { callee: FuncId(u32::MAX), args: vec![h] }, ty: HType::Unit, span: sp };
+            }
             let mut hargs = Vec::new();
             for a in args {
                 let h = self.check_expr(a, None);
@@ -4911,6 +4946,22 @@ fn receiver_key(t: &HType, sym: &SymTab) -> Option<String> {
         | HType::Heap { inner } => receiver_key(inner, sym),
         _ => None,
     }
+}
+
+/// Flatten a string-concat chain (`__maka_str_concat*` calls) into its leaf
+/// operands, left to right.  Used to lower `log(a + b + ...)` to a single printf.
+fn flatten_str_concat(h: HExpr, out: &mut Vec<HExpr>) {
+    let is_concat = matches!(&h.kind, HExprKind::Call { callee, args }
+        if (callee.0 == u32::MAX - 5 || callee.0 == u32::MAX - 8 || callee.0 == u32::MAX - 9 || callee.0 == u32::MAX - 10) && args.len() == 2);
+    if is_concat {
+        if let HExprKind::Call { args, .. } = h.kind {
+            let mut it = args.into_iter();
+            flatten_str_concat(it.next().unwrap(), out);
+            flatten_str_concat(it.next().unwrap(), out);
+            return;
+        }
+    }
+    out.push(h);
 }
 
 fn struct_id_of(t: &HType) -> Option<StructId> {
