@@ -523,7 +523,9 @@ impl<'a> TypeChecker<'a> {
                 Some(HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) })
             }
             ast::Expr::Call { callee, .. } => {
-                if matches!(callee.as_ref(), ast::Expr::Ident(n, _) if n == "read_line") {
+                // Builtins that return a freshly-owned `own *char`: binding their
+                // result to a `string` slot should own + free it.
+                if matches!(callee.as_ref(), ast::Expr::Ident(n, _) if n == "read_line" || n == "format") {
                     Some(HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) })
                 } else {
                     None

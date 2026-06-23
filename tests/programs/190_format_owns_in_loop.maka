@@ -1,0 +1,11 @@
+// Binding a freshly-owned `format(...)` result to a `string` slot upgrades the
+// slot to own it, so it is freed at block scope - including per-iteration in a
+// loop (verified leak-free under LeakSanitizer).
+unit main() {
+    mut int i = 0;
+    while (i < 3) {
+        string s = format("row {}", i);
+        log(s);
+        i = i + 1;
+    }
+}
