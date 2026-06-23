@@ -1049,6 +1049,44 @@ impl<'a> TypeChecker<'a> {
         acc
     }
 
+    /// Try to lower `log(format(fmt, args...))` to a single printf-style builtin
+    /// call (no intermediate string allocation).  Returns None - so the caller
+    /// falls back to the normal format()+log path - if the placeholder count
+    /// mismatches or any argument's type is not a printf-able scalar.
+    fn try_log_format_print(&mut self, fmt: &str, fmt_args: &[ast::Expr], sp: Span) -> Option<HExpr> {
+        let parts: Vec<&str> = fmt.split("{}").collect();
+        if parts.len().saturating_sub(1) != fmt_args.len() { return None; }
+        let mut pf = String::new();
+        let mut vals: Vec<HExpr> = Vec::with_capacity(fmt_args.len());
+        for (i, arg) in fmt_args.iter().enumerate() {
+            pf.push_str(&parts[i].replace('%', "%%"));
+            let h = self.check_expr(arg, None);
+            let h = match &h.ty {
+                HType::Ref { inner, .. } if matches!(**inner, HType::Int | HType::SizedInt { .. } | HType::Float | HType::Bool | HType::Char) => self.auto_deref(h),
+                _ => h,
+            };
+            // Same set format() supports; a `{}` for anything else bails to the
+            // (correctly-erroring) format path.
+            let spec = match &h.ty {
+                HType::Int | HType::SizedInt { .. } => "%lld",
+                HType::Float | HType::SizedFloat { .. } => "%g",
+                HType::Bool => "%s",
+                HType::Char => "%c",
+                HType::Str => "%s",
+                HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char) => "%s",
+                _ => return None,
+            };
+            pf.push_str(spec);
+            vals.push(h);
+        }
+        pf.push_str(&parts[parts.len() - 1].replace('%', "%%"));
+        pf.push('\n'); // log() appends a newline
+        let mut hargs = Vec::with_capacity(vals.len() + 1);
+        hargs.push(HExpr { kind: HExprKind::LitStr(pf), ty: HType::Str, span: sp });
+        hargs.extend(vals);
+        Some(HExpr { kind: HExprKind::Call { callee: FuncId(u32::MAX - 58), args: hargs }, ty: HType::Unit, span: sp })
+    }
+
     /// Convert one HExpr arg to a stringy HExpr suitable for `format_concat`.
     /// Each primitive type maps to a reserved builtin FuncId; strings pass
     /// through unchanged.
@@ -3069,6 +3107,22 @@ impl<'a> TypeChecker<'a> {
         }
         // Built-in `log` accepts any single arg and returns unit.
         if name == "log" {
+            // Optimization: `log(format(LIT, args...))` lowers straight to a
+            // printf-style call (no intermediate malloc'd String).  Only when the
+            // format string is a literal and every arg is a supported scalar;
+            // otherwise fall through to the normal format()+log path.
+            if args.len() == 1 {
+                if let ast::Expr::Call { callee: fc, args: fa, .. } = &args[0] {
+                    if matches!(fc.as_ref(), ast::Expr::Ident(n, _) if n == "format") && !fa.is_empty() {
+                        if let ast::Expr::Lit(ast::Lit::Str(fmt), _) = &fa[0] {
+                            let fmt = fmt.clone();
+                            if let Some(h) = self.try_log_format_print(&fmt, &fa[1..], sp) {
+                                return h;
+                            }
+                        }
+                    }
+                }
+            }
             let mut hargs = Vec::new();
             for a in args {
                 let h = self.check_expr(a, None);

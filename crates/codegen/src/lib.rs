@@ -7447,6 +7447,15 @@ impl<'a> Cx<'a> {
                     }
                     return "MAKA_UNIT".into();
                 }
+                // Optimized `log(format(...))` -> printf, no allocation.
+                if callee.0 == u32::MAX - 58 {
+                    let mut parts: Vec<String> = vec![self.emit_inline_expr(inline_f, &args[0], tag)];
+                    for a in &args[1..] {
+                        let s = self.emit_inline_expr(inline_f, a, tag);
+                        parts.push(printf_conv(s, &a.ty));
+                    }
+                    return format!("(printf({}), MAKA_UNIT)", parts.join(", "));
+                }
                 if callee.0 == u32::MAX - 3 {
                     if let Some(a) = args.first() {
                         let s = self.emit_inline_expr(inline_f, a, tag);
@@ -7941,6 +7950,16 @@ impl<'a> Cx<'a> {
                         return format!("({}({}), MAKA_UNIT)", helper, s);
                     }
                     return "MAKA_UNIT".into();
+                }
+                // Optimized `log(format(...))` -> printf, no allocation.  args[0]
+                // is the printf format string; the rest are scalar values.
+                if callee.0 == u32::MAX - 58 {
+                    let mut parts: Vec<String> = vec![self.emit_expr(f, &args[0])];
+                    for a in &args[1..] {
+                        let s = self.emit_expr(f, a);
+                        parts.push(printf_conv(s, &a.ty));
+                    }
+                    return format!("(printf({}), MAKA_UNIT)", parts.join(", "));
                 }
                 // Built-in `spawn(closure)` — fiber tier.  Compound-stmt expr
                 // wraps the closure once so its env malloc happens exactly once
@@ -8959,6 +8978,19 @@ fn expr_mutates_local(e: &HExpr, iv: u32) -> bool {
         | HExprKind::LitChar(_) | HExprKind::LitStr(_) | HExprKind::LitNull
         | HExprKind::LitUnit | HExprKind::Local(_) | HExprKind::EnumVariant(_, _)
         | HExprKind::FnRef(_) | HExprKind::GlobalRef(_) => false,
+    }
+}
+
+/// Wrap an emitted value for a printf argument, matching the conversion spec
+/// chosen in typeck: bool -> "true"/"false" (%s), char -> int (%c), integers ->
+/// long long (%lld), floats -> double (%g); strings pass through (%s).
+fn printf_conv(s: String, ty: &HType) -> String {
+    match ty {
+        HType::Bool => format!("(({}) ? \"true\" : \"false\")", s),
+        HType::Char => format!("(int)({})", s),
+        HType::Int | HType::SizedInt { .. } => format!("(long long)({})", s),
+        HType::Float | HType::SizedFloat { .. } => format!("(double)({})", s),
+        _ => s,
     }
 }
 
