@@ -4732,6 +4732,12 @@ impl<'a> Cx<'a> {
             HType::RustOpaque(label) => {
                 self.wl(&format!("if ({0}) {{ __maka_drop_{1}((void*)({0})); }}", lv, c_ident(label)));
             }
+            // A non-escaping closure local: free its malloc'd capture env.  Only
+            // scheduled by the lifetime pass when the closure provably does not
+            // escape (so spawn'd closures, whose env the fiber frees, are excluded).
+            HType::FnPtr { .. } => {
+                self.wl(&format!("if (({0}).env) {{ free(({0}).env); }}", lv));
+            }
             _ => {}
         }
     }

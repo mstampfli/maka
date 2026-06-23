@@ -1541,6 +1541,127 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
     // Also append undropped params to every Return's heap_drops list — early
     // returns must still free param-owned values.
     append_param_drops_to_returns(sym, &mut f.body, &f.params, &locals, &param_moved);
+
+    // Free the capture env of a non-escaping closure local.  A capturing closure
+    // (`let f = int(int n) [x] ...;`) malloc's an env that nothing frees.  We can
+    // free it at scope exit ONLY when the closure provably does not escape - it
+    // appears solely as the target of an indirect call.  This excludes closures
+    // passed to spawn (the fiber frees that env), returned, stored, or aliased,
+    // so no double free.
+    let mut cands: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+    collect_closure_cands(&f.body, &locals, &mut cands);
+    if !cands.is_empty() {
+        let mut escaped: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+        mark_closure_escapes_block(&f.body, &cands, &mut escaped);
+        let freeable: std::collections::HashSet<LocalId> = cands.difference(&escaped).copied().collect();
+        if !freeable.is_empty() { add_closure_drops_block(&mut f.body, &freeable); }
+    }
+}
+
+/// Locals bound directly to a capturing closure literal (`let f = ...[caps]...;`).
+fn collect_closure_cands(b: &HBlock, locals: &[LocalInfo], out: &mut std::collections::HashSet<LocalId>) {
+    for s in &b.stmts {
+        if let HStmt::Let { local, init, .. } = s {
+            if matches!(&init.kind, HExprKind::Closure { env_values, .. } if !env_values.is_empty())
+                && matches!(locals[local.0 as usize].ty, HType::FnPtr { .. }) {
+                out.insert(*local);
+            }
+        }
+        for_each_child_block(s, &mut |cb| collect_closure_cands(cb, locals, out));
+    }
+}
+
+/// Mark a candidate closure local as escaped if it appears anywhere other than as
+/// the callee of an indirect call (i.e. anything but `f(...)`).
+fn mark_closure_escapes_block(b: &HBlock, cands: &std::collections::HashSet<LocalId>, escaped: &mut std::collections::HashSet<LocalId>) {
+    fn ex(e: &HExpr, cands: &std::collections::HashSet<LocalId>, escaped: &mut std::collections::HashSet<LocalId>) {
+        match &e.kind {
+            HExprKind::Local(id) => { if cands.contains(id) { escaped.insert(*id); } }
+            HExprKind::CallIndirect { callee, args } => {
+                // `f(...)` - the callee being a bare candidate local is a call, not
+                // an escape; still scan a non-trivial callee and all args.
+                if !matches!(&callee.kind, HExprKind::Local(_)) { ex(callee, cands, escaped); }
+                for a in args { ex(a, cands, escaped); }
+            }
+            HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } => { for a in args { ex(a, cands, escaped); } }
+            HExprKind::Bin { lhs, rhs, .. } => { ex(lhs, cands, escaped); ex(rhs, cands, escaped); }
+            HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } | HExprKind::Cast { expr, .. }
+            | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
+            | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr) | HExprKind::SliceLen(expr)
+            | HExprKind::EnumTag(expr) | HExprKind::ArrayToSlice { base: expr, .. } | HExprKind::Transfer(expr) => ex(expr, cands, escaped),
+            HExprKind::AddrOfRef { place, .. } => ex(place, cands, escaped),
+            HExprKind::Field { base, .. } => ex(base, cands, escaped),
+            HExprKind::Index { base, idx } => { ex(base, cands, escaped); ex(idx, cands, escaped); }
+            HExprKind::Closure { env_values, .. } => { for v in env_values { ex(v, cands, escaped); } }
+            HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => { for (_, fe) in fields { ex(fe, cands, escaped); } }
+            HExprKind::ArrayLit(es) => { for e in es { ex(e, cands, escaped); } }
+            HExprKind::Match { scrutinee, arms, .. } => {
+                ex(scrutinee, cands, escaped);
+                for a in arms {
+                    if let Some(g) = &a.guard { ex(g, cands, escaped); }
+                    if let Some(v) = &a.value { ex(v, cands, escaped); }
+                }
+            }
+            _ => {}
+        }
+    }
+    // Exhaustive statement walk: every expression position must be scanned, or a
+    // missed use would leave an escaped closure wrongly freeable.
+    fn scan_stmt(s: &HStmt, cands: &std::collections::HashSet<LocalId>, escaped: &mut std::collections::HashSet<LocalId>) {
+        match s {
+            HStmt::Let { init, .. } => ex(init, cands, escaped),
+            HStmt::Assign { place, value, .. } => { ex(place, cands, escaped); ex(value, cands, escaped); }
+            HStmt::ExprStmt(e) => ex(e, cands, escaped),
+            HStmt::Return { value, .. } => { if let Some(v) = value { ex(v, cands, escaped); } }
+            HStmt::Propagate { value, .. } => { if let Some(v) = value { ex(v, cands, escaped); } }
+            HStmt::If { cond, then_b, else_b, .. } => {
+                ex(cond, cands, escaped);
+                for st in &then_b.stmts { scan_stmt(st, cands, escaped); }
+                if let Some(b) = else_b { for st in &b.stmts { scan_stmt(st, cands, escaped); } }
+            }
+            HStmt::While { cond, body, .. } => { ex(cond, cands, escaped); for st in &body.stmts { scan_stmt(st, cands, escaped); } }
+            HStmt::Block(b) | HStmt::Unsafe(b, _) => { for st in &b.stmts { scan_stmt(st, cands, escaped); } }
+            HStmt::ForC { init, cond, step, body, .. } => {
+                scan_stmt(init, cands, escaped); ex(cond, cands, escaped); scan_stmt(step, cands, escaped);
+                for st in &body.stmts { scan_stmt(st, cands, escaped); }
+            }
+            HStmt::ForEach { src, body, .. } => { ex(src, cands, escaped); for st in &body.stmts { scan_stmt(st, cands, escaped); } }
+            HStmt::Break(_) | HStmt::Continue(_) => {}
+        }
+    }
+    for s in &b.stmts { scan_stmt(s, cands, escaped); }
+}
+
+/// Add freeable closure locals to the heap_to_free of the block that declares them.
+fn add_closure_drops_block(b: &mut HBlock, freeable: &std::collections::HashSet<LocalId>) {
+    let mut to_add: Vec<LocalId> = Vec::new();
+    for s in &b.stmts {
+        if let HStmt::Let { local, .. } = s {
+            if freeable.contains(local) && !b.heap_to_free.contains(local) { to_add.push(*local); }
+        }
+    }
+    for id in to_add { b.heap_to_free.push(id); }
+    for s in b.stmts.iter_mut() {
+        for_each_child_block_mut(s, &mut |cb| add_closure_drops_block(cb, freeable));
+    }
+}
+
+/// Run `g` on each immediate child block of a statement (read-only).
+fn for_each_child_block(s: &HStmt, g: &mut dyn FnMut(&HBlock)) {
+    match s {
+        HStmt::If { then_b, else_b, .. } => { g(then_b); if let Some(b) = else_b { g(b); } }
+        HStmt::While { body, .. } | HStmt::Block(body) | HStmt::Unsafe(body, _)
+        | HStmt::ForC { body, .. } | HStmt::ForEach { body, .. } => g(body),
+        _ => {}
+    }
+}
+fn for_each_child_block_mut(s: &mut HStmt, g: &mut dyn FnMut(&mut HBlock)) {
+    match s {
+        HStmt::If { then_b, else_b, .. } => { g(then_b); if let Some(b) = else_b { g(b); } }
+        HStmt::While { body, .. } | HStmt::Block(body) | HStmt::Unsafe(body, _)
+        | HStmt::ForC { body, .. } | HStmt::ForEach { body, .. } => g(body),
+        _ => {}
+    }
 }
 
 fn collect_param_moves_block(sym: &SymTab, b: &HBlock, out: &mut std::collections::HashSet<LocalId>) {
