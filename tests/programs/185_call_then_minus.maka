@@ -1,0 +1,15 @@
+// Regression: `call() - expr` must parse as subtraction, not as a zero-arg
+// lambda with body `-expr` (the lambda speculation used to win because a bare
+// expression body could start with unary minus).
+
+int five() { return 5; }
+float half() { return 0.5; }
+
+unit main() {
+    int a = five() - 2;            // 3
+    int b = five() * 2 - 1;        // 9
+    float c = 2.0 * half() - 1.0;  // 0
+    log(a);
+    log(b);
+    log(c as int);
+}

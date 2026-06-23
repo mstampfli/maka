@@ -2261,6 +2261,13 @@ impl Parser {
             };
             LambdaBody::Block(b)
         } else {
+            // A zero-parameter lambda with a bare-expression body is ambiguous
+            // with a plain call `f()` followed by an operator - e.g. `r01() - 1.0`
+            // would otherwise parse as a lambda returning type `r01` with body
+            // `-1.0`.  Require a `{ block }` body in the no-params case so the
+            // call interpretation wins.  Zero-arg lambdas are always written
+            // `T() { ... }` anyway.
+            if params.is_empty() { self.pos = save; return Ok(None); }
             let e = match self.parse_expr() {
                 Ok(e) => e,
                 Err(_) => { self.pos = save; return Ok(None); }

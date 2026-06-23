@@ -4521,6 +4521,21 @@ impl<'a> Cx<'a> {
         self.w("\n");
     }
 
+    /// Names of struct/enum types embedded BY VALUE in `ty` (directly or as an
+    /// array element).  Pointer/ref/slice/vec fields are excluded - they only
+    /// need a forward declaration, so they impose no definition ordering.
+    fn value_dep_names(&self, ty: &HType, out: &mut Vec<String>) {
+        match ty {
+            HType::Struct(id) => out.push(self.sym.struct_info(*id).name.clone()),
+            HType::Enum(id) => {
+                let e = self.sym.enum_info(*id);
+                if !e.is_simple() { out.push(e.name.clone()); }
+            }
+            HType::Array { elem, .. } => self.value_dep_names(elem, out),
+            _ => {}
+        }
+    }
+
     fn emit_structs_and_enums(&mut self) {
         // Forward decls of structs (in declaration order). Skip generic templates
         // and the built-in `Thread` (declared in the prologue with pthread fields).
@@ -4545,68 +4560,113 @@ impl<'a> Cx<'a> {
             }
         }
 
-        // Now full struct definitions: collect slice/vec types referenced in fields too.
+        // Full definitions, emitted in dependency order.  A type that embeds
+        // another BY VALUE (a struct field, an enum-variant field, or an array
+        // element) must be defined after it; pointer/slice/ref fields only need
+        // the forward decls above, so they impose no ordering and recursive
+        // types still work.
         let structs = self.sym.structs.clone();
+        let enums = self.sym.enums.clone();
         for s in &structs {
-            for f in &s.fields {
-                self.note_type(&f.ty);
-            }
+            for f in &s.fields { self.note_type(&f.ty); }
         }
-        // Emit slice/vec typedefs needed by structs early.
         self.emit_slice_typedefs();
         self.emit_vec_typedefs();
 
-        for s in &structs {
-            if !s.type_params.is_empty() { continue; } // skip templates
-            if s.name == "Thread" { continue; }        // built-in, declared in prologue
-            self.wl(&format!("struct {} {{", c_ident(&s.name)));
-            self.open();
-            for f in &s.fields {
-                // `c_decl` correctly places the field name in the middle for
-                // array-of-T fields (`T name[N]`) and uses the standard
-                // `T name` form for everything else.  Plain `c_type()` would
-                // emit `T[N] name`, which isn't valid C.
-                let decl = self.c_decl(&f.ty, &c_ident(&f.name));
-                self.wl(&format!("{};", decl));
-            }
-            self.close();
-            self.wl("};");
+        // Index every emittable type by name: (is_enum, index).
+        let mut kind_of: std::collections::HashMap<String, (bool, usize)> = std::collections::HashMap::new();
+        let mut all_names: Vec<String> = Vec::new();
+        for (i, s) in structs.iter().enumerate() {
+            if !s.type_params.is_empty() || s.name == "Thread" { continue; }
+            if kind_of.contains_key(&s.name) { continue; }
+            kind_of.insert(s.name.clone(), (false, i));
+            all_names.push(s.name.clone());
+        }
+        for (i, e) in enums.iter().enumerate() {
+            if e.is_simple() { continue; }
+            if kind_of.contains_key(&e.name) { continue; }
+            kind_of.insert(e.name.clone(), (true, i));
+            all_names.push(e.name.clone());
         }
 
-        // Tagged enum struct definitions: tag + union of variant payloads.
-        let enums = self.sym.enums.clone();
-        for e in &enums {
-            if e.is_simple() { continue; }
-            // First, emit per-variant payload structs (named EnumName_VariantName).
-            for v in &e.variants {
-                if v.fields.is_empty() { continue; }
-                self.wl(&format!("typedef struct {{"));
-                self.open();
-                for f in &v.fields {
-                    let ty = self.c_type(&f.ty);
-                    self.wl(&format!("{} {};", ty, c_ident(&f.name)));
+        // Fixpoint topological order: emit a type once all its by-value deps
+        // are already out.
+        let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut ordered: Vec<String> = Vec::new();
+        loop {
+            let mut progressed = false;
+            for name in &all_names {
+                if emitted.contains(name) { continue; }
+                let (is_enum, idx) = kind_of[name];
+                let mut deps: Vec<String> = Vec::new();
+                if is_enum {
+                    for v in &enums[idx].variants {
+                        for f in &v.fields { self.value_dep_names(&f.ty, &mut deps); }
+                    }
+                } else {
+                    for f in &structs[idx].fields { self.value_dep_names(&f.ty, &mut deps); }
                 }
-                self.close();
-                self.wl(&format!("}} {0}_{1}_Payload;", c_ident(&e.name), c_ident(&v.name)));
+                let ready = deps.iter().all(|d| !kind_of.contains_key(d) || emitted.contains(d));
+                if ready {
+                    ordered.push(name.clone());
+                    emitted.insert(name.clone());
+                    progressed = true;
+                }
             }
-            // Then the enum struct itself.
-            self.wl(&format!("struct {0} {{", c_ident(&e.name)));
-            self.open();
-            self.wl("maka_int tag;");
-            // Union of all non-empty payloads.
-            let has_payload = e.variants.iter().any(|v| !v.fields.is_empty());
-            if has_payload {
-                self.wl("union {");
-                self.open();
+            if !progressed { break; }
+        }
+        // Any remaining (only possible with an illegal by-value cycle) fall back
+        // to declaration order so something is still emitted.
+        for name in &all_names {
+            if emitted.insert(name.clone()) { ordered.push(name.clone()); }
+        }
+
+        for name in &ordered {
+            let (is_enum, idx) = kind_of[name];
+            if is_enum {
+                let e = &enums[idx];
+                // Per-variant payload structs (named EnumName_VariantName).
                 for v in &e.variants {
                     if v.fields.is_empty() { continue; }
-                    self.wl(&format!("{0}_{1}_Payload {1};", c_ident(&e.name), c_ident(&v.name)));
+                    self.wl("typedef struct {");
+                    self.open();
+                    for f in &v.fields {
+                        let ty = self.c_type(&f.ty);
+                        self.wl(&format!("{} {};", ty, c_ident(&f.name)));
+                    }
+                    self.close();
+                    self.wl(&format!("}} {0}_{1}_Payload;", c_ident(&e.name), c_ident(&v.name)));
+                }
+                // The enum struct itself: tag + union of variant payloads.
+                self.wl(&format!("struct {0} {{", c_ident(&e.name)));
+                self.open();
+                self.wl("maka_int tag;");
+                let has_payload = e.variants.iter().any(|v| !v.fields.is_empty());
+                if has_payload {
+                    self.wl("union {");
+                    self.open();
+                    for v in &e.variants {
+                        if v.fields.is_empty() { continue; }
+                        self.wl(&format!("{0}_{1}_Payload {1};", c_ident(&e.name), c_ident(&v.name)));
+                    }
+                    self.close();
+                    self.wl("} payload;");
                 }
                 self.close();
-                self.wl("} payload;");
+                self.wl("};");
+            } else {
+                let s = &structs[idx];
+                self.wl(&format!("struct {} {{", c_ident(&s.name)));
+                self.open();
+                for f in &s.fields {
+                    // `c_decl` places the field name correctly for array-of-T
+                    // fields (`T name[N]`) vs the standard `T name` form.
+                    let decl = self.c_decl(&f.ty, &c_ident(&f.name));
+                    self.wl(&format!("{};", decl));
+                }
+                self.close();
+                self.wl("};");
             }
-            self.close();
-            self.wl("};");
         }
         self.wl("");
     }
@@ -6922,7 +6982,7 @@ impl<'a> Cx<'a> {
                         ("0".to_string(), src_c.clone())
                     }
                 };
-                self.wl(&format!("{} {} = ({})0;", var_ty, var_name, var_ty));
+                self.wl(&format!("{} {} = {{0}};", var_ty, var_name));
                 self.wl(&format!("for (maka_int __i = 0; __i < {}; __i += 1) {{", len_str));
                 self.open();
                 self.wl(&format!("{} = {}[__i];", var_name, elem_access));
@@ -6976,7 +7036,7 @@ impl<'a> Cx<'a> {
         // Declare result var if needed.
         if needs_value {
             let res_c = self.c_type(result_ty);
-            out.push_str(&format!("{} __r_{} = ({})0; ", res_c, tag, res_c));
+            out.push_str(&format!("{} __r_{} = {{0}}; ", res_c, tag));
         }
 
         // Declare all non-param locals up front so they're in scope for the whole expansion.
@@ -6989,7 +7049,7 @@ impl<'a> Cx<'a> {
                 HType::Array { .. } => {
                     out.push_str(&format!("{} = {{0}}; ", self.c_decl(&li.ty, &pname)));
                 }
-                _ => out.push_str(&format!("{} {} = ({})0; ", ty, pname, ty)),
+                _ => out.push_str(&format!("{} {} = {{0}}; ", ty, pname)),
             }
         }
 
@@ -8380,7 +8440,7 @@ impl<'a> Cx<'a> {
         body.push_str("__extension__ ({ ");
         body.push_str(&format!("{} __s = {}; ", scrut_c, s));
         if needs_value {
-            body.push_str(&format!("{} __r = ({})0; ", res_c, res_c));
+            body.push_str(&format!("{} __r = {{0}}; ", res_c));
         }
         body.push_str("do { ");
 

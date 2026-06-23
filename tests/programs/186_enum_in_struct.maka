@@ -1,0 +1,32 @@
+// Regression: a tagged enum embedded BY VALUE in a struct (and the struct in an
+// array) forces codegen to define the enum before the struct - it now emits
+// type definitions in dependency order.  Also exercises a struct-typed `match`
+// expression result, whose temporary must zero-init with `{0}` (not `(T)0`).
+
+enum Shape {
+    Circle { int r },
+    Rect { int w, int h },
+}
+
+data Tagged { int id; Shape shape; }     // enum embedded by value
+data Pair { int a; int b; }
+
+Pair classify(Shape s) {
+    return match (s) {                    // match expression returning a struct
+        Circle { r } { yield Pair { a = 1, b = r }; },
+        Rect { w, h } { yield Pair { a = 2, b = w * h }; },
+    };
+}
+
+data Bag { [4]Tagged items; int n; }      // array of structs-with-enum by value
+
+unit main() {
+    Tagged t = Tagged { id = 7, shape = Shape.Rect { w = 3, h = 4 } };
+    Pair p = classify(t.shape);
+    log(t.id);     // 7
+    log(p.a);      // 2
+    log(p.b);      // 12
+
+    Bag bag = Bag { items = [t; 4], n = 4 };
+    log(bag.items[0].id);   // 7
+}
