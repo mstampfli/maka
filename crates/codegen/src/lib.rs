@@ -8683,9 +8683,14 @@ impl<'a> Cx<'a> {
                         let a = self.emit_expr(f, &args[0]);
                         let b = self.emit_expr(f, &args[1]);
                         let body = self.emit_expr(f, &args[2]);
+                        // par_for_range runs the closure synchronously, so a fresh
+                        // capturing closure's env can be freed right after (its
+                        // malloc'd env would otherwise leak).  Only free when the
+                        // arg is a closure literal - never a borrowed fn-ptr value.
+                        let free_env = if matches!(&args[2].kind, HExprKind::Closure { .. }) { " free(__cb.env);" } else { "" };
                         return format!(
-                            "(__extension__ ({{ Callable_unit_int_ __cb = ({2}); (__maka_par_for_range((int64_t)({0}), (int64_t)({1}), __cb.code, __cb.env), MAKA_UNIT); }}))",
-                            a, b, body
+                            "(__extension__ ({{ Callable_unit_int_ __cb = ({2}); __maka_par_for_range((int64_t)({0}), (int64_t)({1}), __cb.code, __cb.env);{3} MAKA_UNIT; }}))",
+                            a, b, body, free_env
                         );
                     }
                     return "MAKA_UNIT".into();

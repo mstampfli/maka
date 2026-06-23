@@ -22,6 +22,7 @@ unit main() {
     int N = 16;
     wg_add(wg, N);
 
+    Vec<*Thread> ts = [];
     for (int i in 0..N) {
         *Thread t = spawn(unit() [a, mu, wg, o] {
             _ = atomic_add(a, 1);
@@ -31,10 +32,12 @@ unit main() {
             once_do(o, unit() { once_runs = once_runs + 1; });
             wg_done(wg);
         });
-        _ = t;
+        push(ts, t);
     }
 
     wg_wait(wg);
+    // Reap the spawned fibers so their Thread handles are freed.
+    for (*Thread t in ts) { join(t); }
     log(atomic_get(a));    // 16
     log(locked_counter);   // 16
     log(once_runs);        // 1
