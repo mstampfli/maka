@@ -1641,7 +1641,7 @@ impl<'a> TypeChecker<'a> {
             },
             HType::Heap { inner } => match inner.as_ref() {
                 HType::Struct(id) => *id,
-                _ => { self.err("field access on non-struct heap", sp); return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp }; }
+                _ => { self.err("field access on a non-struct `own &` value", sp); return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp }; }
             },
             HType::Ptr { .. } => {
                 self.err("dereference a `*T` with `!` before accessing fields", sp);

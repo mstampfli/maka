@@ -607,11 +607,11 @@ impl SymTab {
                 let mut fields = Vec::new();
                 for f in &d.fields {
                     let ty = resolve_type_in(&sym, &f.ty, &d.type_params, &mut errors);
-                    // Heap fields are forbidden except heap [*]T
+                    // `own &T` fields are forbidden except `own &[*]T` (vector payload).
                     if let HType::Heap { inner } = &ty {
                         if !matches!(inner.as_ref(), HType::Vec { .. }) {
                             errors.push(SemaError {
-                                msg: "`heap` modifier not allowed on struct fields (except `heap [*]T`)".into(),
+                                msg: "`own &T` is not allowed as a struct field (except `own &[*]T` for a vector payload); use `own *T` for an optional owned field".into(),
                                 span: f.span,
                             });
                         }
