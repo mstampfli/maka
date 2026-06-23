@@ -607,15 +607,10 @@ impl SymTab {
                 let mut fields = Vec::new();
                 for f in &d.fields {
                     let ty = resolve_type_in(&sym, &f.ty, &d.type_params, &mut errors);
-                    // `own &T` fields are forbidden except `own &[*]T` (vector payload).
-                    if let HType::Heap { inner } = &ty {
-                        if !matches!(inner.as_ref(), HType::Vec { .. }) {
-                            errors.push(SemaError {
-                                msg: "`own &T` is not allowed as a struct field (except `own &[*]T` for a vector payload); use `own *T` for an optional owned field".into(),
-                                span: f.span,
-                            });
-                        }
-                    }
+                    // `own &T` (strict, non-null owned) fields are allowed: struct
+                    // literals require every field to be initialized, so the
+                    // non-null invariant holds at construction, and the recursive
+                    // drop glue frees them when the container drops.
                     // References inside struct fields need to be initialized — checked at construction.
                     // Slices must be initialized at construction.
                     // Embed fields pass mutability through to their inner struct.

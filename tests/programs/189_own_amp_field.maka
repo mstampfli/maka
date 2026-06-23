@@ -1,0 +1,17 @@
+// `own &T` (strict, non-null) is allowed as a struct field: it must be given an
+// owned value at construction (struct literals require every field), needs no
+// `!` to access (non-null), and is freed recursively when the container drops.
+
+data Inner { mut int v; }
+data Outer { mut int tag; mut own &Inner child; }
+
+int getv(&Inner p) { return p.v; }
+
+unit main() {
+    own &Outer o = alloc Outer { tag = 7, child = alloc Inner { v = 42 } };
+    log(o.tag);            // 7
+    log(o.child.v);        // 42  (auto-deref, no `!`)
+    o.child.v = 100;
+    log(o.child.v);        // 100
+    log(getv(&o.child));   // 100 (borrow the owned field as &Inner)
+}
