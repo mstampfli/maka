@@ -46,6 +46,9 @@ struct Cx<'a> {
     fn_trampolines: std::collections::BTreeSet<u32>,
     /// Lifted-lambda function ids that need closure trampolines (env cast + call).
     closure_trampolines: std::collections::BTreeSet<u32>,
+    /// Names of struct/enum types that (transitively) own heap resources and so
+    /// get a generated `__maka_drop_<Name>` recursive-free function.
+    drop_owns: std::collections::HashSet<String>,
     /// Per-emission counter for inline expansions: each statement-expression gets
     /// a unique tag so labels and locals never collide across multiple call sites
     /// of the same inline within the same C function.
@@ -68,6 +71,7 @@ impl<'a> Cx<'a> {
             callable_sigs: Default::default(),
             fn_trampolines: Default::default(),
             closure_trampolines: Default::default(),
+            drop_owns: Default::default(),
             inline_call_seq: 0,
             freestanding: false,
         }
@@ -147,6 +151,11 @@ impl<'a> Cx<'a> {
             let init_str = self.emit_global_init(&g.init);
             self.wl(&format!("static {} {} = {};", cty, g.c_name, init_str));
         }
+
+        // Recursive drop glue for owning types, before any function body that
+        // might call it.
+        self.compute_drop_owns();
+        self.emit_drop_glue();
 
         // Function bodies
         for f in &funcs {
@@ -4521,6 +4530,154 @@ impl<'a> Cx<'a> {
         self.w("\n");
     }
 
+    /// Does a value of this type, by itself, own heap resources that must be
+    /// freed?  `own *T` / `own &T` own their pointee; structs/enums own if any
+    /// field/variant does; arrays own if their element does.
+    fn drop_ty_owns(&self, ty: &HType) -> bool {
+        match ty {
+            HType::OwnPtr { .. } | HType::Heap { .. } => true,
+            HType::Struct(id) => self.drop_owns.contains(&self.sym.struct_info(*id).name),
+            HType::Enum(id) => self.drop_owns.contains(&self.sym.enum_info(*id).name),
+            HType::Array { elem, .. } => self.drop_ty_owns(elem),
+            _ => false,
+        }
+    }
+
+    /// Fixpoint: mark every concrete struct/enum that transitively owns heap
+    /// resources.  Seeds on `own *T` / `own &T` fields, propagates through
+    /// by-value struct/enum/array fields.
+    fn compute_drop_owns(&mut self) {
+        let structs = self.sym.structs.clone();
+        let enums = self.sym.enums.clone();
+        loop {
+            let mut changed = false;
+            for s in &structs {
+                if !s.type_params.is_empty() || s.name == "Thread" { continue; }
+                if self.drop_owns.contains(&s.name) { continue; }
+                if s.fields.iter().any(|f| self.drop_ty_owns(&f.ty)) {
+                    self.drop_owns.insert(s.name.clone());
+                    changed = true;
+                }
+            }
+            for e in &enums {
+                if e.is_simple() || self.drop_owns.contains(&e.name) { continue; }
+                if e.variants.iter().any(|v| v.fields.iter().any(|f| self.drop_ty_owns(&f.ty))) {
+                    self.drop_owns.insert(e.name.clone());
+                    changed = true;
+                }
+            }
+            if !changed { break; }
+        }
+    }
+
+    /// Emit `__maka_drop_<Name>` for every owning struct/enum: recursively frees
+    /// the owned fields of `*p` (but not `p` itself).  Forward-declared first so
+    /// mutually recursive types resolve.
+    fn emit_drop_glue(&mut self) {
+        let structs: Vec<_> = self.sym.structs.iter()
+            .filter(|s| s.type_params.is_empty() && s.name != "Thread" && self.drop_owns.contains(&s.name))
+            .cloned().collect();
+        let enums: Vec<_> = self.sym.enums.iter()
+            .filter(|e| !e.is_simple() && self.drop_owns.contains(&e.name))
+            .cloned().collect();
+        if structs.is_empty() && enums.is_empty() { return; }
+        self.wl("/* ---- recursive drop glue ---- */");
+        for s in &structs { self.wl(&format!("static void __maka_drop_{0}(struct {0}* p);", c_ident(&s.name))); }
+        for e in &enums { self.wl(&format!("static void __maka_drop_{0}(struct {0}* p);", c_ident(&e.name))); }
+        for s in &structs {
+            self.wl(&format!("static void __maka_drop_{0}(struct {0}* p) {{", c_ident(&s.name)));
+            self.open();
+            for fld in &s.fields {
+                if !self.drop_ty_owns(&fld.ty) { continue; }
+                let lv = format!("p->{}", c_ident(&fld.name));
+                self.emit_field_drop(&lv, &fld.ty, 0);
+            }
+            self.close();
+            self.wl("}");
+        }
+        for e in &enums {
+            self.wl(&format!("static void __maka_drop_{0}(struct {0}* p) {{", c_ident(&e.name)));
+            self.open();
+            self.wl("switch (p->tag) {");
+            self.open();
+            for v in &e.variants {
+                if !v.fields.iter().any(|f| self.drop_ty_owns(&f.ty)) { continue; }
+                self.wl(&format!("case {}: {{", v.tag));
+                self.open();
+                for fld in &v.fields {
+                    if !self.drop_ty_owns(&fld.ty) { continue; }
+                    let lv = format!("p->payload.{}.{}", c_ident(&v.name), c_ident(&fld.name));
+                    self.emit_field_drop(&lv, &fld.ty, 0);
+                }
+                self.close();
+                self.wl("} break;");
+            }
+            self.close();
+            self.wl("}");
+            self.close();
+            self.wl("}");
+        }
+        self.wl("");
+    }
+
+    /// Emit statements that free what the owned lvalue `lv` (of type `ty`) holds,
+    /// including `lv` itself when it is an owning pointer.
+    fn emit_field_drop(&mut self, lv: &str, ty: &HType, depth: usize) {
+        match ty {
+            HType::OwnPtr { inner, .. } => {
+                self.wl(&format!("if ({}) {{", lv));
+                self.open();
+                self.emit_pointee_drop(lv, inner, depth);
+                self.wl(&format!("free({});", lv));
+                self.close();
+                self.wl("}");
+            }
+            HType::Heap { inner } => {
+                if matches!(inner.as_ref(), HType::Vec { .. }) {
+                    // `own &[*]T` owns a malloc'd buffer.  (Per-element drop for a
+                    // vector of owning elements is not yet generated.)
+                    self.wl(&format!("free({}.data);", lv));
+                } else {
+                    self.emit_pointee_drop(lv, inner, depth);
+                    self.wl(&format!("free({});", lv));
+                }
+            }
+            HType::Struct(id) if self.drop_ty_owns(ty) => {
+                self.wl(&format!("__maka_drop_{}(&({}));", c_ident(&self.sym.struct_info(*id).name), lv));
+            }
+            HType::Enum(id) if self.drop_ty_owns(ty) => {
+                self.wl(&format!("__maka_drop_{}(&({}));", c_ident(&self.sym.enum_info(*id).name), lv));
+            }
+            HType::Array { len, elem } if self.drop_ty_owns(elem) => {
+                let i = format!("__d{}", depth);
+                self.wl(&format!("for (maka_int {0} = 0; {0} < {1}; {0}++) {{", i, len));
+                self.open();
+                let elem_lv = format!("({})[{}]", lv, i);
+                self.emit_field_drop(&elem_lv, elem, depth + 1);
+                self.close();
+                self.wl("}");
+            }
+            _ => {}
+        }
+    }
+
+    /// Drop what the pointee owns, given `ptr` is a pointer to a value of
+    /// `pointee` type (does not free `ptr` itself).
+    fn emit_pointee_drop(&mut self, ptr: &str, pointee: &HType, depth: usize) {
+        match pointee {
+            HType::Struct(id) if self.drop_ty_owns(pointee) => {
+                self.wl(&format!("__maka_drop_{}({});", c_ident(&self.sym.struct_info(*id).name), ptr));
+            }
+            HType::Enum(id) if self.drop_ty_owns(pointee) => {
+                self.wl(&format!("__maka_drop_{}({});", c_ident(&self.sym.enum_info(*id).name), ptr));
+            }
+            HType::Array { .. } | HType::OwnPtr { .. } | HType::Heap { .. } if self.drop_ty_owns(pointee) => {
+                self.emit_field_drop(&format!("(*({}))", ptr), pointee, depth);
+            }
+            _ => {}
+        }
+    }
+
     /// Names of struct/enum types embedded BY VALUE in `ty` (directly or as an
     /// array element).  Pointer/ref/slice/vec fields are excluded - they only
     /// need a forward declaration, so they impose no definition ordering.
@@ -6844,14 +7001,12 @@ impl<'a> Cx<'a> {
         }
         // Free heap locals declared in this block (in reverse decl order).
         for id in &b.heap_to_free {
-            let li = &f.locals[id.0 as usize];
-            let n = local_name(*id, &li.name);
-            let is_vec = matches!(&li.ty, HType::Heap { inner } if matches!(inner.as_ref(), HType::Vec { .. }));
-            if is_vec {
-                self.wl(&format!("free({}.data); /* drop heap vec {} */", n, li.name));
-            } else {
-                self.wl(&format!("free({}); /* drop heap {} */", n, li.name));
-            }
+            let (n, ty, nm) = {
+                let li = &f.locals[id.0 as usize];
+                (local_name(*id, &li.name), li.ty.clone(), li.name.clone())
+            };
+            self.wl(&format!("/* drop heap {} */", nm));
+            self.emit_field_drop(&n, &ty, 0);
         }
         if !is_top { self.close(); self.wl("}"); }
     }
@@ -6867,14 +7022,12 @@ impl<'a> Cx<'a> {
             HStmt::Return { value, heap_drops, .. } => {
                 // Drop heap locals first.
                 for id in heap_drops {
-                    let li = &f.locals[id.0 as usize];
-                    let n = local_name(*id, &li.name);
-                    let is_vec = matches!(&li.ty, HType::Heap { inner } if matches!(inner.as_ref(), HType::Vec { .. }));
-                    if is_vec {
-                        self.wl(&format!("free({}.data); /* drop on return (vec) */", n));
-                    } else {
-                        self.wl(&format!("free({}); /* drop on return */", n));
-                    }
+                    let (n, ty) = {
+                        let li = &f.locals[id.0 as usize];
+                        (local_name(*id, &li.name), li.ty.clone())
+                    };
+                    self.wl("/* drop on return */");
+                    self.emit_field_drop(&n, &ty, 0);
                 }
                 match value {
                     Some(e) => {

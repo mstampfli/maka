@@ -1,0 +1,30 @@
+// Regression: a recursively-owning structure (here a tagged-enum AST whose
+// `Add` variant owns two `own *Expr` children) is now freed recursively when
+// the root drops.  Codegen generates `__maka_drop_Expr` drop glue; before this
+// fix only the root node was freed and every child leaked.  (Leak-freedom is
+// verified out of band with LeakSanitizer; this test pins the behavior.)
+
+enum Expr {
+    Lit { int v },
+    Add { own *Expr left, own *Expr right },
+}
+
+int eval(*Expr e) {
+    if (e == null) { return 0; }
+    return match (e!) {
+        Lit { v } v,
+        Add { left, right } eval(left) + eval(right),
+    };
+}
+
+unit main() {
+    own *Expr e = alloc Expr.Add {
+        left  = alloc Expr.Lit { v = 20 },
+        right = alloc Expr.Add {
+            left  = alloc Expr.Lit { v = 7 },
+            right = alloc Expr.Lit { v = 15 },
+        },
+    };
+    if (e != null) { log(eval(e)); }   // 42
+    // scope exit: __maka_drop_Expr(e) frees the whole tree, then free(e)
+}
