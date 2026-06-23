@@ -1,0 +1,18 @@
+// A read-only for-each over a pure value-struct aliases each element (`&elem[i]`)
+// instead of copying it.  If the body writes the element (or the source is
+// mutated), it falls back to a copy so value semantics are preserved.
+
+data P { mut int x; mut int y; }
+
+unit main() {
+    [3]P pts = [P { x = 1, y = 2 }, P { x = 3, y = 4 }, P { x = 5, y = 6 }];
+
+    mut int sum = 0;
+    for (P p in pts) { sum = sum + p.x + p.y; }   // read-only -> alias
+    log(sum);                                      // 21
+
+    mut int s2 = 0;
+    for (P p in pts) { p.x = 100; s2 = s2 + p.x; } // writes p.x -> copy
+    log(s2);                                        // 300
+    log(pts[0].x);                                 // 1  (source unchanged)
+}

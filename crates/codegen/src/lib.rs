@@ -58,6 +58,10 @@ struct Cx<'a> {
     /// Names of struct/enum types that (transitively) own heap resources and so
     /// get a generated `__maka_drop_<Name>` recursive-free function.
     drop_owns: std::collections::HashSet<String>,
+    /// Locals stored in C as a `T*` alias into existing storage (not a `T` value
+    /// copy) - a read-only for-each element bound to `&elem[i]`, or a by-ref
+    /// struct parameter.  Every use of such a local is emitted as `(*name)`.
+    aliased_locals: std::collections::HashSet<u32>,
     /// In-scope loop induction variables proven to stay within `[0, bound)` by a
     /// for-range loop guard - `(counter local id, bound)`.  Lets indexing skip
     /// the bounds check: a constant bound covers fixed arrays of length >= it; a
@@ -86,6 +90,7 @@ impl<'a> Cx<'a> {
             fn_trampolines: Default::default(),
             closure_trampolines: Default::default(),
             drop_owns: Default::default(),
+            aliased_locals: Default::default(),
             bounded_vars: Vec::new(),
             inline_call_seq: 0,
             freestanding: false,
@@ -7169,13 +7174,38 @@ impl<'a> Cx<'a> {
                         ("0".to_string(), src_c.clone())
                     }
                 };
-                self.wl(&format!("{} {} = {{0}};", var_ty, var_name));
-                self.wl(&format!("for (maka_int __i = 0; __i < {}; __i += 1) {{", len_str));
-                self.open();
-                self.wl(&format!("{} = {}[__i];", var_name, elem_access));
-                self.emit_block(f, body, true);
-                self.close();
-                self.wl("}");
+                // Alias the element (`T* x = &elem[i]`) instead of copying it
+                // (`T x = elem[i]`) when it's a pure value-struct the body only
+                // reads - avoids a per-iteration struct copy.  Safe only if: the
+                // element owns no heap (so a move can't double-free), the loop var
+                // isn't reassigned/`&mut`-borrowed, and the source isn't mutated
+                // (which could realloc the backing buffer mid-iteration).
+                let src_local_ok = match &src.kind {
+                    HExprKind::Local(s) => !block_mutates_local(body, s.0),
+                    _ => true,
+                };
+                let can_alias = matches!(&li.ty, HType::Struct(_))
+                    && !self.drop_ty_owns(&li.ty)
+                    && !block_mutates_local(body, var.0)
+                    && src_local_ok;
+                if can_alias {
+                    self.aliased_locals.insert(var.0);
+                    self.wl(&format!("for (maka_int __i = 0; __i < {}; __i += 1) {{", len_str));
+                    self.open();
+                    self.wl(&format!("{}* {} = &({}[__i]);", var_ty, var_name, elem_access));
+                    self.emit_block(f, body, true);
+                    self.close();
+                    self.wl("}");
+                    self.aliased_locals.remove(&var.0);
+                } else {
+                    self.wl(&format!("{} {} = {{0}};", var_ty, var_name));
+                    self.wl(&format!("for (maka_int __i = 0; __i < {}; __i += 1) {{", len_str));
+                    self.open();
+                    self.wl(&format!("{} = {}[__i];", var_name, elem_access));
+                    self.emit_block(f, body, true);
+                    self.close();
+                    self.wl("}");
+                }
                 self.close();
                 self.wl("}");
             }
@@ -7713,7 +7743,10 @@ impl<'a> Cx<'a> {
     /// Emit an lvalue suitable for the LHS of an assignment.
     fn emit_place(&mut self, f: &HFunc, e: &HExpr) -> String {
         match &e.kind {
-            HExprKind::Local(id) => local_name(*id, &f.locals[id.0 as usize].name),
+            HExprKind::Local(id) => {
+                let n = local_name(*id, &f.locals[id.0 as usize].name);
+                if self.aliased_locals.contains(&id.0) { format!("(*{})", n) } else { n }
+            }
             HExprKind::GlobalRef(gid) => self.sym.globals[gid.0 as usize].c_name.clone(),
             HExprKind::Field { base, field } => {
                 let base_s = self.emit_expr(f, base);
@@ -7824,7 +7857,10 @@ impl<'a> Cx<'a> {
             HExprKind::LitStr(s) => format!("\"{}\"", c_escape(s)),
             HExprKind::LitNull => "NULL".into(),
             HExprKind::LitUnit => "MAKA_UNIT".into(),
-            HExprKind::Local(id) => local_name(*id, &f.locals[id.0 as usize].name),
+            HExprKind::Local(id) => {
+                let n = local_name(*id, &f.locals[id.0 as usize].name);
+                if self.aliased_locals.contains(&id.0) { format!("(*{})", n) } else { n }
+            }
             HExprKind::GlobalRef(gid) => self.sym.globals[gid.0 as usize].c_name.clone(),
             HExprKind::CallIndirect { callee, args } => {
                 let c = self.emit_expr(f, callee);
@@ -9057,11 +9093,23 @@ fn block_mutates_local(b: &HBlock, iv: u32) -> bool {
     b.stmts.iter().any(|s| stmt_mutates_local(s, iv))
 }
 
+/// Is the place's root local `iv`?  Peels field/index/unwrap/deref, so `p`,
+/// `p.x`, `p.arr[i]`, `p!` all root at `p`.  Used to detect writes *through* iv.
+fn place_root_is(e: &HExpr, iv: u32) -> bool {
+    match &e.kind {
+        HExprKind::Local(id) => id.0 == iv,
+        HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => place_root_is(base, iv),
+        HExprKind::Unwrap { expr, .. } | HExprKind::DerefRef(expr) => place_root_is(expr, iv),
+        _ => false,
+    }
+}
+
 fn stmt_mutates_local(s: &HStmt, iv: u32) -> bool {
     match s {
         HStmt::Let { init, .. } => expr_mutates_local(init, iv),
         HStmt::Assign { place, value, .. } => {
-            matches!(&place.kind, HExprKind::Local(id) if id.0 == iv)
+            // A write to any place rooted at iv (iv itself, iv.field, iv.arr[j]).
+            place_root_is(place, iv)
                 || expr_mutates_local(place, iv) || expr_mutates_local(value, iv)
         }
         HStmt::ExprStmt(e) => expr_mutates_local(e, iv),
@@ -9086,7 +9134,7 @@ fn stmt_mutates_local(s: &HStmt, iv: u32) -> bool {
 fn expr_mutates_local(e: &HExpr, iv: u32) -> bool {
     match &e.kind {
         HExprKind::AddrOfRef { mutable, place } =>
-            (*mutable && matches!(&place.kind, HExprKind::Local(id) if id.0 == iv)) || expr_mutates_local(place, iv),
+            (*mutable && place_root_is(place, iv)) || expr_mutates_local(place, iv),
         HExprKind::Field { base, .. } => expr_mutates_local(base, iv),
         HExprKind::Index { base, idx } => expr_mutates_local(base, iv) || expr_mutates_local(idx, iv),
         HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } => args.iter().any(|a| expr_mutates_local(a, iv)),
