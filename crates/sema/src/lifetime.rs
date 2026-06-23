@@ -1423,7 +1423,13 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
             }
             HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => moved_locals_in_expr(sym, inner, out),
             HExprKind::FnRef(_) => {}
-            HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields { moved_locals_in_expr(sym, fe, out); },
+            // Aggregate literals MOVE an owning value into the new struct/variant/
+            // array (it now owns it), so the source must be marked moved - else it
+            // is freed at scope AND owned by the aggregate (double free).
+            HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields {
+                if ty_owns_heap(sym, &fe.ty) { if let HExprKind::Local(id) = fe.kind { out.insert(id); } }
+                moved_locals_in_expr(sym, fe, out);
+            },
             HExprKind::Match { scrutinee, arms, .. } => {
                 moved_locals_in_expr(sym, scrutinee, out);
                 for a in arms {
@@ -1431,8 +1437,14 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     if let Some(v) = &a.value { moved_locals_in_expr(sym, v, out); }
                 }
             }
-            HExprKind::Struct { fields, .. } => for (_, fe) in fields { moved_locals_in_expr(sym, fe, out); },
-            HExprKind::ArrayLit(es) => for e in es { moved_locals_in_expr(sym, e, out); },
+            HExprKind::Struct { fields, .. } => for (_, fe) in fields {
+                if ty_owns_heap(sym, &fe.ty) { if let HExprKind::Local(id) = fe.kind { out.insert(id); } }
+                moved_locals_in_expr(sym, fe, out);
+            },
+            HExprKind::ArrayLit(es) => for e in es {
+                if ty_owns_heap(sym, &e.ty) { if let HExprKind::Local(id) = e.kind { out.insert(id); } }
+                moved_locals_in_expr(sym, e, out);
+            },
             _ => {}
         }
     }
@@ -1462,11 +1474,15 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                         scope_chain.last_mut().unwrap().push(*local);
                     }
                 }
-                HStmt::Assign { value, .. } => {
+                HStmt::Assign { place, value, .. } => {
                     moved_locals_in_expr(sym, value, &mut moved);
                     if ty_owns_heap(sym, &value.ty) {
                         if let HExprKind::Local(id) = value.kind { moved.insert(id); }
                     }
+                    // The assigned-to local is redefined here, so it is live again -
+                    // even if its old value was just consumed into the RHS (e.g.
+                    // `x = Cons { tail = x }` or `left = Bin { l = left, ... }`).
+                    if let HExprKind::Local(id) = place.kind { moved.remove(&id); }
                 }
                 HStmt::ExprStmt(e) => {
                     moved_locals_in_expr(sym, e, &mut moved);
