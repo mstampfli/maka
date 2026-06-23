@@ -3717,7 +3717,9 @@ impl<'a> TypeChecker<'a> {
 
     fn check_cast(&mut self, expr: &ast::Expr, ty: &ast::Type, _checked: bool, sp: Span) -> HExpr {
         let h = self.check_expr(expr, None);
-        let to = resolve_type(self.sym, ty, &mut self.errors);
+        // Resolve the cast target with the current fn's type params + instantiation
+        // subst, so `x as *T` works inside a generic body (e.g. atomic pointer get).
+        let to = self.resolve_local_ty(ty);
 
         // `as dyn Trait` — special: produces a dyn fat pointer or `&dyn` / `&mut dyn`.
         if let HType::Dyn { traits } = &to {

@@ -1,0 +1,20 @@
+// AtomicPtr<T> — atomic pointer slot (store/load/cas a *T).
+import std.{AtomicPtr, atomic_ptr_new, atomic_ptr_get, atomic_ptr_set, atomic_ptr_compare_swap, atomic_ptr_destroy};
+data Node { int v; }
+unit main() {
+    mut Node a = { v = 10 };
+    mut Node b = { v = 20 };
+    *Node pa = &mut a;
+    *Node pb = &mut b;
+    AtomicPtr<Node> ap = atomic_ptr_new(pa);
+    *Node p = atomic_ptr_get(ap);
+    if (p != null) { log(p!.v); }          // 10
+    atomic_ptr_set(ap, pb);
+    *Node q = atomic_ptr_get(ap);
+    if (q != null) { log(q!.v); }          // 20
+    bool ok = atomic_ptr_compare_swap(ap, pb, pa);   // swap b->a
+    if (ok) { log(1); } else { log(0); }    // 1
+    *Node r = atomic_ptr_get(ap);
+    if (r != null) { log(r!.v); }          // 10
+    atomic_ptr_destroy(ap);
+}

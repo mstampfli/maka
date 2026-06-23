@@ -379,6 +379,25 @@ pub unit atomic_destroy<T>(Atomic<T> a)    where T has AtomicWord { __atomic_des
 // Fetch-and-add is integer arithmetic, so it is `Atomic<int>`-only.
 pub int  atomic_add(Atomic<int> a, int delta) { return __atomic_add_raw(a.h, delta); }
 
+// === AtomicPtr<T> — atomic for pointer types ===
+//
+// Stores a `*T`'s bits in the same i64 atomic cell.  It is a thin typed wrapper
+// rather than an `Atomic<*T>` because reconstructing a pointer from an integer
+// needs an `unsafe` reinterpret (the one op the lifetime pass can't track) -
+// kept hidden here; `*T -> int` is safe, only `int -> *T` is unsafe.  Lock-free
+// pointer slots (Treiber stacks, hand-over-hand lists, etc.) use this.
+pub data AtomicPtr<T> { *unit h; }
+pub AtomicPtr<T> atomic_ptr_new<T>(*T p) {
+    AtomicPtr<T> a = { h = __atomic_new_raw(p as int) };
+    return a;
+}
+pub *T   atomic_ptr_get<T>(AtomicPtr<T> a)        { unsafe { return __atomic_load_raw(a.h) as *T; } }
+pub unit atomic_ptr_set<T>(AtomicPtr<T> a, *T p)  { __atomic_store_raw(a.h, p as int); }
+pub bool atomic_ptr_compare_swap<T>(AtomicPtr<T> a, *T expected, *T desired) {
+    return __atomic_cas_raw(a.h, expected as int, desired as int) != 0;
+}
+pub unit atomic_ptr_destroy<T>(AtomicPtr<T> a)    { __atomic_destroy_raw(a.h); }
+
 // Byte-channel: variable-size items, set per channel via item_size.  Use
 // these to build typed channels in user code — wrap the *unit handle in a
 // `data MyTypeChan { *unit h }`, cast `&value as raw *mut unit` for send,
