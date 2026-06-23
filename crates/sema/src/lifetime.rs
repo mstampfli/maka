@@ -1329,7 +1329,7 @@ fn hoist_one(e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: &mut Vec<HStmt>) {
 /// Mirrors codegen's `drop_ty_owns`.  Owning pointers short-circuit, so
 /// recursive owning types (`data Node { own *Node next }`) terminate; a `seen`
 /// set guards against any pathological by-value cycle.
-fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
+pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
     fn go(sym: &SymTab, ty: &HType, seen: &mut Vec<u64>) -> bool {
         match ty {
             HType::Heap { .. } | HType::OwnPtr { .. } => true,

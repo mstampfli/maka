@@ -1,0 +1,48 @@
+// `yield` inside an `if`/`while`/nested block within a match arm must produce
+// the arm's value (not be discarded), and `if (..) {..} else {..}` works as an
+// expression.
+
+int classify(int n) {
+    return match (n) {
+        0 100,
+        else {
+            if (n > 0) {
+                if (n > 10) { yield 2; } else { yield 1; }
+            } else {
+                yield -1;
+            }
+        },
+    };
+}
+
+int sumto(int n) {
+    return match (n) {
+        0 0,
+        else {
+            mut int acc = 0;
+            mut int i = 1;
+            while (i <= n) { acc = acc + i; i = i + 1; }
+            yield acc;
+        },
+    };
+}
+
+int grade(int s) {
+    return if (s >= 90) { yield 4; }
+           else if (s >= 80) { yield 3; }
+           else if (s >= 70) { yield 2; }
+           else { yield 0; };
+}
+
+unit main() {
+    log(classify(0));
+    log(classify(5));
+    log(classify(50));
+    log(classify(-3));
+    log(sumto(0));
+    log(sumto(5));
+    log(grade(95));
+    log(grade(85));
+    log(grade(72));
+    log(grade(40));
+}

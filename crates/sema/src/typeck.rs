@@ -26,6 +26,11 @@ pub struct TypeChecker<'a> {
     /// variable annotations inside a generic body (e.g. `Vec<V> nv = [];`) can
     /// resolve the type vars.
     cur_type_params: Vec<String>,
+    /// Stack of `(synthetic local, type)` targets for `yield`.  When non-empty,
+    /// `yield e` lowers to `<top> = e` (assigning the enclosing match-arm /
+    /// if-expression result) instead of a discarded `ExprStmt` - so a `yield`
+    /// nested inside an `if`/`while`/block statement still produces the value.
+    yield_target: Vec<(LocalId, HType)>,
     /// Whether the current function is `inline` (governs `propagate` legality).
     cur_is_inline: bool,
     /// Dotted module path of the function currently being checked.  Used to enforce
@@ -270,6 +275,7 @@ impl<'a> TypeChecker<'a> {
             sync_probes: Vec::new(),
             cur_ret: HType::Unit,
             cur_type_params: Vec::new(),
+            yield_target: Vec::new(),
             cur_is_inline: false,
             cur_module: Vec::new(),
             cur_imports: Vec::new(),
@@ -466,13 +472,24 @@ impl<'a> TypeChecker<'a> {
             }
             ast::Stmt::Block(b) => HStmt::Block(self.check_block(b)),
             ast::Stmt::Match { scrutinee, arms, span } => {
-                let hm = self.check_match(scrutinee, arms, /*as_stmt=*/true, *span);
+                let hm = self.check_match(scrutinee, arms, /*as_stmt=*/true, *span, None);
                 HStmt::ExprStmt(hm)
             }
-            ast::Stmt::Yield(e, _) => {
-                // Treat yield as a normal value; the surrounding match captures it via HMatchArm.value.
-                let h = self.check_expr(e, None);
-                HStmt::ExprStmt(h)
+            ast::Stmt::Yield(e, span) => {
+                // If we're inside a value-producing block (a match arm or an
+                // if-expression branch), `yield` assigns the enclosing result
+                // target.  This makes a `yield` nested inside an `if`/`while`/
+                // block statement work, not just a trailing one.  Otherwise fall
+                // back to a plain expression statement (a trailing `yield` whose
+                // arm has no active target is captured by `extract_yield_value`).
+                if let Some((tgt, tgt_ty)) = self.yield_target.last().cloned() {
+                    let h = self.check_expr_coerce(e, &tgt_ty);
+                    let place = HExpr { kind: HExprKind::Local(tgt), ty: tgt_ty, span: *span };
+                    HStmt::Assign { op: HAssignOp::Assign, place, value: h, span: *span }
+                } else {
+                    let h = self.check_expr(e, None);
+                    HStmt::ExprStmt(h)
+                }
             }
             ast::Stmt::Propagate(opt_e, span) => {
                 if !self.cur_is_inline {
@@ -843,7 +860,7 @@ impl<'a> TypeChecker<'a> {
                 self.check_variant_ctor(enum_name, variant, fields, expected, *span)
             }
             ast::Expr::Match { scrutinee, arms, span } => {
-                self.check_match(scrutinee, arms, false, *span)
+                self.check_match(scrutinee, arms, false, *span, expected)
             }
             ast::Expr::Lambda { ret, params, captures, body, span } => {
                 // Lambdas with captures: synthesize an env struct + lifted fn here.
@@ -4340,7 +4357,7 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn check_match(&mut self, scrutinee: &ast::Expr, arms: &[ast::MatchArm], as_stmt: bool, sp: Span) -> HExpr {
+    fn check_match(&mut self, scrutinee: &ast::Expr, arms: &[ast::MatchArm], as_stmt: bool, sp: Span, expected: Option<&HType>) -> HExpr {
         let scrut_h = self.check_expr(scrutinee, None);
         let scrut_ty = scrut_h.ty.clone();
 
@@ -4373,11 +4390,36 @@ impl<'a> TypeChecker<'a> {
                     (block, Some(h))
                 }
                 ast::ArmBody::Block(b) => {
-                    let block = self.check_block(b);
-                    // Statement-form matches don't extract a value from the arm
-                    // body — extracting would double-emit the last stmt in codegen.
-                    let value = if as_stmt { None } else { self.extract_yield_value(&block) };
-                    (block, value)
+                    // When the arm's result type is known (from a prior arm or
+                    // the surrounding context) and is a plain non-owning value,
+                    // route `yield` through a synthetic result local.  This
+                    // captures yields nested inside `if`/`while`/block statements,
+                    // not just a trailing `yield` (which `extract_yield_value`
+                    // alone handles).  Owning results keep the old path: a
+                    // synthetic local would be freed at arm scope *and* flow out
+                    // as the value (double free), since a bare-local arm value is
+                    // not tracked as a move.
+                    let arm_ty = result_ty.clone().or_else(|| expected.cloned());
+                    let target = if as_stmt { None } else {
+                        arm_ty.as_ref()
+                            .filter(|t| !crate::lifetime::ty_owns_heap(self.sym, t))
+                            .and_then(|t| self.zero_expr(t, arm.span).map(|z| (t.clone(), z)))
+                    };
+                    if let Some((t, init)) = target {
+                        let yv = self.fresh_local("__yield".to_string(), t.clone(), StorageClass::Stack, true, true, arm.span);
+                        self.yield_target.push((yv, t.clone()));
+                        let mut block = self.check_block(b);
+                        self.yield_target.pop();
+                        block.stmts.insert(0, HStmt::Let { local: yv, init, span: arm.span });
+                        let value = HExpr { kind: HExprKind::Local(yv), ty: t, span: arm.span };
+                        (block, Some(value))
+                    } else {
+                        let block = self.check_block(b);
+                        // Statement-form matches don't extract a value from the
+                        // arm body — extracting would double-emit the last stmt.
+                        let value = if as_stmt { None } else { self.extract_yield_value(&block) };
+                        (block, value)
+                    }
                 }
             };
             if let Some(v) = &value {
@@ -4503,6 +4545,23 @@ impl<'a> TypeChecker<'a> {
                 (HArmKind::Else, None)
             }
         }
+    }
+
+    /// A zero/default initializer for `t`, used to declare the synthetic result
+    /// local of a value-producing match arm.  Returns `None` for types that have
+    /// no simple literal zero (enums, structs, arrays, refs, closures): those
+    /// keep the trailing-`yield` extraction path instead of a synthetic local.
+    fn zero_expr(&self, t: &HType, span: Span) -> Option<HExpr> {
+        let kind = match t {
+            HType::Int | HType::SizedInt { .. } => HExprKind::LitInt(0),
+            HType::Float | HType::SizedFloat { .. } => HExprKind::LitFloat(0.0),
+            HType::Bool => HExprKind::LitBool(false),
+            HType::Char => HExprKind::LitChar('\0'),
+            HType::Str => HExprKind::LitStr(String::new()),
+            HType::Ptr { .. } | HType::RawPtr { .. } => HExprKind::LitNull,
+            _ => return None,
+        };
+        Some(HExpr { kind, ty: t.clone(), span })
     }
 
     /// If a block has trailing `yield expr;` or expression-statement, extract that as the value.
