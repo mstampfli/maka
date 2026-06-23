@@ -1212,10 +1212,14 @@ impl Parser {
                             Err(_) => break false,
                         }
                         if self.eat(&TokKind::Comma) { continue; }
-                        if self.at(&TokKind::Gt) { break true; }
+                        // Closing `>` - or the first half of a `>>` that closes a
+                        // nested generic (`Vec<Vec<int>>`), lexed as one ShrOp.
+                        if self.at(&TokKind::Gt) || matches!(self.peek(), TokKind::ShrOp) { break true; }
                         break false;
                     };
-                    if ok && self.eat(&TokKind::Gt) {
+                    // `expect(Gt)` splits a ShrOp, consuming one `>` and leaving the
+                    // remainder as a Gt for the enclosing generic to close on.
+                    if ok && self.expect(&TokKind::Gt, "`>`").is_ok() {
                         Type::Generic { name, args, span: sp }
                     } else {
                         self.pos = save;
