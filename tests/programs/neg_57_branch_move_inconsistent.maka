@@ -1,0 +1,11 @@
+// A pre-existing owning local moved on only one (non-diverging) branch and used
+// after the `if` is a genuine inconsistency and must be rejected.
+data Box { int v; }
+int eat(own *Box b) { if (b == null) { return 0; } return b!.v; }
+int f(int c) {
+    own *Box x = alloc Box { v = 7 };
+    mut int r = 0;
+    if (c > 0) { r = eat(x); }
+    return r + eat(x);
+}
+unit main() { log(f(1)); }

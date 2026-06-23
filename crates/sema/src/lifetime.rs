@@ -680,8 +680,27 @@ impl<'a> Analyzer<'a> {
                 let else_state = self.snapshot();
 
                 // Join: a heap binding moved in both branches is moved after.
-                // Inconsistent move state is an error per §11.7.
-                self.join_branches(&then_state, &else_state, *span);
+                // Inconsistent move state is an error per §11.7 — but only for
+                // bindings that are *live at the join*.  A branch that always
+                // exits (return/break/continue/propagate/panic) never reaches the
+                // join, so its moves don't count; and a binding declared *inside*
+                // a branch is out of scope after the `if`, so its move state is
+                // irrelevant.  In-scope-at-the-if = enclosing scopes (`live_outer`)
+                // plus this block's locals declared before the `if`.
+                let then_exits = block_always_exits(then_b);
+                let else_exits = else_b.as_ref().map_or(false, |b| block_always_exits(b));
+                if then_exits && !else_exits {
+                    self.restore(else_state);
+                } else if else_exits && !then_exits {
+                    self.restore(then_state);
+                } else if then_exits && else_exits {
+                    // both diverge: code after the `if` is unreachable
+                    self.restore(else_state);
+                } else {
+                    let in_scope: std::collections::HashSet<u32> = live_outer.iter()
+                        .chain(declared_here.iter()).map(|l| l.0).collect();
+                    self.join_branches(&then_state, &else_state, *span, &in_scope);
+                }
             }
             HStmt::While { cond, body, span } => {
                 let _ = span;
@@ -1094,14 +1113,14 @@ impl<'a> Analyzer<'a> {
     fn snapshot(&self) -> Vec<LocalState> { self.state.clone() }
     fn restore(&mut self, s: Vec<LocalState>) { self.state = s; }
 
-    fn join_branches(&mut self, then_s: &[LocalState], else_s: &[LocalState], span: Span) {
+    fn join_branches(&mut self, then_s: &[LocalState], else_s: &[LocalState], span: Span, in_scope: &std::collections::HashSet<u32>) {
         let n = self.state.len();
         for i in 0..n {
             let li = &self.f().locals[i];
             if matches!(li.ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
                 let tm = then_s[i].moved;
                 let em = else_s[i].moved;
-                if tm != em {
+                if tm != em && in_scope.contains(&(i as u32)) {
                     self.err(format!("`{}` is moved on one branch but not the other", li.name), span);
                 }
                 self.state[i].moved = tm && em;
