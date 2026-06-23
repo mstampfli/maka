@@ -5262,12 +5262,19 @@ impl<'a> Cx<'a> {
     fn func_signature(&self, f: &HFunc) -> String {
         let ret = self.c_ret_type(&f.ret);
         let sig = self.sym.func_sig(f.id);
-        let mangled = if sig.name == "main" && sig.logic.is_none() {
+        let is_main = sig.name == "main" && sig.logic.is_none();
+        let mangled = if is_main {
             "maka_main".to_string()
         } else {
             c_ident(&sig.c_name)
         };
-        let mut out = format!("{} {}(", ret, mangled);
+        // Module-private functions get internal linkage: everything compiles to
+        // a single C translation unit, so non-`pub` functions are never referenced
+        // externally, and `static` lets the C compiler inline/optimize them freely
+        // (a large win for small hot helpers - vector math, etc.).  `main` stays
+        // external for the C entry shim; `pub` and `extern` are left external.
+        let linkage = if !sig.is_pub && !sig.is_extern && !is_main { "static " } else { "" };
+        let mut out = format!("{}{} {}(", linkage, ret, mangled);
         if f.params.is_empty() { out.push_str("void"); }
         else {
             let parts: Vec<String> = f.params.iter().map(|id| {

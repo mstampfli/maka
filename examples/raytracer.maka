@@ -116,7 +116,7 @@ data Sphere { V3 center; float radius; Material mat; }
 
 Sphere sphere(V3 c, float r, Material m) { return Sphere { center = c, radius = r, mat = m }; }
 
-bool hit_sphere(Sphere s, Ray r, float tmin, float tmax, &mut Hit rec) {
+bool hit_sphere(&Sphere s, Ray r, float tmin, float tmax, &mut Hit rec) {
     V3 oc = vsub(r.orig, s.center);
     float a = vdot(r.dir, r.dir);
     float half_b = vdot(oc, r.dir);
@@ -151,7 +151,7 @@ bool world_hit(&World w, Ray r, float tmin, float tmax, &mut Hit rec) {
     mut float closest = tmax;
     mut int i = 0;
     while (i < w.count) {
-        if (hit_sphere(w.objs[i], r, tmin, closest, rec)) {
+        if (hit_sphere(&w.objs[i], r, tmin, closest, rec)) {
             hit_any = true;
             closest = rec.t;
         }
