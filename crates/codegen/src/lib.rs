@@ -8619,9 +8619,12 @@ impl<'a> Cx<'a> {
                             let key = self.type_key(elem);
                             let elem_c = self.c_type(elem);
                             let n = elems.len();
-                            // Use a static initializer + memcpy via compound literal isn't trivial in C; we use malloc+copy.
-                            // Emit a comma expression. We can't easily here. Fall back to using a local helper inline via stmt-expr (gcc/clang extension).
-                            format!("(__extension__ ({{ {0}* __d = ({0}*)malloc(sizeof({0})*{1}); {0} __s[] = {{ {2} }}; memcpy(__d, __s, sizeof(__s)); (Vec_{3}){{ .data = __d, .len = {1}, .cap = {1} }}; }}))", elem_c, n, parts.join(", "), key)
+                            // Write elements straight into the malloc'd buffer - no
+                            // intermediate stack array + memcpy (gcc can't fuse that,
+                            // since it can't prove __d doesn't alias the temp).
+                            let stores: String = parts.iter().enumerate()
+                                .map(|(i, p)| format!("__d[{}] = {}; ", i, p)).collect();
+                            format!("(__extension__ ({{ {0}* __d = ({0}*)malloc(sizeof({0})*{1}); {2}(Vec_{3}){{ .data = __d, .len = {1}, .cap = {1} }}; }}))", elem_c, n, stores, key)
                         }
                     }
                     _ => format!("{{ {} }}", parts.join(", ")),
