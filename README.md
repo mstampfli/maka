@@ -134,7 +134,8 @@ crates/
   codegen/      C emission
   driver/       CLI: makac
 stdlib/
-  std.maka      real Maka source for the stdlib (Option, Result, str_*),
+  std.maka      real Maka source for the stdlib (Option, Result, str_*,
+                Vec<T>, HashMap<V>, Atomic<T>, file I/O, concurrency),
                 embedded into the compiler at build time via include_str!
 tests/
   programs/     end-to-end .maka tests with .expected output
@@ -186,18 +187,18 @@ bash tests/run_neg.sh        # negative suite, every neg_*.maka must reject
 
 ## Status
 
-Early but real. Positive suite passes 183 programs; negative suite passes 57.
+Early but real. Positive suite passes 202 programs; negative suite passes 57.
 The language is implemented in Rust as a workspace; the generated C builds
 cleanly with modern gcc/clang (including gcc 14, which treats implicit
-declarations and void value-returns as hard errors).
+declarations and void value-returns as hard errors), and the whole test corpus
+is LeakSanitizer-clean.  The stdlib has generic `Vec<T>` / `HashMap<V>` /
+`Atomic<T>`, whole-file I/O, and a fiber/thread concurrency stack.
 
 What's intentionally *not* in v1, but is on the road:
 
 - Auto-borrow at method calls (today: `(&p).method()` when the method's
   receiver is `&_ self`, since dispatch matches receiver type exactly).
 - `Attr.method(x)` qualified-call form.
-- A `format(...)` for typed string interpolation.
-- File I/O beyond stdin/stdout.
 
 ## License
 
