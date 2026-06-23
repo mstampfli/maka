@@ -1523,6 +1523,20 @@ impl<'a> TypeChecker<'a> {
                 };
                 (deref, (**inner).clone())
             }
+            // `own &T` is a non-null pointer to a heap T.  Borrowing the binding
+            // borrows the pointee, yielding `&T`/`&mut T` whose runtime value is
+            // the owner's pointer itself (emitted as `&(*owner)` == owner), not
+            // the address of the local that holds it.  This makes heap-owned
+            // values usable with ordinary `&T`/`&mut T` functions, exactly like
+            // stack values - there is no distinct "borrow of a heap thing".
+            HType::Heap { inner } if !matches!(**inner, HType::Dyn { .. } | HType::Slice { .. }) => {
+                let deref = HExpr {
+                    kind: HExprKind::DerefRef(Box::new(h.clone())),
+                    ty: (**inner).clone(),
+                    span: sp,
+                };
+                (deref, (**inner).clone())
+            }
             _ => (h.clone(), h.ty.clone()),
         };
         // If expected is a pointer, produce a pointer.
@@ -5013,7 +5027,7 @@ pub fn type_str(t: &HType) -> String {
         HType::Ptr { mutable, inner } => format!("*{}{}", if *mutable {""} else {"const "}, type_str(inner)),
         HType::RawPtr { mutable, inner } => format!("raw *{}{}", if *mutable {""} else {"const "}, type_str(inner)),
         HType::OwnPtr { mutable, inner } => format!("own *{}{}", if *mutable {""} else {"const "}, type_str(inner)),
-        HType::Heap { inner } => format!("heap {}", type_str(inner)),
+        HType::Heap { inner } => format!("own &{}", type_str(inner)),
         HType::Array { len, elem } => format!("[{}]{}", len, type_str(elem)),
         HType::Slice { mutable, elem } => format!("[]{}{}", if *mutable {"mut "} else {""}, type_str(elem)),
         HType::Vec { elem } => format!("[*]{}", type_str(elem)),

@@ -1,0 +1,18 @@
+// Regression: a heap-owned binding can be borrowed into ordinary `&T`/`&mut T`
+// functions.  `&owner` borrows the pointee (the owner already is a pointer to
+// it), so `own &T` composes with the normal borrow convention - there is no
+// separate "borrow of a heap thing".
+
+data P { mut int x; }
+
+unit bump(&mut P p) { p.x = p.x + 1; }
+int getx(&P p) { return p.x; }
+
+unit main() {
+    own &P q = alloc P { x = 41 };
+    bump(&mut q);          // own &P  borrowed as &mut P
+    log(getx(&q));         // own &P  borrowed as &P    -> 42
+
+    own *P r = alloc P { x = 9 };
+    log(getx(&(r!)));      // own *P pointee (proven non-null) as &P -> 9
+}

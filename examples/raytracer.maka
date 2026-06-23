@@ -227,8 +227,8 @@ int to_byte(float c) {
     return (g * 255.99) as int;
 }
 
-World build_world() {
-    mut World w = World {
+own &World build_world() {
+    own &World w = alloc World {
         count = 0,
         objs = [sphere(vec(0.0, 0.0, 0.0), 0.0, Material.Lambertian { albedo = vec(0.0, 0.0, 0.0) }); 16]
     };
@@ -240,7 +240,9 @@ World build_world() {
 }
 
 unit main() {
-    World world = build_world();
+    // The scene is heap-owned (`own &World`) and auto-freed at scope exit;
+    // it is borrowed into the render functions as a plain `&World`.
+    own &World world = build_world();
 
     // simple camera
     float aspect = (WIDTH as float) / (HEIGHT as float);
