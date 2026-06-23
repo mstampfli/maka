@@ -8790,11 +8790,35 @@ impl<'a> Cx<'a> {
                     "maka_main".to_string()
                 } else { c_ident(&sig.c_name) };
                 let arg_s: Vec<String> = args.iter().map(|a| self.emit_expr(f, a)).collect();
-                let call = format!("{}({})", name, arg_s.join(", "));
-                if matches!(sig.ret, HType::Unit) {
-                    format!("({}, MAKA_UNIT)", call)
+                // A capturing closure LITERAL passed to a consume-only FnPtr param
+                // is a one-shot temp the callee only calls (never stores), so its
+                // malloc'd env can be freed right after the call returns.
+                let consume = self.sym.funcs.iter().find(|hf| hf.id == *callee)
+                    .map(consume_only_fnptr_params).unwrap_or_default();
+                let frees: Vec<usize> = args.iter().enumerate().filter(|(i, a)|
+                    consume.get(*i).copied().unwrap_or(false)
+                    && matches!(&a.kind, HExprKind::Closure { env_values, .. } if !env_values.is_empty())
+                ).map(|(i, _)| i).collect();
+                if frees.is_empty() {
+                    let call = format!("{}({})", name, arg_s.join(", "));
+                    if matches!(sig.ret, HType::Unit) { format!("({}, MAKA_UNIT)", call) } else { call }
                 } else {
-                    call
+                    let mut decls = String::new();
+                    let mut free_s = String::new();
+                    let cargs: Vec<String> = arg_s.iter().enumerate().map(|(i, s)| {
+                        if frees.contains(&i) {
+                            let tn = format!("__cca{}", i);
+                            decls.push_str(&format!("{} {} = {}; ", self.c_type(&args[i].ty), tn, s));
+                            free_s.push_str(&format!("free({}.env); ", tn));
+                            tn
+                        } else { s.clone() }
+                    }).collect();
+                    let call = format!("{}({})", name, cargs.join(", "));
+                    if matches!(sig.ret, HType::Unit) {
+                        format!("(__extension__ ({{ {}{}; {}MAKA_UNIT; }}))", decls, call, free_s)
+                    } else {
+                        format!("(__extension__ ({{ {}{} __r = {}; {}__r; }}))", decls, self.c_type(&sig.ret), call, free_s)
+                    }
                 }
             }
             HExprKind::Cast { expr, kind, to } => {

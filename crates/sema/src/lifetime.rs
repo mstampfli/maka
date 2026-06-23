@@ -1558,6 +1558,24 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
     }
 }
 
+/// For each parameter of `f`, whether it is a `FnPtr` that is "consume-only" -
+/// it appears in the body solely as the target of an indirect call (`p(...)`),
+/// never stored, returned, aliased, or re-passed.  Such a function can safely
+/// free a *one-shot* closure-literal argument's env after the call returns (the
+/// callee does not retain it).  Used by codegen to free `apply(<closure>)` envs.
+pub fn consume_only_fnptr_params(f: &HFunc) -> Vec<bool> {
+    let mut cands: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+    let mut fnptr: Vec<(LocalId, bool)> = Vec::new();
+    for &pid in &f.params {
+        let is_fp = matches!(f.locals[pid.0 as usize].ty, HType::FnPtr { .. });
+        fnptr.push((pid, is_fp));
+        if is_fp { cands.insert(pid); }
+    }
+    let mut escaped: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+    if !cands.is_empty() { mark_closure_escapes_block(&f.body, &cands, &mut escaped); }
+    fnptr.iter().map(|(pid, is_fp)| *is_fp && !escaped.contains(pid)).collect()
+}
+
 /// Locals bound directly to a capturing closure literal (`let f = ...[caps]...;`).
 fn collect_closure_cands(b: &HBlock, locals: &[LocalInfo], out: &mut std::collections::HashSet<LocalId>) {
     for s in &b.stmts {

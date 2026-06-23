@@ -7,6 +7,7 @@ pub mod hir;
 mod resolve;
 mod typeck;
 mod lifetime;
+pub use lifetime::consume_only_fnptr_params;
 
 pub use hir::*;
 pub use resolve::*;
