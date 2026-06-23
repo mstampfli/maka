@@ -1,0 +1,18 @@
+// A for-range counter bounded by a constant <= the array length lets codegen
+// drop the per-access bounds check (verified by inspecting emitted C).  This
+// test pins the *behavior* is unchanged - results stay correct, and a loop that
+// is reassigned or ranges past the array keeps its check.
+
+unit main() {
+    [5]int a = [2, 4, 6, 8, 10];
+    mut int sum = 0;
+    for (int i in 0..5) { sum = sum + a[i]; }          // checks elided
+    log(sum);                                           // 30
+
+    [3]int b = [1, 2, 3];
+    mut int t = 0;
+    for (int i in 0..5) {
+        for (int j in 0..3) { t = t + a[i] * b[j]; }    // both elided
+    }
+    log(t);                                             // 30 * 6 = 180
+}

@@ -49,6 +49,10 @@ struct Cx<'a> {
     /// Names of struct/enum types that (transitively) own heap resources and so
     /// get a generated `__maka_drop_<Name>` recursive-free function.
     drop_owns: std::collections::HashSet<String>,
+    /// In-scope loop induction variables proven to stay within `[0, bound)` by a
+    /// for-range loop guard - `(local id, exclusive upper bound)`.  Indexing a
+    /// fixed array of length >= bound with such a variable needs no bounds check.
+    bounded_vars: Vec<(u32, i64)>,
     /// Per-emission counter for inline expansions: each statement-expression gets
     /// a unique tag so labels and locals never collide across multiple call sites
     /// of the same inline within the same C function.
@@ -72,6 +76,7 @@ impl<'a> Cx<'a> {
             fn_trampolines: Default::default(),
             closure_trampolines: Default::default(),
             drop_owns: Default::default(),
+            bounded_vars: Vec::new(),
             inline_call_seq: 0,
             freestanding: false,
         }
@@ -7105,7 +7110,12 @@ impl<'a> Cx<'a> {
                 let step_text = self.emit_step_expr(f, step);
                 self.wl(&format!("for (; {}; {}) {{", cs, step_text));
                 self.open();
+                // If this is a for-range counter provably within `[0, bound)`,
+                // record it so array indexing in the body skips the bounds check.
+                let bounded = forrange_bound(init, cond, body);
+                if let Some(b) = bounded { self.bounded_vars.push(b); }
                 self.emit_block(f, body, true);
+                if bounded.is_some() { self.bounded_vars.pop(); }
                 self.close();
                 self.wl("}");
             }
@@ -7332,7 +7342,10 @@ impl<'a> Cx<'a> {
                     _ => "(void)0".into(),
                 };
                 s.push_str(&format!("for (; {}; {}) {{ ", cs, step_text));
+                let bounded = forrange_bound(init, cond, body);
+                if let Some(b) = bounded { self.bounded_vars.push(b); }
                 for st in &body.stmts { s.push_str(&self.emit_inline_stmt(inline_f, st, tag, result_ty)); }
+                if bounded.is_some() { self.bounded_vars.pop(); }
                 s.push_str("} ");
                 s
             }
@@ -7377,7 +7390,7 @@ impl<'a> Cx<'a> {
             HExprKind::Index { base, idx } => {
                 let bs = self.emit_inline_expr(inline_f, base, tag);
                 let is_ = self.emit_inline_expr(inline_f, idx, tag);
-                self.index_access(inline_f, base, &bs, &is_)
+                self.index_access(inline_f, base, idx, &bs, &is_)
             }
             HExprKind::DerefRef(inner) => {
                 let s = self.emit_inline_expr(inline_f, inner, tag);
@@ -7574,7 +7587,7 @@ impl<'a> Cx<'a> {
             HExprKind::Index { base, idx } => {
                 let bs = self.emit_inline_expr(inline_f, base, tag);
                 let is_ = self.emit_inline_expr(inline_f, idx, tag);
-                self.index_access(inline_f, base, &bs, &is_)
+                self.index_access(inline_f, base, idx, &bs, &is_)
             }
             HExprKind::Unwrap { expr, skip_check: _ } => {
                 let s = self.emit_inline_expr(inline_f, expr, tag);
@@ -7675,7 +7688,7 @@ impl<'a> Cx<'a> {
             HExprKind::Index { base, idx } => {
                 let base_s = self.emit_expr(f, base);
                 let idx_s = self.emit_expr(f, idx);
-                self.index_access(f, base, &base_s, &idx_s)
+                self.index_access(f, base, idx, &base_s, &idx_s)
             }
             HExprKind::Unwrap { expr, skip_check: _ } => {
                 let inner = self.emit_expr(f, expr);
@@ -7704,10 +7717,27 @@ impl<'a> Cx<'a> {
         (arrow, fname)
     }
 
-    fn index_access(&self, _f: &HFunc, base: &HExpr, base_s: &str, idx_s: &str) -> String {
+    /// Can the access `base[idx]` be proven in-bounds at compile time, so the
+    /// runtime check is unnecessary?  Only fixed arrays (static length) qualify:
+    /// a constant index in range, or a for-range loop counter whose guard keeps
+    /// it within `[0, bound)` with `bound <= len`.  (Slices/vectors have runtime
+    /// length, so they are never elided.)
+    fn index_proven_safe(&self, len: i64, idx: &HExpr) -> bool {
+        match &idx.kind {
+            HExprKind::LitInt(n) => *n >= 0 && *n < len,
+            HExprKind::Local(id) => self.bounded_vars.iter().any(|(lid, ub)| *lid == id.0 && *ub <= len),
+            _ => false,
+        }
+    }
+
+    fn index_access(&self, _f: &HFunc, base: &HExpr, idx: &HExpr, base_s: &str, idx_s: &str) -> String {
         match &base.ty {
             HType::Array { len, .. } => {
-                format!("(({})[maka_check_idx((maka_int)({}), (maka_int){}, \"array idx\")])", base_s, idx_s, len)
+                if self.index_proven_safe(*len, idx) {
+                    format!("(({})[(maka_int)({})])", base_s, idx_s)
+                } else {
+                    format!("(({})[maka_check_idx((maka_int)({}), (maka_int){}, \"array idx\")])", base_s, idx_s, len)
+                }
             }
             HType::Slice { .. } => {
                 format!("(({}).ptr[maka_check_idx((maka_int)({}), ({}).len, \"slice idx\")])", base_s, idx_s, base_s)
@@ -7716,7 +7746,13 @@ impl<'a> Cx<'a> {
                 format!("(({}).data[maka_check_idx((maka_int)({}), ({}).len, \"vec idx\")])", base_s, idx_s, base_s)
             }
             HType::Heap { inner } => match inner.as_ref() {
-                HType::Array { len, .. } => format!("((*{})[maka_check_idx((maka_int)({}), (maka_int){}, \"array idx\")])", base_s, idx_s, len),
+                HType::Array { len, .. } => {
+                    if self.index_proven_safe(*len, idx) {
+                        format!("((*{})[(maka_int)({})])", base_s, idx_s)
+                    } else {
+                        format!("((*{})[maka_check_idx((maka_int)({}), (maka_int){}, \"array idx\")])", base_s, idx_s, len)
+                    }
+                }
                 // heap [*]T: base is Vec_T (no deref)
                 HType::Vec { .. } => format!("(({}).data[maka_check_idx((maka_int)({}), ({}).len, \"vec idx\")])", base_s, idx_s, base_s),
                 _ => format!("(({})[{}])", base_s, idx_s),
@@ -7877,7 +7913,7 @@ impl<'a> Cx<'a> {
             HExprKind::Index { base, idx } => {
                 let bs = self.emit_expr(f, base);
                 let is_ = self.emit_expr(f, idx);
-                self.index_access(f, base, &bs, &is_)
+                self.index_access(f, base, idx, &bs, &is_)
             }
             HExprKind::Call { callee, args } => {
                 // Built-in `panic(msg)`.
@@ -8829,6 +8865,101 @@ impl<'a> Cx<'a> {
         }
     }
 
+}
+
+/// If a `ForC` is a for-range counter provably within `[0, bound)` whose counter
+/// is never mutated in the body, return `(local id, exclusive bound)`.  Used to
+/// elide array bounds checks on `arr[i]` when `bound <= array length`.
+fn forrange_bound(init: &HStmt, cond: &HExpr, body: &HBlock) -> Option<(u32, i64)> {
+    // init: `Let { local: iv, init: LitInt(lo) }` with lo >= 0
+    let iv = match init {
+        HStmt::Let { local, init, .. } => match &init.kind {
+            HExprKind::LitInt(n) if *n >= 0 => local.0,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    // cond: `Local(iv) < LitInt(hi)` (bound hi) or `Local(iv) <= LitInt(hi)` (bound hi+1)
+    let upper = match &cond.kind {
+        HExprKind::Bin { op, lhs, rhs } => {
+            if !matches!(&lhs.kind, HExprKind::Local(id) if id.0 == iv) { return None; }
+            match (op, &rhs.kind) {
+                (HBinOp::Lt, HExprKind::LitInt(b)) => *b,
+                (HBinOp::Le, HExprKind::LitInt(b)) => b.checked_add(1)?,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    if upper < 0 { return None; }
+    // The counter must not be reassigned or `&mut`-borrowed in the body, or the
+    // `[0, bound)` guarantee is void (e.g. `for i in 0..3 { i = 10; arr[i] }`).
+    if block_mutates_local(body, iv) { return None; }
+    Some((iv, upper))
+}
+
+fn block_mutates_local(b: &HBlock, iv: u32) -> bool {
+    b.stmts.iter().any(|s| stmt_mutates_local(s, iv))
+}
+
+fn stmt_mutates_local(s: &HStmt, iv: u32) -> bool {
+    match s {
+        HStmt::Let { init, .. } => expr_mutates_local(init, iv),
+        HStmt::Assign { place, value, .. } => {
+            matches!(&place.kind, HExprKind::Local(id) if id.0 == iv)
+                || expr_mutates_local(place, iv) || expr_mutates_local(value, iv)
+        }
+        HStmt::ExprStmt(e) => expr_mutates_local(e, iv),
+        HStmt::Return { value, .. } => value.as_ref().map_or(false, |v| expr_mutates_local(v, iv)),
+        HStmt::Propagate { value, .. } => value.as_ref().map_or(false, |v| expr_mutates_local(v, iv)),
+        HStmt::If { cond, then_b, else_b, .. } => {
+            expr_mutates_local(cond, iv) || block_mutates_local(then_b, iv)
+                || else_b.as_ref().map_or(false, |b| block_mutates_local(b, iv))
+        }
+        HStmt::While { cond, body, .. } => expr_mutates_local(cond, iv) || block_mutates_local(body, iv),
+        HStmt::Block(b) | HStmt::Unsafe(b, _) => block_mutates_local(b, iv),
+        HStmt::ForC { init, cond, step, body, .. } =>
+            stmt_mutates_local(init, iv) || expr_mutates_local(cond, iv)
+                || stmt_mutates_local(step, iv) || block_mutates_local(body, iv),
+        HStmt::ForEach { src, body, .. } => expr_mutates_local(src, iv) || block_mutates_local(body, iv),
+        HStmt::Break(_) | HStmt::Continue(_) => false,
+    }
+}
+
+/// Conservatively, does `e` reassign or `&mut`-borrow local `iv`?  Exhaustive
+/// (no wildcard) so a new HExpr variant forces an explicit decision here.
+fn expr_mutates_local(e: &HExpr, iv: u32) -> bool {
+    match &e.kind {
+        HExprKind::AddrOfRef { mutable, place } =>
+            (*mutable && matches!(&place.kind, HExprKind::Local(id) if id.0 == iv)) || expr_mutates_local(place, iv),
+        HExprKind::Field { base, .. } => expr_mutates_local(base, iv),
+        HExprKind::Index { base, idx } => expr_mutates_local(base, iv) || expr_mutates_local(idx, iv),
+        HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } => args.iter().any(|a| expr_mutates_local(a, iv)),
+        HExprKind::CallIndirect { callee, args } => expr_mutates_local(callee, iv) || args.iter().any(|a| expr_mutates_local(a, iv)),
+        HExprKind::Bin { lhs, rhs, .. } => expr_mutates_local(lhs, iv) || expr_mutates_local(rhs, iv),
+        HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. }
+        | HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. } => expr_mutates_local(expr, iv),
+        HExprKind::DropWrite(e) | HExprKind::DerefRef(e) | HExprKind::HeapAlloc(e)
+        | HExprKind::Free(e) | HExprKind::Transfer(e) | HExprKind::SliceLen(e)
+        | HExprKind::EnumTag(e) => expr_mutates_local(e, iv),
+        HExprKind::ArrayToSlice { base, .. } => expr_mutates_local(base, iv),
+        HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } =>
+            fields.iter().any(|(_, fe)| expr_mutates_local(fe, iv)),
+        HExprKind::ArrayLit(es) => es.iter().any(|x| expr_mutates_local(x, iv)),
+        HExprKind::Closure { env_values, .. } => env_values.iter().any(|x| expr_mutates_local(x, iv)),
+        HExprKind::Match { scrutinee, arms, .. } => {
+            expr_mutates_local(scrutinee, iv)
+                || arms.iter().any(|a|
+                    a.guard.as_ref().map_or(false, |g| expr_mutates_local(g, iv))
+                    || a.value.as_ref().map_or(false, |v| expr_mutates_local(v, iv))
+                    || block_mutates_local(&a.body, iv))
+        }
+        // No sub-expressions: cannot mutate anything.
+        HExprKind::LitInt(_) | HExprKind::LitFloat(_) | HExprKind::LitBool(_)
+        | HExprKind::LitChar(_) | HExprKind::LitStr(_) | HExprKind::LitNull
+        | HExprKind::LitUnit | HExprKind::Local(_) | HExprKind::EnumVariant(_, _)
+        | HExprKind::FnRef(_) | HExprKind::GlobalRef(_) => false,
+    }
 }
 
 fn binop_c(op: HBinOp) -> &'static str {

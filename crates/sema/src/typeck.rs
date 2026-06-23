@@ -4088,40 +4088,49 @@ impl<'a> TypeChecker<'a> {
         let id_var = self.fresh_local(var_name.to_string(), declared.clone(), StorageClass::Stack, true, true, sp);
         self.bind_name(var_name, id_var);
         let end_h = self.check_expr_coerce(end, &declared);
-        let id_end = self.fresh_local("__end".to_string(), declared.clone(), StorageClass::Stack, true, true, sp);
-
         let var_expr = HExpr { kind: HExprKind::Local(id_var), ty: declared.clone(), span: sp };
-        let end_expr = HExpr { kind: HExprKind::Local(id_end), ty: declared.clone(), span: sp };
         let op = if inclusive { HBinOp::Le } else { HBinOp::Lt };
-        let cond = HExpr {
-            kind: HExprKind::Bin { op, lhs: Box::new(var_expr.clone()), rhs: Box::new(end_expr) },
-            ty: HType::Bool, span: sp,
-        };
         let one = HExpr { kind: HExprKind::LitInt(1), ty: HType::Int, span: sp };
         let plus = HExpr {
             kind: HExprKind::Bin { op: HBinOp::Add, lhs: Box::new(var_expr.clone()), rhs: Box::new(one) },
             ty: declared.clone(), span: sp,
         };
-        let step = HStmt::Assign {
-            op: HAssignOp::Assign,
-            place: var_expr,
-            value: plus,
-            span: sp,
-        };
+        let step = HStmt::Assign { op: HAssignOp::Assign, place: var_expr.clone(), value: plus, span: sp };
+
+        // A compile-time-constant end is inlined directly into the condition
+        // (`i < N`) rather than hoisted into a `__end` local.  This lets codegen
+        // recognize the counted-loop bound and drop array bounds checks on
+        // `arr[i]` when `N <= len`; it also avoids an extra local.
+        let const_bound = matches!(end_h.kind, HExprKind::LitInt(_));
 
         let body_h = self.check_block(body);
         self.leave_scope();
-        // Wrap: { let __end = end; for (i = start; i op __end; i += 1) body }
         let init = HStmt::Let { local: id_var, init: start_h, span: sp };
-        HStmt::Block(HBlock {
-            stmts: vec![
-                HStmt::Let { local: id_end, init: end_h, span: sp },
-                HStmt::ForC { init: Box::new(init), cond, step: Box::new(step), body: body_h, span: sp },
-            ],
-            heap_to_free: Vec::new(),
-            ptr_nulls: Vec::new(),
-            span: sp,
-        })
+
+        if const_bound {
+            let cond = HExpr {
+                kind: HExprKind::Bin { op, lhs: Box::new(var_expr.clone()), rhs: Box::new(end_h) },
+                ty: HType::Bool, span: sp,
+            };
+            HStmt::ForC { init: Box::new(init), cond, step: Box::new(step), body: body_h, span: sp }
+        } else {
+            let id_end = self.fresh_local("__end".to_string(), declared.clone(), StorageClass::Stack, true, true, sp);
+            let end_expr = HExpr { kind: HExprKind::Local(id_end), ty: declared.clone(), span: sp };
+            let cond = HExpr {
+                kind: HExprKind::Bin { op, lhs: Box::new(var_expr.clone()), rhs: Box::new(end_expr) },
+                ty: HType::Bool, span: sp,
+            };
+            // Wrap: { let __end = end; for (i = start; i op __end; i += 1) body }
+            HStmt::Block(HBlock {
+                stmts: vec![
+                    HStmt::Let { local: id_end, init: end_h, span: sp },
+                    HStmt::ForC { init: Box::new(init), cond, step: Box::new(step), body: body_h, span: sp },
+                ],
+                heap_to_free: Vec::new(),
+                ptr_nulls: Vec::new(),
+                span: sp,
+            })
+        }
     }
 
     fn check_match(&mut self, scrutinee: &ast::Expr, arms: &[ast::MatchArm], as_stmt: bool, sp: Span) -> HExpr {
