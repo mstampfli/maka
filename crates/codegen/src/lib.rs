@@ -7839,6 +7839,16 @@ impl<'a> Cx<'a> {
             self.wl(&format!("*({}) {} {};", inner, assign_op_c(op), rhs));
             return;
         }
+        // Drop-on-reassign: free the previous owning value before overwriting it.
+        // Skipped (to avoid a double free) when the RHS reads the same root - it
+        // may be moving out of, or deriving the new value from, the old one.
+        if matches!(op, HAssignOp::Assign) && self.drop_ty_owns(&place.ty) {
+            if let Some(root) = place_root_local(place) {
+                if !expr_contains_local(value, root) {
+                    self.emit_field_drop(&lhs, &place.ty, 0);
+                }
+            }
+        }
         self.wl(&format!("{} {} {};", lhs, assign_op_c(op), rhs));
         self.emit_move_out_null(f, value);
     }
@@ -9266,6 +9276,45 @@ fn place_root_is(e: &HExpr, iv: u32) -> bool {
         HExprKind::Local(id) => id.0 == iv,
         HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => place_root_is(base, iv),
         HExprKind::Unwrap { expr, .. } | HExprKind::DerefRef(expr) => place_root_is(expr, iv),
+        _ => false,
+    }
+}
+
+/// The root local id of a place expression, if it bottoms out in a local.
+fn place_root_local(e: &HExpr) -> Option<u32> {
+    match &e.kind {
+        HExprKind::Local(id) => Some(id.0),
+        HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => place_root_local(base),
+        HExprKind::Unwrap { expr, .. } | HExprKind::DerefRef(expr) => place_root_local(expr),
+        _ => None,
+    }
+}
+
+/// Does `e` reference local `id` anywhere?  Used as the drop-on-reassign guard:
+/// if the RHS reads the slot being overwritten, dropping the old value first
+/// could free something the RHS still needs (or already moved).
+fn expr_contains_local(e: &HExpr, id: u32) -> bool {
+    match &e.kind {
+        HExprKind::Local(l) => l.0 == id,
+        HExprKind::Field { base, .. } => expr_contains_local(base, id),
+        HExprKind::Index { base, idx } => expr_contains_local(base, id) || expr_contains_local(idx, id),
+        HExprKind::Unwrap { expr, .. } | HExprKind::Un { expr, .. }
+        | HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. }
+        | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
+        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr)
+        | HExprKind::SliceLen(expr) | HExprKind::EnumTag(expr)
+        | HExprKind::ArrayToSlice { base: expr, .. } => expr_contains_local(expr, id),
+        HExprKind::AddrOfRef { place, .. } => expr_contains_local(place, id),
+        HExprKind::Bin { lhs, rhs, .. } => expr_contains_local(lhs, id) || expr_contains_local(rhs, id),
+        HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } => args.iter().any(|a| expr_contains_local(a, id)),
+        HExprKind::CallIndirect { callee, args } => expr_contains_local(callee, id) || args.iter().any(|a| expr_contains_local(a, id)),
+        HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => fields.iter().any(|(_, fe)| expr_contains_local(fe, id)),
+        HExprKind::ArrayLit(es) => es.iter().any(|e| expr_contains_local(e, id)),
+        HExprKind::Closure { env_values, .. } => env_values.iter().any(|v| expr_contains_local(v, id)),
+        HExprKind::Transfer(inner) => expr_contains_local(inner, id),
+        HExprKind::Match { scrutinee, arms, .. } => expr_contains_local(scrutinee, id)
+            || arms.iter().any(|a| a.guard.as_ref().map_or(false, |g| expr_contains_local(g, id))
+                || a.value.as_ref().map_or(false, |v| expr_contains_local(v, id))),
         _ => false,
     }
 }
