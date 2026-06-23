@@ -1,0 +1,30 @@
+// Pure tag-dispatch matches lower to a C `switch` (jump table).  Guarded variant
+// arms fall back to the if-chain - which had a brace-balance bug for a guarded
+// *variant* arm without an `as`-binding (now fixed).
+
+enum Shape { Circle { int r }, Rect { int w, int h }, Dot }
+
+int area(Shape s) {                         // pure tag dispatch -> switch
+    return match (s) {
+        Circle { r } r * r,
+        Rect { w, h } w * h,
+        Dot 0,
+    };
+}
+
+int guarded(Shape s) {                      // guarded variant arm -> if-chain
+    return match (s) {
+        Rect { w, h } if w == h  w,         // square: report the side
+        Rect { w, h } w * h,
+        else 0,
+    };
+}
+
+unit main() {
+    log(area(Shape.Circle { r = 4 }));      // 16
+    log(area(Shape.Rect { w = 3, h = 5 })); // 15
+    log(area(Shape.Dot));                   // 0
+    log(guarded(Shape.Rect { w = 4, h = 4 })); // 4
+    log(guarded(Shape.Rect { w = 3, h = 5 })); // 15
+    log(guarded(Shape.Circle { r = 9 }));      // 0
+}

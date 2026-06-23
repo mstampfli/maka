@@ -8688,7 +8688,77 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// A match is a pure tag dispatch - lowerable to a C `switch` (one tag read +
+    /// jump table) instead of a linear if-chain - when the scrutinee is an enum
+    /// value and every arm is a bare variant (no guard, no literal field-check)
+    /// or a single `else`.  Returns the enum id when eligible.
+    fn match_as_switch(&self, scrut_ty: &HType, arms: &[HMatchArm]) -> Option<EnumId> {
+        let eid = if let HType::Enum(id) = scrut_ty { *id } else { return None };
+        let mut seen_else = false;
+        for a in arms {
+            if a.guard.is_some() { return None; }
+            match &a.kind {
+                HArmKind::Variant { enum_id, lit_checks, .. } => {
+                    if *enum_id != eid { return None; }
+                    if lit_checks.iter().any(|c| c.is_some()) { return None; }
+                }
+                HArmKind::Else => { if seen_else { return None; } seen_else = true; }
+                _ => return None, // Null/Lit: not an enum-tag match
+            }
+        }
+        Some(eid)
+    }
+
+    fn emit_match_switch(&mut self, f: &HFunc, scrutinee: &HExpr, arms: &[HMatchArm], result_ty: &HType, eid: EnumId) -> String {
+        let s = self.emit_expr(f, scrutinee);
+        let scrut_c = self.c_type(&scrutinee.ty);
+        let res_c = self.c_type(result_ty);
+        let needs_value = !matches!(result_ty, HType::Unit);
+        let tag_expr = if self.sym.enum_info(eid).is_simple() { "__s" } else { "__s.tag" };
+        let mut body = String::new();
+        body.push_str("__extension__ ({ ");
+        body.push_str(&format!("{} __s = {}; ", scrut_c, s));
+        if needs_value { body.push_str(&format!("{} __r = {{0}}; ", res_c)); }
+        body.push_str(&format!("switch ({}) {{ ", tag_expr));
+        for a in arms {
+            match &a.kind {
+                HArmKind::Variant { variant, enum_id, .. } => {
+                    let t = self.sym.enum_info(*enum_id).variants[*variant].tag;
+                    body.push_str(&format!("case {}: {{ ", t));
+                }
+                HArmKind::Else => body.push_str("default: { "),
+                _ => unreachable!(),
+            }
+            body.push_str(&self.match_bindings(f, &a.kind));
+            if let Some(local) = a.scrut_binding {
+                let li = &f.locals[local.0 as usize];
+                body.push_str(&format!("{} {} = __s; ", self.c_type(&li.ty), local_name(local, &li.name)));
+            }
+            for stmt in &a.body.stmts {
+                let prev_len = self.out.len();
+                self.emit_stmt(f, stmt);
+                let emitted = self.out[prev_len..].to_string();
+                self.out.truncate(prev_len);
+                body.push_str(&emitted);
+            }
+            if let Some(v) = &a.value {
+                let vs = self.emit_expr(f, v);
+                if needs_value { body.push_str(&format!("__r = ({}); ", vs)); }
+                else { body.push_str(&format!("(void)({}); ", vs)); }
+            }
+            body.push_str("} break; ");
+        }
+        body.push_str("} ");
+        if needs_value { body.push_str("__r; "); } else { body.push_str("MAKA_UNIT; "); }
+        body.push_str("})");
+        body
+    }
+
     fn emit_match(&mut self, f: &HFunc, scrutinee: &HExpr, arms: &[HMatchArm], result_ty: &HType) -> String {
+        // Pure tag dispatch -> C `switch` (jump table) instead of an if-chain.
+        if let Some(eid) = self.match_as_switch(&scrutinee.ty, arms) {
+            return self.emit_match_switch(f, scrutinee, arms, result_ty, eid);
+        }
         // Always emit as a GCC statement-expression that yields the result value.
         // Strategy:
         //   ({
@@ -8762,8 +8832,11 @@ impl<'a> Cx<'a> {
                 else { body.push_str(&format!("(void)({}); ", vs)); }
             }
             // Close any open guard `if`, with `break;` so a matched arm exits.
-            // If we put guard into the arm body, we must NOT break unconditionally outside it.
-            let has_body_guard = a.scrut_binding.is_some() && a.guard.is_some();
+            // If we put guard into the arm body, we must NOT break unconditionally
+            // outside it.  This must mirror exactly when a body-guard `if` was
+            // opened (`needs_body_guard && guard`) - i.e. for any variant or
+            // scrut-bound arm with a guard, not only `as`-bound ones.
+            let has_body_guard = needs_body_guard && a.guard.is_some();
             if has_body_guard {
                 // close inner if with break; close outer arm-if without break (fall-through to next arm).
                 body.push_str(" break; } } ");
