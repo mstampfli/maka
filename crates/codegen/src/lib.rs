@@ -26,6 +26,15 @@ pub fn emit_freestanding(m: &HirModule) -> String {
     cx.out
 }
 
+/// Proven upper bound of a loop counter, for bounds-check elision.
+#[derive(Clone, Copy)]
+enum BceBound {
+    /// Counter stays in `[0, N)` for a compile-time constant N.
+    Const(i64),
+    /// Counter stays in `[0, len)` of the slice/vec held by this local id.
+    SliceLen(u32),
+}
+
 struct Cx<'a> {
     sym: &'a SymTab,
     out: String,
@@ -50,9 +59,10 @@ struct Cx<'a> {
     /// get a generated `__maka_drop_<Name>` recursive-free function.
     drop_owns: std::collections::HashSet<String>,
     /// In-scope loop induction variables proven to stay within `[0, bound)` by a
-    /// for-range loop guard - `(local id, exclusive upper bound)`.  Indexing a
-    /// fixed array of length >= bound with such a variable needs no bounds check.
-    bounded_vars: Vec<(u32, i64)>,
+    /// for-range loop guard - `(counter local id, bound)`.  Lets indexing skip
+    /// the bounds check: a constant bound covers fixed arrays of length >= it; a
+    /// `SliceLen(s)` bound covers indexing that exact slice/vec local `s`.
+    bounded_vars: Vec<(u32, BceBound)>,
     /// Per-emission counter for inline expansions: each statement-expression gets
     /// a unique tag so labels and locals never collide across multiple call sites
     /// of the same inline within the same C function.
@@ -7743,32 +7753,51 @@ impl<'a> Cx<'a> {
     /// a constant index in range, or a for-range loop counter whose guard keeps
     /// it within `[0, bound)` with `bound <= len`.  (Slices/vectors have runtime
     /// length, so they are never elided.)
-    fn index_proven_safe(&self, len: i64, idx: &HExpr) -> bool {
+    /// Is `base[idx]` into a fixed array of length `len` provably in-bounds?
+    fn idx_in_const_bound(&self, len: i64, idx: &HExpr) -> bool {
         match &idx.kind {
             HExprKind::LitInt(n) => *n >= 0 && *n < len,
-            HExprKind::Local(id) => self.bounded_vars.iter().any(|(lid, ub)| *lid == id.0 && *ub <= len),
+            HExprKind::Local(id) => self.bounded_vars.iter().any(|(lid, b)| *lid == id.0 && matches!(b, BceBound::Const(ub) if *ub <= len)),
             _ => false,
         }
+    }
+
+    /// Is indexing the slice/vec `base` with `idx` provably in-bounds?  Only when
+    /// `idx` is a loop counter bounded by *this exact slice's* own `.len`.
+    fn idx_in_slice_bound(&self, base: &HExpr, idx: &HExpr) -> bool {
+        if let (HExprKind::Local(b), HExprKind::Local(i)) = (&base.kind, &idx.kind) {
+            return self.bounded_vars.iter().any(|(lid, bound)|
+                *lid == i.0 && matches!(bound, BceBound::SliceLen(s) if *s == b.0));
+        }
+        false
     }
 
     fn index_access(&self, _f: &HFunc, base: &HExpr, idx: &HExpr, base_s: &str, idx_s: &str) -> String {
         match &base.ty {
             HType::Array { len, .. } => {
-                if self.index_proven_safe(*len, idx) {
+                if self.idx_in_const_bound(*len, idx) {
                     format!("(({})[(maka_int)({})])", base_s, idx_s)
                 } else {
                     format!("(({})[maka_check_idx((maka_int)({}), (maka_int){}, \"array idx\")])", base_s, idx_s, len)
                 }
             }
             HType::Slice { .. } => {
-                format!("(({}).ptr[maka_check_idx((maka_int)({}), ({}).len, \"slice idx\")])", base_s, idx_s, base_s)
+                if self.idx_in_slice_bound(base, idx) {
+                    format!("(({}).ptr[(maka_int)({})])", base_s, idx_s)
+                } else {
+                    format!("(({}).ptr[maka_check_idx((maka_int)({}), ({}).len, \"slice idx\")])", base_s, idx_s, base_s)
+                }
             }
             HType::Vec { .. } => {
-                format!("(({}).data[maka_check_idx((maka_int)({}), ({}).len, \"vec idx\")])", base_s, idx_s, base_s)
+                if self.idx_in_slice_bound(base, idx) {
+                    format!("(({}).data[(maka_int)({})])", base_s, idx_s)
+                } else {
+                    format!("(({}).data[maka_check_idx((maka_int)({}), ({}).len, \"vec idx\")])", base_s, idx_s, base_s)
+                }
             }
             HType::Heap { inner } => match inner.as_ref() {
                 HType::Array { len, .. } => {
-                    if self.index_proven_safe(*len, idx) {
+                    if self.idx_in_const_bound(*len, idx) {
                         format!("((*{})[(maka_int)({})])", base_s, idx_s)
                     } else {
                         format!("((*{})[maka_check_idx((maka_int)({}), (maka_int){}, \"array idx\")])", base_s, idx_s, len)
@@ -8910,7 +8939,7 @@ impl<'a> Cx<'a> {
 /// If a `ForC` is a for-range counter provably within `[0, bound)` whose counter
 /// is never mutated in the body, return `(local id, exclusive bound)`.  Used to
 /// elide array bounds checks on `arr[i]` when `bound <= array length`.
-fn forrange_bound(init: &HStmt, cond: &HExpr, body: &HBlock) -> Option<(u32, i64)> {
+fn forrange_bound(init: &HStmt, cond: &HExpr, body: &HBlock) -> Option<(u32, BceBound)> {
     // init: `Let { local: iv, init: LitInt(lo) }` with lo >= 0
     let iv = match init {
         HStmt::Let { local, init, .. } => match &init.kind {
@@ -8919,23 +8948,29 @@ fn forrange_bound(init: &HStmt, cond: &HExpr, body: &HBlock) -> Option<(u32, i64
         },
         _ => return None,
     };
-    // cond: `Local(iv) < LitInt(hi)` (bound hi) or `Local(iv) <= LitInt(hi)` (bound hi+1)
-    let upper = match &cond.kind {
+    let (op, rhs) = match &cond.kind {
         HExprKind::Bin { op, lhs, rhs } => {
             if !matches!(&lhs.kind, HExprKind::Local(id) if id.0 == iv) { return None; }
-            match (op, &rhs.kind) {
-                (HBinOp::Lt, HExprKind::LitInt(b)) => *b,
-                (HBinOp::Le, HExprKind::LitInt(b)) => b.checked_add(1)?,
-                _ => return None,
-            }
+            (op, rhs)
         }
         _ => return None,
     };
-    if upper < 0 { return None; }
+    let bound = match (op, &rhs.kind) {
+        // Constant upper bound (covers fixed arrays).
+        (HBinOp::Lt, HExprKind::LitInt(b)) if *b >= 0 => BceBound::Const(*b),
+        (HBinOp::Le, HExprKind::LitInt(b)) if *b >= 0 => BceBound::Const(b.checked_add(1)?),
+        // `i < s.len` of a slice/vec local s (exclusive only; `<= len` is OOB).
+        // s must not be mutated/reassigned in the body, or its len could change.
+        (HBinOp::Lt, HExprKind::SliceLen(inner)) => match &inner.kind {
+            HExprKind::Local(s) if !block_mutates_local(body, s.0) => BceBound::SliceLen(s.0),
+            _ => return None,
+        },
+        _ => return None,
+    };
     // The counter must not be reassigned or `&mut`-borrowed in the body, or the
     // `[0, bound)` guarantee is void (e.g. `for i in 0..3 { i = 10; arr[i] }`).
     if block_mutates_local(body, iv) { return None; }
-    Some((iv, upper))
+    Some((iv, bound))
 }
 
 fn block_mutates_local(b: &HBlock, iv: u32) -> bool {

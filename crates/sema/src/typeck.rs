@@ -1867,7 +1867,14 @@ impl<'a> TypeChecker<'a> {
             },
             _ => return self.try_index_overload_or_err(bh, ih_probe, sp),
         };
-        let ih = self.coerce(ih_probe, &HType::Int);
+        // The index may be `int` or `usize` (the latter is what `.len` yields,
+        // so `arr[i]` in a `0..arr.len` loop type-checks); codegen casts it to
+        // maka_int either way.  Any other type coerces to int (or errors).
+        let ih = if matches!(&ih_probe.ty, HType::SizedInt { signed: false, .. }) {
+            ih_probe // usize / u8..u64: codegen casts to maka_int
+        } else {
+            self.coerce(ih_probe, &HType::Int)
+        };
         HExpr { kind: HExprKind::Index { base: Box::new(bh), idx: Box::new(ih) }, ty: elem_ty, span: sp }
     }
 
@@ -4176,17 +4183,18 @@ impl<'a> TypeChecker<'a> {
         };
         let step = HStmt::Assign { op: HAssignOp::Assign, place: var_expr.clone(), value: plus, span: sp };
 
-        // A compile-time-constant end is inlined directly into the condition
-        // (`i < N`) rather than hoisted into a `__end` local.  This lets codegen
-        // recognize the counted-loop bound and drop array bounds checks on
-        // `arr[i]` when `N <= len`; it also avoids an extra local.
-        let const_bound = matches!(end_h.kind, HExprKind::LitInt(_));
+        // A constant or `slice.len` end is inlined directly into the condition
+        // (`i < N` / `i < s.len`) rather than hoisted into a `__end` local, so
+        // codegen can recognize the counted-loop bound and drop bounds checks on
+        // `arr[i]` (N <= len) or `s[i]` (same slice).  Both ends are cheap and
+        // (for the elided case) loop-invariant, so re-evaluating them is fine.
+        let inline_bound = matches!(end_h.kind, HExprKind::LitInt(_) | HExprKind::SliceLen(_));
 
         let body_h = self.check_block(body);
         self.leave_scope();
         let init = HStmt::Let { local: id_var, init: start_h, span: sp };
 
-        if const_bound {
+        if inline_bound {
             let cond = HExpr {
                 kind: HExprKind::Bin { op, lhs: Box::new(var_expr.clone()), rhs: Box::new(end_h) },
                 ty: HType::Bool, span: sp,

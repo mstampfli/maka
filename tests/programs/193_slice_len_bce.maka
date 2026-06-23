@@ -1,0 +1,18 @@
+// Indexing now accepts a `usize` (what `.len` yields), so `for i in 0..s.len {
+// s[i] }` type-checks; and codegen elides the bounds check on that exact slice
+// (the loop guard proves `0 <= i < s.len`).  Indexing a *different* slice keeps
+// its check (verified out of band: it panics on OOB).
+
+int sum([]int s) {
+    mut int acc = 0;
+    for (usize i in 0..s.len) { acc = acc + s[i]; }   // check elided
+    return acc;
+}
+
+unit main() {
+    [5]int a = [2, 4, 6, 8, 10];
+    []int s = a;
+    log(sum(s));        // 30
+    usize k = 3;
+    log(s[k]);          // 8  (usize index)
+}
