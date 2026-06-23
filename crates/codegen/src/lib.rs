@@ -8531,11 +8531,11 @@ impl<'a> Cx<'a> {
                         let s = self.emit_expr(f, &args[0]);
                         let b = self.emit_expr(f, &args[1]);
                         return format!(
-                            "(__extension__ ({{ Callable_float_float_ __cb = ({1}); __maka_par_map_float(({0}), __cb.code, __cb.env); }}))",
+                            "(__extension__ ({{ Callable_float_float_ __cb = ({1}); Slice_maka_float __s = __maka_par_map_float(({0}), __cb.code, __cb.env); (Vec_maka_float){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
                             s, b
                         );
                     }
-                    return "(Slice_maka_float){0}".into();
+                    return "((Vec_maka_float){ .data = NULL, .len = 0, .cap = 0 })".into();
                 }
                 // par_reduce_float(slice, init, combine)
                 if callee.0 == u32::MAX - 36 {
@@ -8568,11 +8568,11 @@ impl<'a> Cx<'a> {
                         let s = self.emit_expr(f, &args[0]);
                         let b = self.emit_expr(f, &args[1]);
                         return format!(
-                            "(__extension__ ({{ Callable_int_int_ __cb = ({1}); __maka_par_map_int_slice(({0}), __cb.code, __cb.env); }}))",
+                            "(__extension__ ({{ Callable_int_int_ __cb = ({1}); Slice_maka_int __s = __maka_par_map_int_slice(({0}), __cb.code, __cb.env); (Vec_maka_int){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
                             s, b
                         );
                     }
-                    return "(Slice_maka_int){0}".into();
+                    return "((Vec_maka_int){ .data = NULL, .len = 0, .cap = 0 })".into();
                 }
                 // par_reduce_int(slice, init, combine)
                 if callee.0 == u32::MAX - 29 {
@@ -8593,11 +8593,11 @@ impl<'a> Cx<'a> {
                         let s = self.emit_expr(f, &args[0]);
                         let b = self.emit_expr(f, &args[1]);
                         return format!(
-                            "(__extension__ ({{ Callable_bool_int_ __cb = ({1}); __maka_par_filter_int(({0}), __cb.code, __cb.env); }}))",
+                            "(__extension__ ({{ Callable_bool_int_ __cb = ({1}); Slice_maka_int __s = __maka_par_filter_int(({0}), __cb.code, __cb.env); (Vec_maka_int){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
                             s, b
                         );
                     }
-                    return "(Slice_maka_int){0}".into();
+                    return "((Vec_maka_int){ .data = NULL, .len = 0, .cap = 0 })".into();
                 }
                 // par_filter_float(slice, pred)
                 if callee.0 == u32::MAX - 39 {
@@ -8629,11 +8629,11 @@ impl<'a> Cx<'a> {
                         let s = self.emit_expr(f, &args[0]);
                         let b = self.emit_expr(f, &args[1]);
                         return format!(
-                            "(__extension__ ({{ Callable_int_int_int_ __cb = ({1}); __maka_par_scan_int(({0}), __cb.code, __cb.env); }}))",
+                            "(__extension__ ({{ Callable_int_int_int_ __cb = ({1}); Slice_maka_int __s = __maka_par_scan_int(({0}), __cb.code, __cb.env); (Vec_maka_int){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
                             s, b
                         );
                     }
-                    return "(Slice_maka_int){0}".into();
+                    return "((Vec_maka_int){ .data = NULL, .len = 0, .cap = 0 })".into();
                 }
                 // Built-in `select_timeout(slice, int) -> int`.
                 if callee.0 == u32::MAX - 26 {
@@ -8656,11 +8656,11 @@ impl<'a> Cx<'a> {
                         let b = self.emit_expr(f, &args[1]);
                         let body = self.emit_expr(f, &args[2]);
                         return format!(
-                            "(__extension__ ({{ Callable_int_int_ __cb = ({2}); __maka_par_map_int((int64_t)({0}), (int64_t)({1}), __cb.code, __cb.env); }}))",
+                            "(__extension__ ({{ Callable_int_int_ __cb = ({2}); Slice_maka_int __s = __maka_par_map_int((int64_t)({0}), (int64_t)({1}), __cb.code, __cb.env); (Vec_maka_int){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
                             a, b, body
                         );
                     }
-                    return "((Slice_maka_int){ .ptr = NULL, .len = 0 })".into();
+                    return "((Vec_maka_int){ .data = NULL, .len = 0, .cap = 0 })".into();
                 }
                 // Built-in `par_reduce_int(start, end, init, combine)`.
                 if callee.0 == u32::MAX - 21 {

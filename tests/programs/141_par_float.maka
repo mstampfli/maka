@@ -3,7 +3,7 @@ unit main() {
     [4]float input = [1.0, 2.0, 3.0, 4.0];
     []float s = input;
 
-    []float doubled = par_map_float(s, float(float x) { return x * 2.0; });
+    Vec<float> doubled = par_map_float(s, float(float x) { return x * 2.0; });
     log(doubled[0]);     // 2
     log(doubled[3]);     // 8
 

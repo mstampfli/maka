@@ -2582,7 +2582,7 @@ impl<'a> TypeChecker<'a> {
                 }
                 return HExpr {
                     kind: HExprKind::Call { callee: FuncId(u32::MAX - 28), args: hargs },
-                    ty: HType::Slice { mutable: false, elem: Box::new(HType::Int) },
+                    ty: HType::Vec { elem: Box::new(HType::Int) },
                     span: sp,
                 };
             }
@@ -2606,7 +2606,7 @@ impl<'a> TypeChecker<'a> {
             }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 22), args: hargs },
-                ty: HType::Slice { mutable: false, elem: Box::new(HType::Int) },
+                ty: HType::Vec { elem: Box::new(HType::Int) },
                 span: sp,
             };
         }
@@ -2743,7 +2743,7 @@ impl<'a> TypeChecker<'a> {
             }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 35), args: hargs },
-                ty: HType::Slice { mutable: false, elem: Box::new(HType::Float) },
+                ty: HType::Vec { elem: Box::new(HType::Float) },
                 span: sp,
             };
         }
@@ -2836,7 +2836,7 @@ impl<'a> TypeChecker<'a> {
             }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 30), args: hargs },
-                ty: HType::Slice { mutable: false, elem: Box::new(HType::Int) },
+                ty: HType::Vec { elem: Box::new(HType::Int) },
                 span: sp,
             };
         }
@@ -3014,7 +3014,7 @@ impl<'a> TypeChecker<'a> {
             }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 31), args: hargs },
-                ty: HType::Slice { mutable: false, elem: Box::new(HType::Int) },
+                ty: HType::Vec { elem: Box::new(HType::Int) },
                 span: sp,
             };
         }

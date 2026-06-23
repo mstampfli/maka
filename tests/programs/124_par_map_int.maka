@@ -1,7 +1,7 @@
 // par_map_int(start, end, f) — produces a fresh []int with result[i] = f(i)
 // for i in [start, end), chunked across the job pool's worker threads.
 unit main() {
-    []int squares = par_map_int(0, 10, int(int i) { return i * i; });
+    Vec<int> squares = par_map_int(0, 10, int(int i) { return i * i; });
     log(squares.len);     // 10
     log(squares[0]);      // 0
     log(squares[5]);      // 25
