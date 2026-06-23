@@ -176,6 +176,11 @@ For Maka-managed memory there is no `free`:
   freeing a value also frees the owned pointers it contains (struct fields,
   enum-variant payloads, array elements), all the way down - so a heap tree,
   linked list, or recursive enum AST frees completely when its root drops.
+- **Owning temporaries are freed too.** A freshly-owned value consumed inline -
+  e.g. `log(format(...))`, `f(a + b)`, or a discarded `_ = alloc ...` - is
+  hoisted into a hidden owning binding and freed at scope exit; passing it to an
+  `own` parameter instead transfers ownership (no double-free). So owning
+  values do not leak whether they are bound to a name or used inline.
 - To release early, assign `null` to an `own *T` (the auto-free fires
   immediately, the binding becomes null, and the lifetime pass invalidates
   every `*T` / `&T` aliasing it — see §6.4).
@@ -1919,13 +1924,5 @@ These are real limitations the implementation is honest about:
 - **No auto-borrow on method calls.** `p.method()` requires `p` to match the
   receiver's type exactly; if the method takes `&_ self`, the call site must
   write `(&p).method()`.  No magic `&` insertion at dispatch.
-- **Owning temporaries consumed inline are not auto-freed.** A freshly-owned
-  value (`format(...)`, `a + b`, `alloc ...`) that is passed straight into a
-  borrowing call or discarded - e.g. `log(format(...))` - has no binding to own
-  it and leaks.  Bind it to a local first (`string s = format(...); log(s);`),
-  which now owns and frees it at scope exit (including per loop iteration).  A
-  statement-scoped temporary-drop pass would remove the need to bind; until
-  then the binding idiom is the leak-free form.  (Owning *locals*, owning
-  *fields*, and recursively-owned structures already auto-free correctly.)
 
 These are tractable to fix; they are not architectural blockers.

@@ -80,6 +80,9 @@ pub fn analyze_func(
     let mut errors = std::mem::take(&mut a.errors);
     let warnings = std::mem::take(&mut a.warnings);
     let capture_nonnull = std::mem::take(&mut a.capture_nonnull);
+    // Hoist owning temporaries consumed by a borrowing context into hidden
+    // owning locals, so the auto-free machinery (below) drops them.
+    hoist_owning_temps(sym, f);
     // Final: walk the body and fill heap_to_free for each block in reverse scope-decl order.
     fill_heap_drops(sym, f);
     if errors.is_empty() {
@@ -1144,6 +1147,172 @@ fn root_local(e: &HExpr) -> Option<LocalId> {
         HExprKind::AddrOfRef { place, .. } => root_local(place),
         _ => None,
     }
+}
+
+/// Hoist owning temporaries that are consumed by a borrowing context - a call
+/// argument that was coerced to a borrow/view, or a discarded expression
+/// statement - into hidden owning locals.  The existing auto-free + move
+/// analysis then drops or keeps each one correctly: the coercion already
+/// encodes borrow-vs-own in the argument's type, so a temp passed to a borrow
+/// param stays owning-typed-locally and is freed at scope, while one passed to
+/// an `own` param is read as owning and marked moved (the callee frees it).
+///
+/// This removes the "owning temporary consumed inline leaks" gap, e.g.
+/// `log(format(...))` or `f(a + b)`.  Concat-builtin arguments are left alone
+/// (the concat helpers free them, so hoisting would double-free), and only
+/// fresh heap producers are hoisted (never literals, statics like
+/// `bool_to_str`, or named locals).
+fn hoist_owning_temps(sym: &SymTab, f: &mut HFunc) {
+    let HFunc { body, locals, .. } = f;
+    hoist_block_temps(sym, body, locals);
+}
+
+fn hoist_block_temps(sym: &SymTab, b: &mut HBlock, locals: &mut Vec<LocalInfo>) {
+    let stmts = std::mem::take(&mut b.stmts);
+    let mut out: Vec<HStmt> = Vec::with_capacity(stmts.len());
+    for mut s in stmts {
+        // Recurse into nested blocks first.
+        match &mut s {
+            HStmt::If { then_b, else_b, .. } => {
+                hoist_block_temps(sym, then_b, locals);
+                if let Some(e) = else_b { hoist_block_temps(sym, e, locals); }
+            }
+            HStmt::While { body, .. } | HStmt::ForC { body, .. } | HStmt::ForEach { body, .. } => {
+                hoist_block_temps(sym, body, locals);
+            }
+            HStmt::Block(bb) | HStmt::Unsafe(bb, _) => hoist_block_temps(sym, bb, locals),
+            _ => {}
+        }
+        // Hoist owning temporaries out of this statement's once-evaluated
+        // expression positions.  (Loop/if conditions are re-evaluated, so they
+        // are left alone.)
+        let mut pre: Vec<HStmt> = Vec::new();
+        match &mut s {
+            HStmt::ExprStmt(e) => {
+                hoist_in_expr(sym, e, locals, &mut pre);
+                if is_owning_temp(sym, e) { hoist_one(e, locals, &mut pre); }
+            }
+            HStmt::Let { init, .. } => hoist_in_expr(sym, init, locals, &mut pre),
+            HStmt::Assign { place, value, .. } => {
+                hoist_in_expr(sym, place, locals, &mut pre);
+                hoist_in_expr(sym, value, locals, &mut pre);
+            }
+            HStmt::Return { value: Some(v), .. } => hoist_in_expr(sym, v, locals, &mut pre),
+            HStmt::Propagate { value: Some(v), .. } => hoist_in_expr(sym, v, locals, &mut pre),
+            HStmt::ForEach { src, .. } => hoist_in_expr(sym, src, locals, &mut pre),
+            _ => {}
+        }
+        out.extend(pre);
+        out.push(s);
+    }
+    b.stmts = out;
+}
+
+/// Recurse through an expression hoisting owning-temporary call arguments.
+fn hoist_in_expr(sym: &SymTab, e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: &mut Vec<HStmt>) {
+    match &mut e.kind {
+        HExprKind::Call { callee, args } => {
+            // Concat helpers free their own string args; hoisting would double-free.
+            let c = callee.0;
+            let is_concat = c == u32::MAX - 5 || c == u32::MAX - 8 || c == u32::MAX - 9 || c == u32::MAX - 10;
+            for a in args.iter_mut() { hoist_in_expr(sym, a, locals, pre); }
+            if !is_concat {
+                for a in args.iter_mut() {
+                    if is_owning_temp(sym, a) { hoist_one(a, locals, pre); }
+                }
+            }
+        }
+        HExprKind::CallIndirect { callee, args } => {
+            hoist_in_expr(sym, callee, locals, pre);
+            for a in args.iter_mut() { hoist_in_expr(sym, a, locals, pre); }
+            for a in args.iter_mut() {
+                if is_owning_temp(sym, a) { hoist_one(a, locals, pre); }
+            }
+        }
+        HExprKind::Bin { lhs, rhs, .. } => { hoist_in_expr(sym, lhs, locals, pre); hoist_in_expr(sym, rhs, locals, pre); }
+        HExprKind::Un { expr, .. }
+        | HExprKind::Unwrap { expr, .. }
+        | HExprKind::Cast { expr, .. }
+        | HExprKind::CheckedCast { expr, .. }
+        | HExprKind::DropWrite(expr)
+        | HExprKind::DerefRef(expr)
+        | HExprKind::HeapAlloc(expr)
+        | HExprKind::Free(expr)
+        | HExprKind::SliceLen(expr)
+        | HExprKind::EnumTag(expr)
+        | HExprKind::ArrayToSlice { base: expr, .. }
+        | HExprKind::AddrOfRef { place: expr, .. } => hoist_in_expr(sym, expr, locals, pre),
+        HExprKind::Field { base, .. } => hoist_in_expr(sym, base, locals, pre),
+        HExprKind::Index { base, idx } => { hoist_in_expr(sym, base, locals, pre); hoist_in_expr(sym, idx, locals, pre); }
+        HExprKind::ArrayLit(es) => { for e2 in es.iter_mut() { hoist_in_expr(sym, e2, locals, pre); } }
+        HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => {
+            // Field initializers are moved into the aggregate (owned by it), so
+            // they are not hoisted; only their nested call-args are.
+            for (_, fe) in fields.iter_mut() { hoist_in_expr(sym, fe, locals, pre); }
+        }
+        HExprKind::Match { arms, .. } => {
+            // Arm bodies are real statement blocks; their conditional values are
+            // left to their own scopes.
+            for arm in arms.iter_mut() { hoist_block_temps(sym, &mut arm.body, locals); }
+        }
+        // Inline splices and closures capture/move their operands; leave them.
+        _ => {}
+    }
+}
+
+/// A freshly-allocated owning value that no binding owns yet.  Precise: fresh
+/// heap producers only - never `bool_to_str` (a static), literals, or locals.
+fn is_owning_temp(sym: &SymTab, e: &HExpr) -> bool {
+    match &e.kind {
+        HExprKind::HeapAlloc(_) => true,
+        HExprKind::Call { callee, .. } => {
+            let c = callee.0;
+            // malloc'ing string builtins: concat / read_line / int|float|char_to_str
+            if c == u32::MAX - 5 || c == u32::MAX - 8 || c == u32::MAX - 9 || c == u32::MAX - 10
+                || c == u32::MAX - 6
+                || c == u32::MAX - 11 || c == u32::MAX - 13 || c == u32::MAX - 14
+            {
+                return true;
+            }
+            // a regular function that returns an owning value (ownership transfers out)
+            if (c as usize) < sym.sigs.len() {
+                return matches!(sym.func_sig(*callee).ret, HType::OwnPtr { .. } | HType::Heap { .. });
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// The owning type to declare the hidden local with (so it auto-frees).  Owning
+/// pointers keep their type; string temps (`Str`-typed but a malloc'd `char*`)
+/// become `own *char`.
+fn owning_type_of(e: &HExpr) -> HType {
+    match &e.ty {
+        HType::OwnPtr { .. } | HType::Heap { .. } => e.ty.clone(),
+        _ => HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) },
+    }
+}
+
+/// Replace `e` with a read of a fresh owning local, and append the binding to
+/// `pre`.  The read keeps `e`'s original (possibly coerced) type so downstream
+/// dispatch (e.g. `log`) and the move analysis behave exactly as before.
+fn hoist_one(e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: &mut Vec<HStmt>) {
+    let lid = LocalId(locals.len() as u32);
+    let own_ty = owning_type_of(e);
+    let orig_ty = e.ty.clone();
+    let sp = e.span;
+    locals.push(LocalInfo {
+        name: format!("__tmp{}", lid.0),
+        ty: own_ty,
+        storage: StorageClass::Heap,
+        mut_payload: true,
+        reassignable: true,
+        thread_local: false,
+        span: sp,
+    });
+    let original = std::mem::replace(e, HExpr { kind: HExprKind::Local(lid), ty: orig_ty, span: sp });
+    pre.push(HStmt::Let { local: lid, init: original, span: sp });
 }
 
 /// Fill in `HBlock::heap_to_free` and `HStmt::Return::heap_drops` with the heap locals
