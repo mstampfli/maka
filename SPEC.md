@@ -753,8 +753,8 @@ Shareable; `Wrapper<*Foo>` is Shareable iff `*Foo::Slot` is.  The
 unmonomorphized form has no Shareable verdict.
 
 Recognized Shareable types by name: `Mutex`, `RwLock`, `Spinlock`, `Channel`,
-`AtomicI8`–`AtomicI64`, `AtomicU8`–`AtomicU64`, `AtomicBool`, `AtomicPtr`,
-`Thread`.
+the generic `Atomic<T>` (by template name), `WaitGroup`, `Once`, the `*Chan`
+family, `TlsConn`, and `Thread`.
 
 Calls to non-`gate` functions reject `transfer`/`share` annotations.
 
@@ -831,7 +831,7 @@ in the generated C). It is Shareable.
 
 ### 7.3 Sync primitives (typed handles)
 
-`Mutex`, `RwLock`, `WaitGroup`, `Once`, `Atomic`, `AtomicBool`, `AtomicPtr`,
+`Mutex`, `RwLock`, `WaitGroup`, `Once`, the generic `Atomic<T>`,
 the `Chan` family (`IntChan` / `FloatChan` / `ByteChan`), and `TlsConn` are
 exposed as typed opaque handles in the stdlib — a `data` declaration
 wrapping a single `*unit` field that holds the raw runtime pointer:
@@ -850,10 +850,9 @@ pub unit  mutex_destroy(Mutex m)   { __fmutex_destroy(m.h); }
 ```
 
 The wrapper is named-Shareable (the type checker's Shareable allowlist
-matches `Mutex`, `RwLock`, `Spinlock`, `Channel`, `Atomic`, `AtomicBool`,
-`AtomicPtr`, the sized `AtomicI{8,16,32,64}` / `AtomicU{8,16,32,64}`
-variants, `WaitGroup`, `Once`, `IntChan`, `FloatChan`, `ByteChan`,
-`TlsConn`, and `Thread` by name).  User code captures the typed handle
+matches `Mutex`, `RwLock`, `Spinlock`, `Channel`, the generic `Atomic<T>`
+(by its template name), `WaitGroup`, `Once`, `IntChan`, `FloatChan`,
+`ByteChan`, `TlsConn`, and `Thread` by name).  User code captures the typed handle
 into spawn closures by value; the raw `*unit` it holds never
 escapes the stdlib.  This replaces the original FFI-style `*unit`-only
 sync surface, which is no longer part of the public stdlib API.
@@ -865,8 +864,10 @@ kernel waits/wakes, syscalls — are exposed as **compiler builtins**.  These
 are recognized by name, dispatch to the right C intrinsic in codegen, and
 are the lowest layer the rest of the concurrency story is built on.
 
-Everything else in the concurrency stack — `Atomic`, `AtomicBool`,
-`AtomicPtr`, `Mutex`, `RwLock`, `WaitGroup`, `Once`, the `*Chan` family
+Everything else in the concurrency stack — the generic `Atomic<T>` (one
+atomic for int/bool/char/pointers via the `AtomicWord` attr; replaces the
+former separate `AtomicBool` / `AtomicPtr`), `Mutex`, `RwLock`, `WaitGroup`,
+`Once`, the `*Chan` family
 (`IntChan` / `FloatChan` / `ByteChan`), etc. — is **pure Maka source**
 built on top of these builtins.  The stdlib reads like Maka, not like
 FFI.  These are non-generic typed handles wrapping a single `*unit`
