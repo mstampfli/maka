@@ -4563,6 +4563,8 @@ impl<'a> Cx<'a> {
     fn drop_ty_owns(&self, ty: &HType) -> bool {
         match ty {
             HType::OwnPtr { .. } | HType::Heap { .. } => true,
+            // A by-value `Vec<T>` owns its malloc'd buffer.
+            HType::Vec { .. } => true,
             HType::Struct(id) => self.drop_owns.contains(&self.sym.struct_info(*id).name),
             HType::Enum(id) => self.drop_owns.contains(&self.sym.enum_info(*id).name),
             HType::Array { elem, .. } => self.drop_ty_owns(elem),
@@ -4697,6 +4699,19 @@ impl<'a> Cx<'a> {
                 self.emit_field_drop(&elem_lv, elem, depth + 1);
                 self.close();
                 self.wl("}");
+            }
+            // A by-value `Vec<T>`: drop owning elements, then free the buffer.
+            HType::Vec { elem } => {
+                if self.drop_ty_owns(elem) {
+                    let i = format!("__v{}", depth);
+                    self.wl(&format!("for (size_t {0} = 0; {0} < ({1}).len; {0}++) {{", i, lv));
+                    self.open();
+                    let elem_lv = format!("({}).data[{}]", lv, i);
+                    self.emit_field_drop(&elem_lv, elem, depth + 1);
+                    self.close();
+                    self.wl("}");
+                }
+                self.wl(&format!("free({}.data);", lv));
             }
             _ => {}
         }
@@ -8125,6 +8140,20 @@ impl<'a> Cx<'a> {
                     }
                     return format!("__maka_format1({})", parts.join(", "));
                 }
+                // `push(v, x)` - append, growing the buffer (realloc) on demand.
+                // args[0] is `&mut Vec_T`; element size is taken from the buffer.
+                if callee.0 == u32::MAX - 60 {
+                    let vp_ty = self.c_type(&args[0].ty);   // Vec_T*
+                    let vp = self.emit_expr(f, &args[0]);
+                    let x = self.emit_expr(f, &args[1]);
+                    return format!("(__extension__ ({{ {0} __vp = {1}; if (__vp->len == __vp->cap) {{ __vp->cap = __vp->cap ? __vp->cap * 2 : 4; __vp->data = realloc(__vp->data, __vp->cap * sizeof(*__vp->data)); }} __vp->data[__vp->len++] = ({2}); MAKA_UNIT; }}))", vp_ty, vp, x);
+                }
+                // `pop(v)` -> last element, shrinking the length (panics if empty).
+                if callee.0 == u32::MAX - 61 {
+                    let vp_ty = self.c_type(&args[0].ty);
+                    let vp = self.emit_expr(f, &args[0]);
+                    return format!("(__extension__ ({{ {0} __vp = {1}; if (__vp->len == 0) {{ maka_panic(\"pop from empty Vec\"); }} __vp->len--; __vp->data[__vp->len]; }}))", vp_ty, vp);
+                }
                 // Built-in `spawn(closure)` — fiber tier.  Compound-stmt expr
                 // wraps the closure once so its env malloc happens exactly once
                 // (emitting `(s).code, (s).env` would expand and re-allocate).
@@ -9198,7 +9227,7 @@ fn place_root_is(e: &HExpr, iv: u32) -> bool {
 fn move_out_owned_place(e: &HExpr) -> bool {
     match &e.kind {
         HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => match &base.ty {
-            HType::Struct(_) | HType::Enum(_) | HType::Array { .. } => move_out_owned_place(base),
+            HType::Struct(_) | HType::Enum(_) | HType::Array { .. } | HType::Vec { .. } => move_out_owned_place(base),
             HType::OwnPtr { .. } | HType::Heap { .. } => true,
             _ => false,
         },

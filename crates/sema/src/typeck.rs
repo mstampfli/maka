@@ -3078,6 +3078,41 @@ impl<'a> TypeChecker<'a> {
                 span: sp,
             };
         }
+        // Built-in growable-vector ops on `Vec<T>`:
+        //   push(v, x)  - append x, growing the buffer (realloc) if needed
+        //   pop(v) -> T - remove and return the last element (panics if empty)
+        // `v` must be a mutable variable/field/element of `Vec<T>` type; it is
+        // taken by mutable reference so the growth is visible to the caller.
+        if (name == "push" || name == "pop") && qualifier.is_none() {
+            let vh = self.check_expr(&args[0], None);
+            if let HType::Vec { elem } = vh.ty.clone() {
+                let elem = (*elem).clone();
+                if !matches!(&vh.kind, HExprKind::Local(_) | HExprKind::Field { .. } | HExprKind::Index { .. } | HExprKind::GlobalRef(_)) {
+                    self.err(format!("`{}` target must be a `Vec` variable, field, or element", name), sp);
+                }
+                let vref = HExpr {
+                    kind: HExprKind::AddrOfRef { mutable: true, place: Box::new(vh) },
+                    ty: HType::Ref { mutable: true, inner: Box::new(HType::Vec { elem: Box::new(elem.clone()) }) },
+                    span: sp,
+                };
+                if name == "push" {
+                    if args.len() != 2 { self.err("push expects (Vec v, T value)", sp); }
+                    let xh = if args.len() == 2 { self.check_expr_coerce(&args[1], &elem) } else { HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp } };
+                    return HExpr {
+                        kind: HExprKind::Call { callee: FuncId(u32::MAX - 60), args: vec![vref, xh] },
+                        ty: HType::Unit, span: sp,
+                    };
+                } else {
+                    if args.len() != 1 { self.err("pop expects (Vec v)", sp); }
+                    return HExpr {
+                        kind: HExprKind::Call { callee: FuncId(u32::MAX - 61), args: vec![vref] },
+                        ty: elem, span: sp,
+                    };
+                }
+            }
+            // Not a Vec - fall through to ordinary function resolution.
+        }
+
         // Built-in `par_for_range(start, end, closure)` — runs `closure(i)`
         // for every i in [start, end), chunked across the job-pool's
         // workers.  Body must be a `unit(int)` closure.

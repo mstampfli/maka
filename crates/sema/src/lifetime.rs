@@ -1333,6 +1333,8 @@ fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
     fn go(sym: &SymTab, ty: &HType, seen: &mut Vec<u64>) -> bool {
         match ty {
             HType::Heap { .. } | HType::OwnPtr { .. } => true,
+            // A by-value `Vec<T>` owns its malloc'd buffer.
+            HType::Vec { .. } => true,
             HType::Struct(id) => {
                 let k = id.0 as u64;
                 if seen.contains(&k) { return false; }
@@ -1359,7 +1361,7 @@ fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
 /// Is `ty` a by-value composite (struct/enum/array) that owns heap - i.e. one
 /// that the directly-owning `Heap`/`OwnPtr` checks would miss?
 fn is_owning_value_composite(sym: &SymTab, ty: &HType) -> bool {
-    matches!(ty, HType::Struct(_) | HType::Enum(_) | HType::Array { .. }) && ty_owns_heap(sym, ty)
+    matches!(ty, HType::Struct(_) | HType::Enum(_) | HType::Array { .. } | HType::Vec { .. }) && ty_owns_heap(sym, ty)
 }
 
 fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {

@@ -1,0 +1,28 @@
+// Growable `Vec<T>`: empty literal, push/grow, pop, index, .len, for-each,
+// return-by-value (move), and a Vec of owning pointers.
+Vec<int> squares(int n) {
+    Vec<int> v = [];
+    for (int i in 1..(n + 1)) { push(v, i * i); }
+    return v;                       // move out
+}
+unit main() {
+    Vec<int> v = [];
+    for (int i in 0..6) { push(v, i * 10); }
+    log(v.len as int);              // 6
+    v[2] = 99;
+    log(v[2]);                      // 99
+    int last = pop(v);
+    log(last);                      // 50
+    log(v.len as int);             // 5
+
+    Vec<int> sq = squares(4);
+    mut int s = 0;
+    for (int x in sq) { s = s + x; }
+    log(s);                         // 1+4+9+16 = 30
+
+    Vec<own *int> owners = [];
+    for (int i in 0..3) { push(owners, alloc (i + 1)); }
+    log(owners.len as int);         // 3
+    own *int e = owners[0];
+    if (e != null) { log(e!); }     // 1
+}

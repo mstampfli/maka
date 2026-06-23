@@ -441,6 +441,11 @@ pub fn resolve_type_in(
                 };
                 return HType::RustOpaque(label);
             }
+            // Built-in growable array `Vec<T>` - the heap `{data,len,cap}` buffer,
+            // owned by value and auto-freed (same representation as `[*]T`).
+            if name == "Vec" && args.len() == 1 {
+                return HType::Vec { elem: Box::new(resolve_type_in(sym, &args[0], type_params, errors)) };
+            }
             let resolved_args: Vec<HType> = args.iter().map(|a| resolve_type_in(sym, a, type_params, errors)).collect();
             let key = resolved_args.iter().map(|t| t.key()).collect::<Vec<_>>().join(",");
             // Concrete instantiation already monomorphized → use it.
