@@ -843,7 +843,13 @@ fn collect_inline_callees_expr(sym: &SymTab, e: &HExpr, out: &mut Vec<u32>) {
     }
 }
 
-/// Replace placeholder FuncIds (>= u32::MAX - N) inside Call expressions with real ones.
+/// Base for generic-instantiation placeholder FuncIds.  Placeholders count DOWN
+/// from here (`BASE - req_idx`).  Kept far below the builtin sentinel range
+/// (`u32::MAX - 0..~1024`, used for log/panic/concat/format/...) so a generic
+/// call's placeholder is never mistaken for a builtin by a sentinel check.
+pub const PLACEHOLDER_FID_BASE: u32 = u32::MAX - 0x0010_0000;
+
+/// Replace placeholder FuncIds inside Call expressions with real ones.
 fn rewrite_placeholders(f: &mut HFunc, mapping: &[u32]) {
     fn rw_block(b: &mut HBlock, mapping: &[u32]) {
         for s in &mut b.stmts {
@@ -882,8 +888,8 @@ fn rewrite_placeholders(f: &mut HFunc, mapping: &[u32]) {
         match &mut e.kind {
             HExprKind::Call { callee, args } => {
                 let v = callee.0;
-                if v >= u32::MAX - 1 - (mapping.len() as u32) && v < u32::MAX {
-                    let idx = (u32::MAX - 1 - v) as usize;
+                if v <= PLACEHOLDER_FID_BASE && v + (mapping.len() as u32) > PLACEHOLDER_FID_BASE {
+                    let idx = (PLACEHOLDER_FID_BASE - v) as usize;
                     if idx < mapping.len() {
                         *callee = FuncId(mapping[idx]);
                     }
@@ -914,8 +920,8 @@ fn rewrite_placeholders(f: &mut HFunc, mapping: &[u32]) {
             }
             HExprKind::InlineCall { callee, args } => {
                 let v = callee.0;
-                if v >= u32::MAX - 1 - (mapping.len() as u32) && v < u32::MAX {
-                    let idx = (u32::MAX - 1 - v) as usize;
+                if v <= PLACEHOLDER_FID_BASE && v + (mapping.len() as u32) > PLACEHOLDER_FID_BASE {
+                    let idx = (PLACEHOLDER_FID_BASE - v) as usize;
                     if idx < mapping.len() { *callee = FuncId(mapping[idx]); }
                 }
                 for a in args { rw_expr(a, mapping); }

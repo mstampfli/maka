@@ -1,0 +1,21 @@
+// Generic string-keyed HashMap<V> (here string->int): put/get/has/remove/len,
+// default-on-miss, update, and growth past the initial capacity (8 entries).
+import std.{HashMap, hashmap, hm_put, hm_get, hm_has, hm_remove, hm_len};
+unit main() {
+    mut HashMap<int> m = hashmap(-1);
+    hm_put(&mut m, "a", 1); hm_put(&mut m, "b", 2); hm_put(&mut m, "c", 3);
+    hm_put(&mut m, "d", 4); hm_put(&mut m, "e", 5); hm_put(&mut m, "f", 6);
+    hm_put(&mut m, "g", 7); hm_put(&mut m, "h", 8);     // forces a grow
+    log(hm_len(&m));            // 8
+    log(hm_get(&m, "a"));       // 1
+    log(hm_get(&m, "h"));       // 8
+    log(hm_get(&m, "zzz"));     // -1 (default on miss)
+    hm_put(&mut m, "c", 30);    // update existing
+    log(hm_get(&m, "c"));       // 30
+    log(hm_len(&m));            // 8 (update, not insert)
+    if (hm_has(&m, "e")) { log(1); } else { log(0); }   // 1
+    _ = hm_remove(&mut m, "e");
+    if (hm_has(&m, "e")) { log(1); } else { log(0); }   // 0
+    log(hm_len(&m));           // 7
+    log(hm_get(&m, "e"));      // -1 (removed -> default)
+}

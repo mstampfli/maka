@@ -111,7 +111,12 @@ impl<'a> Cx<'a> {
         self.emit_structs_and_enums();
 
         // First pass: scan for slice/vec types used in signatures and function bodies so we can typedef them.
-        let funcs = self.sym.funcs.clone();
+        // Skip generic templates (non-empty type_params) - only their concrete
+        // instantiations are emitted; a template carries TyVar types (e.g.
+        // `Vec<V>`) that would produce bogus typedefs.
+        let funcs: Vec<HFunc> = self.sym.funcs.clone().into_iter()
+            .filter(|f| self.sym.func_sig(f.id).type_params.is_empty())
+            .collect();
         for f in &funcs {
             self.scan_func(f);
         }
@@ -4781,6 +4786,9 @@ impl<'a> Cx<'a> {
         let structs = self.sym.structs.clone();
         let enums = self.sym.enums.clone();
         for s in &structs {
+            // Skip generic templates - their fields carry TyVar types (`Vec<V>`)
+            // that would emit bogus typedefs.  Only instantiations are emitted.
+            if !s.type_params.is_empty() { continue; }
             for f in &s.fields { self.note_type(&f.ty); }
         }
         self.emit_slice_typedefs();
@@ -9326,6 +9334,10 @@ fn move_out_owned_place(e: &HExpr) -> bool {
     match &e.kind {
         HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => match &base.ty {
             HType::Struct(_) | HType::Enum(_) | HType::Array { .. } | HType::Vec { .. } => move_out_owned_place(base),
+            // A `&mut` borrow grants mutable access to owned data, so moving out
+            // of one of its fields/elements is valid (and must null the slot).
+            // A `&T` borrow / `*T` / `raw *T` is not owned - do not null.
+            HType::Ref { mutable: true, .. } => move_out_owned_place(base),
             HType::OwnPtr { .. } | HType::Heap { .. } => true,
             _ => false,
         },

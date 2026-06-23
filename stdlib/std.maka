@@ -520,6 +520,7 @@ pub int file_truncate(int fd, int len)      { return __file_truncate(fd, len); }
 extern "__maka_rt_read_file"     String __rt_read_file (string path);
 extern "__maka_rt_write_file"    int    __rt_write_file(string path, string content, int len);
 extern "__maka_rt_str_byte"      int    __rt_str_byte  (string s, int i);
+extern "__maka_rt_str_hash"      int    __rt_str_hash  (string s);
 // Owned substring - the C side mallocs, so the result is an owned String that
 // auto-frees (the borrowed `str_substring` would leak it inside a Vec<String>).
 extern "__maka_rt_substr_owned"  String __rt_substr    (string s, int start, int len);
@@ -527,6 +528,9 @@ extern "__maka_rt_substr_owned"  String __rt_substr    (string s, int start, int
 // Byte at index `i` of a string (0..len-1), or -1 if out of range.  Strings
 // are not indexable with `s[i]`; this is the byte-level read accessor.
 pub int str_byte(string s, int i) { return __rt_str_byte(s, i); }
+
+// Non-negative FNV-1a hash of a string (for hash maps).
+pub int str_hash(string s) { return __rt_str_hash(s); }
 
 // Read an entire file into an owned String.  Returns null if the file cannot
 // be opened.  The buffer auto-frees at scope exit.
@@ -561,6 +565,124 @@ pub Vec<String> read_lines(string path) {
     if (text == null) { Vec<String> empty = []; return empty; }
     return split_lines(text);
 }
+
+// An owned copy of a string (heap String that auto-frees).
+pub String str_dup(string s) { return __rt_substr(s, 0, str_len(s) as int); }
+
+// =====================================================================
+// HashMap<V> - generic, string-keyed hash map (open addressing, linear
+// probing, power-of-2 capacity, grows at 75% load).  Pure Maka on top of
+// Vec + str_hash + str_eq; the only C primitives are the hash and an owned
+// string copy.  Keys are owned copies, freed when the map drops.
+//
+// V should be a value/copyable type (int, float, bool, char, enum, or a
+// non-owning pointer) - the map stores values by copy and fills empty slots
+// with the default.  string->int (a symbol table) is the canonical use.
+// =====================================================================
+pub data HashMap<V> {
+    mut Vec<String> keys;     // owned key copies; null in empty/tombstone slots
+    mut Vec<V> vals;
+    mut Vec<int> states;      // 0 = empty, 1 = full, 2 = tombstone
+    V dflt;                   // returned on a miss; fills empty slots
+    mut int count;
+    mut int cap;
+}
+
+// Create an empty map.  `dflt` is the value returned by `hm_get` on a miss
+// (and is what V infers from): e.g. `hashmap(0)` for a string->int map.
+pub HashMap<V> hashmap<V>(V dflt) {
+    HashMap<V> m = { keys = [], vals = [], states = [], dflt = dflt, count = 0, cap = 0 };
+    return m;
+}
+
+// Resize to `newcap` (a power of two) and rehash the live entries.
+unit hm_grow<V>(&mut HashMap<V> m, int newcap) {
+    Vec<String> nk = [];
+    Vec<V> nv = [];
+    Vec<int> ns = [];
+    for (int i in 0..newcap) {
+        push(nk, null);
+        push(nv, m.dflt);
+        push(ns, 0);
+    }
+    mut int j = 0;
+    while (j < m.cap) {
+        if (m.states[j] == 1) {
+            String k = m.keys[j];                    // move key out of old slot
+            mut int idx = str_hash(k) & (newcap - 1);
+            while (ns[idx] == 1) { idx = (idx + 1) & (newcap - 1); }
+            nk[idx] = k;                             // move key into new slot
+            nv[idx] = m.vals[j];
+            ns[idx] = 1;
+        }
+        j = j + 1;
+    }
+    m.keys = nk;        // drop-on-reassign frees the old arrays (moved-out
+    m.vals = nv;        // keys are null, so they are skipped)
+    m.states = ns;
+    m.cap = newcap;
+}
+
+// Insert or update `key -> val`.
+pub unit hm_put<V>(&mut HashMap<V> m, string key, V val) {
+    if (m.cap == 0) {
+        hm_grow(m, 8);
+    } else if ((m.count + 1) * 4 > m.cap * 3) {
+        hm_grow(m, m.cap * 2);
+    }
+    mut int idx = str_hash(key) & (m.cap - 1);
+    while (m.states[idx] == 1) {
+        if (str_eq(m.keys[idx], key)) { m.vals[idx] = val; return; }
+        idx = (idx + 1) & (m.cap - 1);
+    }
+    m.keys[idx] = str_dup(key);
+    m.vals[idx] = val;
+    m.states[idx] = 1;
+    m.count = m.count + 1;
+}
+
+// Look up `key`, returning its value or the map's default on a miss.
+pub V hm_get<V>(&HashMap<V> m, string key) {
+    if (m.cap == 0) { return m.dflt; }
+    mut int idx = str_hash(key) & (m.cap - 1);
+    while (m.states[idx] != 0) {
+        if (m.states[idx] == 1) {
+            if (str_eq(m.keys[idx], key)) { return m.vals[idx]; }
+        }
+        idx = (idx + 1) & (m.cap - 1);
+    }
+    return m.dflt;
+}
+
+// Is `key` present?
+pub bool hm_has<V>(&HashMap<V> m, string key) {
+    if (m.cap == 0) { return false; }
+    mut int idx = str_hash(key) & (m.cap - 1);
+    while (m.states[idx] != 0) {
+        if (m.states[idx] == 1 && str_eq(m.keys[idx], key)) { return true; }
+        idx = (idx + 1) & (m.cap - 1);
+    }
+    return false;
+}
+
+// Remove `key`; returns true if it was present.
+pub bool hm_remove<V>(&mut HashMap<V> m, string key) {
+    if (m.cap == 0) { return false; }
+    mut int idx = str_hash(key) & (m.cap - 1);
+    while (m.states[idx] != 0) {
+        if (m.states[idx] == 1 && str_eq(m.keys[idx], key)) {
+            m.keys[idx] = null;       // free the owned key (drop-on-reassign)
+            m.states[idx] = 2;        // tombstone
+            m.count = m.count - 1;
+            return true;
+        }
+        idx = (idx + 1) & (m.cap - 1);
+    }
+    return false;
+}
+
+// Number of live entries.
+pub int hm_len<V>(&HashMap<V> m) { return m.count; }
 
 // =====================================================================
 // Filesystem queries + environment + process control.

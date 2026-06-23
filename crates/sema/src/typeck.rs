@@ -22,6 +22,10 @@ pub struct TypeChecker<'a> {
     pub sync_probes: Vec<String>,
     /// current function return type (for `return` validation)
     cur_ret: HType,
+    /// Type parameters of the function currently being checked, so local
+    /// variable annotations inside a generic body (e.g. `Vec<V> nv = [];`) can
+    /// resolve the type vars.
+    cur_type_params: Vec<String>,
     /// Whether the current function is `inline` (governs `propagate` legality).
     cur_is_inline: bool,
     /// Dotted module path of the function currently being checked.  Used to enforce
@@ -265,6 +269,7 @@ impl<'a> TypeChecker<'a> {
             send_probes: Vec::new(),
             sync_probes: Vec::new(),
             cur_ret: HType::Unit,
+            cur_type_params: Vec::new(),
             cur_is_inline: false,
             cur_module: Vec::new(),
             cur_imports: Vec::new(),
@@ -282,6 +287,16 @@ impl<'a> TypeChecker<'a> {
             synth_sigs: Vec::new(),
             synth_funcs: Vec::new(),
         }
+    }
+
+    /// Resolve a type annotation appearing inside a function body (local var,
+    /// for-each binding, lambda param).  Uses the current function's type params
+    /// so generic type vars resolve, then applies the instantiation substitution
+    /// and concretizes any resulting `Name<concrete..>` pattern to its struct.
+    fn resolve_local_ty(&mut self, t: &ast::Type) -> HType {
+        let tps = self.cur_type_params.clone();
+        let raw = resolve_type_in(self.sym, t, &tps, &mut self.errors);
+        concretize_generic_patterns(&raw.subst(&self.subst), self.sym)
     }
 
     pub fn with_subst(mut self, subst: std::collections::HashMap<String, HType>) -> Self {
@@ -305,7 +320,12 @@ impl<'a> TypeChecker<'a> {
             }
         };
         let ret_t = resolve_type_in(self.sym, &f.ret, &f.type_params, &mut self.errors);
-        self.cur_ret = ret_t.subst(&self.subst);
+        // After substituting the instantiation's type args, resolve any
+        // `Name<concrete..>` pattern to its monomorphized struct/enum so the
+        // body sees a real Struct/Enum (not a GenericPattern) - needed for
+        // field access, codegen c_type, etc. on a generic param like `&mut Map<int>`.
+        self.cur_ret = concretize_generic_patterns(&ret_t.subst(&self.subst), self.sym);
+        self.cur_type_params = f.type_params.clone();
         self.cur_is_inline = f.is_inline;
         // Read the module path off the function's already-resolved sig so we can
         // check it against callees' modules later.
@@ -328,7 +348,7 @@ impl<'a> TypeChecker<'a> {
         let mut param_ids = Vec::new();
         for p in &f.params {
             let raw = resolve_type_in(self.sym, &p.ty, &f.type_params, &mut self.errors);
-            let ty = raw.subst(&self.subst);
+            let ty = concretize_generic_patterns(&raw.subst(&self.subst), self.sym);
             if !lifted_in_unsafe {
                 self.ban_unit_ptr_in_user_code(&ty, "function parameter", p.span);
             }
@@ -487,7 +507,7 @@ impl<'a> TypeChecker<'a> {
                 self.err("`mut *T` is invalid: pointer bindings are always reassignable", span);
             }
         }
-        let mut declared = resolve_type(self.sym, ty, &mut self.errors);
+        let mut declared = self.resolve_local_ty(ty);
         let cur_module = self.cur_module.clone();
         let cur_imports = self.cur_imports.clone();
         check_type_visibility(self.sym, &declared, &cur_module, &cur_imports, span, &mut self.errors);
@@ -3622,7 +3642,7 @@ impl<'a> TypeChecker<'a> {
                 caller_has_imports: self.cur_has_imports.clone(),
             });
             // Placeholder FuncId — value encodes the request index. Analyze rewrites it.
-            (FuncId(u32::MAX - 1 - req_idx as u32), new_param_tys, new_ret)
+            (FuncId(crate::PLACEHOLDER_FID_BASE - req_idx as u32), new_param_tys, new_ret)
         };
 
         let mut hargs = Vec::new();
@@ -3996,7 +4016,7 @@ impl<'a> TypeChecker<'a> {
         //    with captures bound as fresh locals reading from `env.<name>`.
         let resolved_ret = resolve_type_in(self.sym, ret_ty, &[], &mut self.errors);
         let resolved_params: Vec<HType> = params.iter().map(|p|
-            resolve_type_in(self.sym, &p.ty, &[], &mut self.errors)
+            self.resolve_local_ty(&p.ty)
         ).collect();
 
         // Build a sub-TypeChecker for the lifted function body.
@@ -4115,7 +4135,7 @@ impl<'a> TypeChecker<'a> {
         var_ty: &ast::Type, var_name: &str,
         src: &ast::Expr, body: &ast::Block, sp: Span,
     ) -> HStmt {
-        let declared = resolve_type_in(self.sym, var_ty, &[], &mut self.errors);
+        let declared = self.resolve_local_ty(var_ty);
         let src_probe = self.check_expr(src, None);
 
         // User-iterator path: when `src` is a struct value with a `next` method
@@ -4243,7 +4263,7 @@ impl<'a> TypeChecker<'a> {
         body: &ast::Block, sp: Span,
     ) -> HStmt {
         // Lower to native C-style `for (init; cond; step) body` so `continue` triggers `step`.
-        let declared = resolve_type_in(self.sym, var_ty, &[], &mut self.errors);
+        let declared = self.resolve_local_ty(var_ty);
 
         self.enter_scope();
         let start_h = self.check_expr_coerce(start, &declared);
