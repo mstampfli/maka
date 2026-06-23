@@ -1250,7 +1250,11 @@ impl<'a> Cx<'a> {
         self.w("static __thread maka_sched_tick_t* __maka_my_tick = NULL;\n");
         self.w("static _Atomic int __maka_watchdog_started = 0;\n");
         self.w("static int64_t __maka_watchdog_threshold_ns = 0;\n");
-        self.w("static __thread maka_fiber_t* maka_join_target = NULL;\n");
+        // The awaited completion (a refcounted Thread, NOT the fiber): the
+        // fiber is freed by the completion handler as soon as it finishes, so
+        // holding the fiber here and reading `->completion` later is a
+        // use-after-free.  The Thread outlives the fiber (the joiner holds a ref).
+        self.w("static __thread Thread* maka_join_target = NULL;\n");
         self.w("static __thread maka_fiber_t* maka_anchor_fiber = NULL;\n");
         self.w("static __thread int maka_anchor_wake_on_finish = 0;\n");
         self.w("static __thread int maka_epoll_fd = -1;\n");
@@ -1717,7 +1721,7 @@ impl<'a> Cx<'a> {
         self.w("        }\n");
         self.w("        /* Is the awaited target done? */\n");
         self.w("        if (maka_join_target) {\n");
-        self.w("            Thread* tgt = maka_join_target->completion;\n");
+        self.w("            Thread* tgt = maka_join_target;\n");
         self.w("            int done = 0;\n");
         self.w("            pthread_mutex_lock(&tgt->done_mutex);\n");
         self.w("            done = tgt->done_flag;\n");
@@ -2742,7 +2746,7 @@ impl<'a> Cx<'a> {
         self.w("                }\n");
         self.w("            }\n");
         self.w("            if (target) {\n");
-        self.w("                maka_join_target = target;\n");
+        self.w("                maka_join_target = t; /* the Thread (outlives the fiber), not target */\n");
         self.w("                /* Switch into the scheduler; it'll swap back to us when\n");
         self.w("                   target finishes. */\n");
         // Sub-fiber-safe: enqueue me on target->waiters so the natural
