@@ -1,0 +1,8 @@
+// Arrays of owning pointers: each element is freed when the array drops
+// (heap array frees buffer + elements; stack array frees elements at scope).
+unit main() {
+    own &[*]own *int v = [alloc 1, alloc 2, alloc 3];
+    log(v.len as int);           // 3
+    [3]own *int arr = [alloc 10, alloc 20, alloc 30];
+    log(arr.len as int);         // 3
+}

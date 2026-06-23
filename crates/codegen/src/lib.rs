@@ -4660,13 +4660,27 @@ impl<'a> Cx<'a> {
                 self.wl("}");
             }
             HType::Heap { inner } => {
-                if matches!(inner.as_ref(), HType::Vec { .. }) {
-                    // `own &[*]T` owns a malloc'd buffer.  (Per-element drop for a
-                    // vector of owning elements is not yet generated.)
+                if let HType::Vec { elem } = inner.as_ref() {
+                    // `own &[*]T` owns a malloc'd buffer.  If the elements own heap
+                    // (e.g. `[*]own *int`), drop each before freeing the buffer.
+                    if self.drop_ty_owns(elem) {
+                        let i = format!("__v{}", depth);
+                        self.wl(&format!("for (size_t {0} = 0; {0} < ({1}).len; {0}++) {{", i, lv));
+                        self.open();
+                        let elem_lv = format!("({}).data[{}]", lv, i);
+                        self.emit_field_drop(&elem_lv, elem, depth + 1);
+                        self.close();
+                        self.wl("}");
+                    }
                     self.wl(&format!("free({}.data);", lv));
                 } else {
+                    // Null guard: a field moved out (invalidated) is NULL here.
+                    self.wl(&format!("if ({}) {{", lv));
+                    self.open();
                     self.emit_pointee_drop(lv, inner, depth);
                     self.wl(&format!("free({});", lv));
+                    self.close();
+                    self.wl("}");
                 }
             }
             HType::Struct(id) if self.drop_ty_owns(ty) => {
@@ -5249,11 +5263,19 @@ impl<'a> Cx<'a> {
                 if matches!(inner.as_ref(), HType::Dyn { .. }) {
                     return self.c_type(inner);
                 }
+                // A pointer to a fixed array (`own *[N]T`, `&[N]T`, ...) decays to a
+                // pointer-to-element in C.  C cannot spell `int (*)[N]` in our prefix
+                // type model, and every observation (`p![i]`, `p!.len`) wants the
+                // element pointer anyway; the length N rides along in the Maka type.
+                if let HType::Array { elem, .. } = inner.as_ref() {
+                    return format!("{}*", self.c_type(elem));
+                }
                 format!("{}*", self.c_type(inner))
             }
             HType::Heap { inner } => match inner.as_ref() {
                 // heap [*]T is just the Vec struct (no extra indirection)
                 HType::Vec { .. } => self.c_type(inner),
+                HType::Array { elem, .. } => format!("{}*", self.c_type(elem)),
                 _ => format!("{}*", self.c_type(inner)),
             },
             HType::Array { len, elem } => {
@@ -7662,6 +7684,17 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// Moving an owning value out of a place (`own *T px = c.x;`) invalidates the
+    /// source field/element so the owner's drop skips it - no double free.  Only
+    /// nulls when the source is genuinely owned (not read through a borrow).
+    fn emit_move_out_null(&mut self, f: &HFunc, src: &HExpr) {
+        if !matches!(&src.ty, HType::OwnPtr { .. } | HType::Heap { .. }) { return; }
+        if !matches!(&src.kind, HExprKind::Field { .. } | HExprKind::Index { .. }) { return; }
+        if !move_out_owned_place(src) { return; }
+        let place = self.emit_place(f, src);
+        self.wl(&format!("{} = NULL;", place));
+    }
+
     fn emit_let(&mut self, f: &HFunc, id: LocalId, init: &HExpr) {
         let li = &f.locals[id.0 as usize];
         let name = local_name(id, &li.name);
@@ -7673,11 +7706,14 @@ impl<'a> Cx<'a> {
                     self.wl(&format!("{} {} = {};", self.c_type(inner), name, value_s));
                     return;
                 }
+                // Pointer C type for this owning slot.  `own &[N]T` decays to an
+                // element pointer (`T*`); `own &T` is `T*`.
+                let ptr_ty = self.c_type(&li.ty);
                 // Detect move from another heap local: init is HExprKind::Local pointing at a heap local.
                 if let HExprKind::Local(src) = init.kind {
                     if matches!(f.locals[src.0 as usize].ty, HType::Heap { .. }) {
                         // move
-                        self.wl(&format!("{}* {} = {}; /* moved */", self.c_type(inner), name, local_name(src, &f.locals[src.0 as usize].name)));
+                        self.wl(&format!("{} {} = {}; /* moved */", ptr_ty, name, local_name(src, &f.locals[src.0 as usize].name)));
                         return;
                     }
                 }
@@ -7685,7 +7721,7 @@ impl<'a> Cx<'a> {
                 if let HExprKind::Call { .. } = init.kind {
                     if matches!(init.ty, HType::Heap { .. }) {
                         let s = self.emit_expr(f, init);
-                        self.wl(&format!("{}* {} = {};", self.c_type(inner), name, s));
+                        self.wl(&format!("{} {} = {};", ptr_ty, name, s));
                         return;
                     }
                 }
@@ -7693,12 +7729,13 @@ impl<'a> Cx<'a> {
                 // assign the pointer, don't re-alloc and deref-assign.
                 if matches!(init.kind, HExprKind::HeapAlloc(_)) {
                     let s = self.emit_expr(f, init);
-                    self.wl(&format!("{}* {} = {};", self.c_type(inner), name, s));
+                    self.wl(&format!("{} {} = {};", ptr_ty, name, s));
                     return;
                 }
                 // New allocation: value expression of type `T` lifted into heap slot.
                 let value_s = self.emit_expr(f, init);
-                self.wl(&format!("{}* {} = ({}*)malloc(sizeof({}));", self.c_type(inner), name, self.c_type(inner), self.c_type(inner)));
+                let ic = self.c_type(inner);
+                self.wl(&format!("{} {} = ({})malloc(sizeof({}));", ptr_ty, name, ptr_ty, ic));
                 self.wl(&format!("*{} = {};", name, value_s));
             }
             HType::Array { .. } => {
@@ -7709,6 +7746,7 @@ impl<'a> Cx<'a> {
                 let value_s = self.emit_expr(f, init);
                 let prefix = if li.thread_local { "static __thread " } else { "" };
                 self.wl(&format!("{}{} = {};", prefix, self.c_decl(&li.ty, &name), value_s));
+                self.emit_move_out_null(f, init);
             }
         }
     }
@@ -7738,6 +7776,7 @@ impl<'a> Cx<'a> {
             return;
         }
         self.wl(&format!("{} {} {};", lhs, assign_op_c(op), rhs));
+        self.emit_move_out_null(f, value);
     }
 
     /// Emit an lvalue suitable for the LHS of an assignment.
@@ -7760,6 +7799,12 @@ impl<'a> Cx<'a> {
             }
             HExprKind::Unwrap { expr, skip_check: _ } => {
                 let inner = self.emit_expr(f, expr);
+                // Pointer-to-fixed-array: the element pointer is the array base (no deref).
+                if matches!(&expr.ty,
+                    HType::Ptr { inner: i, .. } | HType::OwnPtr { inner: i, .. } | HType::RawPtr { inner: i, .. } | HType::Ref { inner: i, .. } | HType::Heap { inner: i }
+                    if matches!(i.as_ref(), HType::Array { .. })) {
+                    return inner;
+                }
                 format!("(*({}))", inner)
             }
             _ => self.emit_expr(f, e),
@@ -7833,17 +7878,28 @@ impl<'a> Cx<'a> {
                 }
             }
             HType::Heap { inner } => match inner.as_ref() {
+                // heap fixed array: base is already the element pointer (no deref).
                 HType::Array { len, .. } => {
                     if self.idx_in_const_bound(*len, idx) {
-                        format!("((*{})[(maka_int)({})])", base_s, idx_s)
+                        format!("(({})[(maka_int)({})])", base_s, idx_s)
                     } else {
-                        format!("((*{})[maka_check_idx((maka_int)({}), (maka_int){}, \"array idx\")])", base_s, idx_s, len)
+                        format!("(({})[maka_check_idx((maka_int)({}), (maka_int){}, \"array idx\")])", base_s, idx_s, len)
                     }
                 }
                 // heap [*]T: base is Vec_T (no deref)
                 HType::Vec { .. } => format!("(({}).data[maka_check_idx((maka_int)({}), ({}).len, \"vec idx\")])", base_s, idx_s, base_s),
                 _ => format!("(({})[{}])", base_s, idx_s),
             },
+            // Borrow / non-owning pointer to a fixed array: base is the element
+            // pointer; index with the array's static bound.
+            HType::Ref { inner, .. } | HType::Ptr { inner, .. } if matches!(inner.as_ref(), HType::Array { .. }) => {
+                let len = if let HType::Array { len, .. } = inner.as_ref() { *len } else { 0 };
+                if self.idx_in_const_bound(len, idx) {
+                    format!("(({})[(maka_int)({})])", base_s, idx_s)
+                } else {
+                    format!("(({})[maka_check_idx((maka_int)({}), (maka_int){}, \"array idx\")])", base_s, idx_s, len)
+                }
+            }
             _ => format!("(({})[{}])", base_s, idx_s),
         }
     }
@@ -7909,6 +7965,12 @@ impl<'a> Cx<'a> {
                     HType::Slice { .. } => format!("({}).len", s),
                     HType::Vec { .. } => format!("({}).len", s),
                     HType::Heap { inner: i } => match i.as_ref() {
+                        HType::Vec { .. } => format!("({}).len", s),
+                        HType::Array { len, .. } => format!("(maka_int){}", len),
+                        _ => "0".into(),
+                    },
+                    // `.len` through a borrow / non-owning pointer to an array or vec.
+                    HType::Ref { inner: i, .. } | HType::Ptr { inner: i, .. } => match i.as_ref() {
                         HType::Vec { .. } => format!("({}).len", s),
                         HType::Array { len, .. } => format!("(maka_int){}", len),
                         _ => "0".into(),
@@ -7985,6 +8047,13 @@ impl<'a> Cx<'a> {
             }
             HExprKind::Unwrap { expr, skip_check: _ } => {
                 let s = self.emit_expr(f, expr);
+                // `p!` on a pointer-to-fixed-array yields the array base, which the
+                // element-pointer representation already holds - no deref.
+                if matches!(&expr.ty,
+                    HType::Ptr { inner, .. } | HType::OwnPtr { inner, .. } | HType::RawPtr { inner, .. } | HType::Ref { inner, .. } | HType::Heap { inner }
+                    if matches!(inner.as_ref(), HType::Array { .. })) {
+                    return s;
+                }
                 format!("(*({}))", s)
             }
             HExprKind::AddrOfRef { place, .. } => {
@@ -7993,6 +8062,11 @@ impl<'a> Cx<'a> {
                     return self.emit_place(f, place);
                 }
                 let p = self.emit_place(f, place);
+                // Address of a fixed array decays to an element pointer in C - the
+                // pointer-to-array type (`&[N]T`) is represented as `T*`.
+                if matches!(&place.ty, HType::Array { .. }) {
+                    return format!("({})", p);
+                }
                 format!("(&({}))", p)
             }
             HExprKind::Field { base, field } => {
@@ -8672,6 +8746,20 @@ impl<'a> Cx<'a> {
                 format!("(*({}))", s)
             }
             HExprKind::HeapAlloc(inner) => {
+                // `alloc [N]T` -> a heap fixed array (`own *[N]T`): malloc N elements
+                // and fill them.  C forbids assigning to a whole array (`*__p = {...}`),
+                // so write element-by-element into an element-typed buffer.
+                if let HType::Array { len, elem } = &inner.ty {
+                    let elem_c = self.c_type(elem);
+                    if let HExprKind::ArrayLit(elems) = &inner.kind {
+                        let stores: String = elems.iter().enumerate()
+                            .map(|(i, el)| { let s = self.emit_expr(f, el); format!("__d[{}] = {}; ", i, s) }).collect();
+                        return format!("(__extension__ ({{ {0}* __d = ({0}*)malloc(sizeof({0})*{1}); {2}__d; }}))", elem_c, len, stores);
+                    }
+                    // Non-literal array value: stage in a temp, then copy element-wise.
+                    let v = self.emit_expr(f, inner);
+                    return format!("(__extension__ ({{ {0} __s[{1}] = {2}; {0}* __d = ({0}*)malloc(sizeof({0})*{1}); for (size_t __i=0;__i<(size_t){1};__i++) __d[__i]=__s[__i]; __d; }}))", elem_c, len, v);
+                }
                 let inner_c = self.c_type(&inner.ty);
                 let v = self.emit_expr(f, inner);
                 format!("(__extension__ ({{ {0}* __p = ({0}*)malloc(sizeof({0})); *__p = ({1}); __p; }}))", inner_c, v)
@@ -9100,6 +9188,22 @@ fn place_root_is(e: &HExpr, iv: u32) -> bool {
         HExprKind::Local(id) => id.0 == iv,
         HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => place_root_is(base, iv),
         HExprKind::Unwrap { expr, .. } | HExprKind::DerefRef(expr) => place_root_is(expr, iv),
+        _ => false,
+    }
+}
+
+/// Is this place rooted in something we own (a value local/global, or reached
+/// through an owning pointer) rather than a borrow?  Only then is it sound to
+/// null the place on move-out.  Moving out through a `&T`/`*T` borrow is not.
+fn move_out_owned_place(e: &HExpr) -> bool {
+    match &e.kind {
+        HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => match &base.ty {
+            HType::Struct(_) | HType::Enum(_) | HType::Array { .. } => move_out_owned_place(base),
+            HType::OwnPtr { .. } | HType::Heap { .. } => true,
+            _ => false,
+        },
+        HExprKind::Unwrap { expr, .. } => matches!(&expr.ty, HType::OwnPtr { .. } | HType::Heap { .. }),
+        HExprKind::Local(_) | HExprKind::GlobalRef(_) => true,
         _ => false,
     }
 }

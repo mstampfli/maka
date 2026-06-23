@@ -1865,6 +1865,12 @@ impl<'a> TypeChecker<'a> {
                 HType::Vec { elem } | HType::Array { elem, .. } => (**elem).clone(),
                 _ => return self.try_index_overload_or_err(bh, ih_probe, sp),
             },
+            // A borrow of an array/vector (`&[N]T`, `&[*]T`) indexes through to
+            // the element - e.g. a non-owning pointer to a stack array.
+            HType::Ref { inner, .. } => match inner.as_ref() {
+                HType::Vec { elem } | HType::Array { elem, .. } => (**elem).clone(),
+                _ => return self.try_index_overload_or_err(bh, ih_probe, sp),
+            },
             _ => return self.try_index_overload_or_err(bh, ih_probe, sp),
         };
         // The index may be `int` or `usize` (the latter is what `.len` yields,

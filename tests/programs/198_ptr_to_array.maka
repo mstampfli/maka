@@ -1,0 +1,15 @@
+// Non-owning pointer (`*[N]T`, `*const [N]T`) and ref (`&[N]T`) to a stack
+// array: indexing, write-through, and `.len`.
+unit main() {
+    mut [4]int a = [10, 20, 30, 40];
+    *[4]int p = &mut a;
+    if (p != null) { p![1] = 99; log(p![0]); log(p!.len as int); }
+    log(a[1]);                   // 99 - mutation visible on the array
+    [3]int b = [7, 8, 9];
+    *const [3]int cp = &b;
+    if (cp != null) { log(cp![2]); }   // 9
+    &[3]int r = &b;
+    mut int s = 0;
+    for (int i in 0..(r.len as int)) { s = s + r[i]; }
+    log(s);                      // 24
+}

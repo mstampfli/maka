@@ -1324,13 +1324,51 @@ fn hoist_one(e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: &mut Vec<HStmt>) {
 /// by skipping any local that appears as the direct value of a `return` or as a move
 /// argument inside the block). For v1 we adopt the safe always-drop-if-not-moved-at-end
 /// reading and rely on the move tracker to keep this consistent.
-fn fill_heap_drops(_sym: &SymTab, f: &mut HFunc) {
+/// Does a value of this type transitively own heap storage (so it needs a drop
+/// at scope exit, and transfers ownership when passed/returned by value)?
+/// Mirrors codegen's `drop_ty_owns`.  Owning pointers short-circuit, so
+/// recursive owning types (`data Node { own *Node next }`) terminate; a `seen`
+/// set guards against any pathological by-value cycle.
+fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
+    fn go(sym: &SymTab, ty: &HType, seen: &mut Vec<u64>) -> bool {
+        match ty {
+            HType::Heap { .. } | HType::OwnPtr { .. } => true,
+            HType::Struct(id) => {
+                let k = id.0 as u64;
+                if seen.contains(&k) { return false; }
+                seen.push(k);
+                let r = sym.struct_info(*id).fields.iter().any(|fi| go(sym, &fi.ty, seen));
+                seen.pop();
+                r
+            }
+            HType::Enum(id) => {
+                let k = (id.0 as u64) | (1u64 << 32);
+                if seen.contains(&k) { return false; }
+                seen.push(k);
+                let r = sym.enum_info(*id).variants.iter().any(|v| v.fields.iter().any(|fi| go(sym, &fi.ty, seen)));
+                seen.pop();
+                r
+            }
+            HType::Array { elem, .. } => go(sym, elem, seen),
+            _ => false,
+        }
+    }
+    go(sym, ty, &mut Vec::new())
+}
+
+/// Is `ty` a by-value composite (struct/enum/array) that owns heap - i.e. one
+/// that the directly-owning `Heap`/`OwnPtr` checks would miss?
+fn is_owning_value_composite(sym: &SymTab, ty: &HType) -> bool {
+    matches!(ty, HType::Struct(_) | HType::Enum(_) | HType::Array { .. }) && ty_owns_heap(sym, ty)
+}
+
+fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
     // We need to walk and, for each block, accumulate `Let { local }` whose local has heap storage.
     // For `return` statements inside that block, the same locals are dropped *before* returning,
     // minus any local being returned (moved-out via the return expression).
 
-    fn moved_locals_in_expr(e: &HExpr, out: &mut std::collections::HashSet<LocalId>) {
-        // local appearing as a heap value at the top of any call arg or return is moved
+    fn moved_locals_in_expr(sym: &SymTab, e: &HExpr, out: &mut std::collections::HashSet<LocalId>) {
+        // local appearing as an owning value at the top of any call arg or return is moved
         match &e.kind {
             HExprKind::Local(_) => {
                 // A bare Local read is NOT a move — it's only a move when it appears
@@ -1340,63 +1378,62 @@ fn fill_heap_drops(_sym: &SymTab, f: &mut HFunc) {
             }
             HExprKind::Call { args, .. } => {
                 for a in args {
-                    if matches!(a.ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
+                    if ty_owns_heap(sym, &a.ty) {
                         if let HExprKind::Local(id) = a.kind { out.insert(id); }
                     }
-                    moved_locals_in_expr(a, out);
+                    moved_locals_in_expr(sym, a, out);
                 }
             }
-            HExprKind::Bin { lhs, rhs, .. } => { moved_locals_in_expr(lhs, out); moved_locals_in_expr(rhs, out); }
-            HExprKind::Un { expr, .. } => moved_locals_in_expr(expr, out),
-            HExprKind::Unwrap { expr, .. } => moved_locals_in_expr(expr, out),
-            HExprKind::AddrOfRef { place, .. } => moved_locals_in_expr(place, out),
-            HExprKind::Field { base, .. } => moved_locals_in_expr(base, out),
-            HExprKind::Index { base, idx } => { moved_locals_in_expr(base, out); moved_locals_in_expr(idx, out); }
-            HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) => moved_locals_in_expr(expr, out),
-            HExprKind::ArrayToSlice { base, .. } => moved_locals_in_expr(base, out),
-            HExprKind::DerefRef(inner) => moved_locals_in_expr(inner, out),
-            HExprKind::HeapAlloc(inner) => moved_locals_in_expr(inner, out),
-            HExprKind::Free(inner) => moved_locals_in_expr(inner, out),
+            HExprKind::Bin { lhs, rhs, .. } => { moved_locals_in_expr(sym, lhs, out); moved_locals_in_expr(sym, rhs, out); }
+            HExprKind::Un { expr, .. } => moved_locals_in_expr(sym, expr, out),
+            HExprKind::Unwrap { expr, .. } => moved_locals_in_expr(sym, expr, out),
+            HExprKind::AddrOfRef { place, .. } => moved_locals_in_expr(sym, place, out),
+            HExprKind::Field { base, .. } => moved_locals_in_expr(sym, base, out),
+            HExprKind::Index { base, idx } => { moved_locals_in_expr(sym, base, out); moved_locals_in_expr(sym, idx, out); }
+            HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) => moved_locals_in_expr(sym, expr, out),
+            HExprKind::ArrayToSlice { base, .. } => moved_locals_in_expr(sym, base, out),
+            HExprKind::DerefRef(inner) => moved_locals_in_expr(sym, inner, out),
+            HExprKind::HeapAlloc(inner) => moved_locals_in_expr(sym, inner, out),
+            HExprKind::Free(inner) => moved_locals_in_expr(sym, inner, out),
             HExprKind::CallIndirect { callee, args } => {
-                moved_locals_in_expr(callee, out);
-                for a in args { moved_locals_in_expr(a, out); }
+                moved_locals_in_expr(sym, callee, out);
+                for a in args { moved_locals_in_expr(sym, a, out); }
             }
             HExprKind::InlineCall { args, .. } => {
-                // Mirror the Call arm — heap/own-ptr args at the InlineCall site
-                // transfer ownership into the inline's parameter local, so the
-                // outer binding must be marked moved for the auto-free at scope
-                // exit to skip it.
+                // Mirror the Call arm — owning args at the InlineCall site transfer
+                // ownership into the inline's parameter local, so the outer binding
+                // must be marked moved for the auto-free at scope exit to skip it.
                 for a in args {
-                    if matches!(a.ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
+                    if ty_owns_heap(sym, &a.ty) {
                         if let HExprKind::Local(id) = a.kind { out.insert(id); }
                     }
-                    moved_locals_in_expr(a, out);
+                    moved_locals_in_expr(sym, a, out);
                 }
             }
             HExprKind::Closure { env_values, .. } => {
-                for v in env_values { moved_locals_in_expr(v, out); }
+                for v in env_values { moved_locals_in_expr(sym, v, out); }
             }
             HExprKind::Transfer(inner) => {
                 if let HExprKind::Local(id) = inner.kind { out.insert(id); }
-                moved_locals_in_expr(inner, out);
+                moved_locals_in_expr(sym, inner, out);
             }
-            HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => moved_locals_in_expr(inner, out),
+            HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => moved_locals_in_expr(sym, inner, out),
             HExprKind::FnRef(_) => {}
-            HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields { moved_locals_in_expr(fe, out); },
+            HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields { moved_locals_in_expr(sym, fe, out); },
             HExprKind::Match { scrutinee, arms, .. } => {
-                moved_locals_in_expr(scrutinee, out);
+                moved_locals_in_expr(sym, scrutinee, out);
                 for a in arms {
-                    if let Some(g) = &a.guard { moved_locals_in_expr(g, out); }
-                    if let Some(v) = &a.value { moved_locals_in_expr(v, out); }
+                    if let Some(g) = &a.guard { moved_locals_in_expr(sym, g, out); }
+                    if let Some(v) = &a.value { moved_locals_in_expr(sym, v, out); }
                 }
             }
-            HExprKind::Struct { fields, .. } => for (_, fe) in fields { moved_locals_in_expr(fe, out); },
-            HExprKind::ArrayLit(es) => for e in es { moved_locals_in_expr(e, out); },
+            HExprKind::Struct { fields, .. } => for (_, fe) in fields { moved_locals_in_expr(sym, fe, out); },
+            HExprKind::ArrayLit(es) => for e in es { moved_locals_in_expr(sym, e, out); },
             _ => {}
         }
     }
 
-    fn visit_block(locals: &[LocalInfo], b: &mut HBlock, scope_chain: &mut Vec<Vec<LocalId>>) {
+    fn visit_block(sym: &SymTab, locals: &[LocalInfo], b: &mut HBlock, scope_chain: &mut Vec<Vec<LocalId>>) {
         scope_chain.push(Vec::new());
         // Track moves up to each position in the block.
         let mut moved: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
@@ -1404,35 +1441,42 @@ fn fill_heap_drops(_sym: &SymTab, f: &mut HFunc) {
             match s {
                 HStmt::Let { local, init, .. } => {
                     // Check init for moves
-                    moved_locals_in_expr(init, &mut moved);
+                    moved_locals_in_expr(sym, init, &mut moved);
                     // A direct-Local init of an owning type transfers ownership.
-                    if matches!(init.ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
+                    if ty_owns_heap(sym, &init.ty) {
                         if let HExprKind::Local(id) = init.kind { moved.insert(id); }
                     }
-                    if matches!(locals[local.0 as usize].ty, HType::Heap { .. } | HType::OwnPtr { .. })
-                        && matches!(locals[local.0 as usize].storage, StorageClass::Heap) {
+                    let lty = &locals[local.0 as usize].ty;
+                    let schedule = if matches!(lty, HType::Heap { .. } | HType::OwnPtr { .. }) {
+                        matches!(locals[local.0 as usize].storage, StorageClass::Heap)
+                    } else {
+                        // A by-value struct/enum/array local that owns heap needs its
+                        // recursive drop run at scope exit too.
+                        is_owning_value_composite(sym, lty)
+                    };
+                    if schedule {
                         scope_chain.last_mut().unwrap().push(*local);
                     }
                 }
                 HStmt::Assign { value, .. } => {
-                    moved_locals_in_expr(value, &mut moved);
-                    if matches!(value.ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
+                    moved_locals_in_expr(sym, value, &mut moved);
+                    if ty_owns_heap(sym, &value.ty) {
                         if let HExprKind::Local(id) = value.kind { moved.insert(id); }
                     }
                 }
                 HStmt::ExprStmt(e) => {
-                    moved_locals_in_expr(e, &mut moved);
+                    moved_locals_in_expr(sym, e, &mut moved);
                 }
                 HStmt::Return { value, heap_drops, .. } => {
                     // The set of heap locals to drop at return = union of all scopes minus the return value.
                     let mut returning: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
                     if let Some(v) = value {
-                        if matches!(v.ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
+                        if ty_owns_heap(sym, &v.ty) {
                             if let HExprKind::Local(id) = v.kind {
                                 returning.insert(id);
                             }
                         }
-                        moved_locals_in_expr(v, &mut moved);
+                        moved_locals_in_expr(sym, v, &mut moved);
                     }
                     let mut drops = Vec::new();
                     for scope in scope_chain.iter() {
@@ -1444,17 +1488,17 @@ fn fill_heap_drops(_sym: &SymTab, f: &mut HFunc) {
                     *heap_drops = drops;
                 }
                 HStmt::If { then_b, else_b, .. } => {
-                    visit_block(locals, then_b, scope_chain);
-                    if let Some(b) = else_b { visit_block(locals, b, scope_chain); }
+                    visit_block(sym, locals, then_b, scope_chain);
+                    if let Some(b) = else_b { visit_block(sym, locals, b, scope_chain); }
                 }
-                HStmt::While { body, .. } => visit_block(locals, body, scope_chain),
-                HStmt::Block(b) => visit_block(locals, b, scope_chain),
-                HStmt::Unsafe(b, _) => visit_block(locals, b, scope_chain),
+                HStmt::While { body, .. } => visit_block(sym, locals, body, scope_chain),
+                HStmt::Block(b) => visit_block(sym, locals, b, scope_chain),
+                HStmt::Unsafe(b, _) => visit_block(sym, locals, b, scope_chain),
                 HStmt::Break(_) | HStmt::Continue(_) => {}
-                HStmt::ForC { body, .. } => visit_block(locals, body, scope_chain),
-                HStmt::ForEach { body, .. } => visit_block(locals, body, scope_chain),
+                HStmt::ForC { body, .. } => visit_block(sym, locals, body, scope_chain),
+                HStmt::ForEach { body, .. } => visit_block(sym, locals, body, scope_chain),
                 HStmt::Propagate { value: Some(v), .. } => {
-                    moved_locals_in_expr(v, &mut moved);
+                    moved_locals_in_expr(sym, v, &mut moved);
                 }
                 HStmt::Propagate { value: None, .. } => {}
             }
@@ -1471,114 +1515,116 @@ fn fill_heap_drops(_sym: &SymTab, f: &mut HFunc) {
 
     let mut chain = Vec::new();
     let locals = f.locals.clone();
-    visit_block(&locals, &mut f.body, &mut chain);
+    visit_block(sym, &locals, &mut f.body, &mut chain);
 
-    // Append heap-storage parameters to the body's heap_to_free so they auto-free
-    // at function scope-exit — unless they were transferred out somewhere in the
-    // body.  Without this, `own *T` / `own &T` parameters would leak (no drop is
-    // ever emitted for them; the caller's drop is suppressed because the call
-    // site marks the source as moved).
+    // Append owning parameters to the body's heap_to_free so they auto-free at
+    // function scope-exit — unless they were transferred out somewhere in the
+    // body.  Covers `own *T` / `own &T` (heap-storage) params and by-value
+    // struct/enum/array params that transitively own heap.  Without this, an
+    // owning param would leak (no drop is otherwise emitted for it; the caller's
+    // drop is suppressed because the call site marks the source as moved).
     let mut param_moved: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
-    collect_param_moves_block(&f.body, &mut param_moved);
+    collect_param_moves_block(sym, &f.body, &mut param_moved);
     for &pid in f.params.iter().rev() {
         let li = &locals[pid.0 as usize];
-        if matches!(li.storage, StorageClass::Heap)
-            && matches!(li.ty, HType::Heap { .. } | HType::OwnPtr { .. })
-            && !param_moved.contains(&pid)
-        {
+        let owns = (matches!(li.storage, StorageClass::Heap)
+                && matches!(li.ty, HType::Heap { .. } | HType::OwnPtr { .. }))
+            || is_owning_value_composite(sym, &li.ty);
+        if owns && !param_moved.contains(&pid) {
             f.body.heap_to_free.push(pid);
         }
     }
     // Also append undropped params to every Return's heap_drops list — early
     // returns must still free param-owned values.
-    append_param_drops_to_returns(&mut f.body, &f.params, &locals, &param_moved);
+    append_param_drops_to_returns(sym, &mut f.body, &f.params, &locals, &param_moved);
 }
 
-fn collect_param_moves_block(b: &HBlock, out: &mut std::collections::HashSet<LocalId>) {
-    for s in &b.stmts { collect_param_moves_stmt(s, out); }
+fn collect_param_moves_block(sym: &SymTab, b: &HBlock, out: &mut std::collections::HashSet<LocalId>) {
+    for s in &b.stmts { collect_param_moves_stmt(sym, s, out); }
 }
-fn collect_param_moves_stmt(s: &HStmt, out: &mut std::collections::HashSet<LocalId>) {
+fn collect_param_moves_stmt(sym: &SymTab, s: &HStmt, out: &mut std::collections::HashSet<LocalId>) {
     match s {
-        HStmt::Let { init, .. } => collect_param_moves_expr(init, out),
-        HStmt::Assign { value, .. } => collect_param_moves_expr(value, out),
-        HStmt::ExprStmt(e) => collect_param_moves_expr(e, out),
+        HStmt::Let { init, .. } => collect_param_moves_expr(sym, init, out),
+        HStmt::Assign { value, .. } => collect_param_moves_expr(sym, value, out),
+        HStmt::ExprStmt(e) => collect_param_moves_expr(sym, e, out),
         HStmt::Return { value: Some(v), .. } => {
             // A return that yields an owning local moves it out.
-            if matches!(v.ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
+            if ty_owns_heap(sym, &v.ty) {
                 if let HExprKind::Local(id) = v.kind { out.insert(id); }
             }
-            collect_param_moves_expr(v, out);
+            collect_param_moves_expr(sym, v, out);
         }
         HStmt::Return { .. } => {}
         HStmt::If { cond, then_b, else_b, .. } => {
-            collect_param_moves_expr(cond, out);
-            collect_param_moves_block(then_b, out);
-            if let Some(b) = else_b { collect_param_moves_block(b, out); }
+            collect_param_moves_expr(sym, cond, out);
+            collect_param_moves_block(sym, then_b, out);
+            if let Some(b) = else_b { collect_param_moves_block(sym, b, out); }
         }
         HStmt::While { cond, body, .. } => {
-            collect_param_moves_expr(cond, out);
-            collect_param_moves_block(body, out);
+            collect_param_moves_expr(sym, cond, out);
+            collect_param_moves_block(sym, body, out);
         }
-        HStmt::Block(b) | HStmt::Unsafe(b, _) => collect_param_moves_block(b, out),
+        HStmt::Block(b) | HStmt::Unsafe(b, _) => collect_param_moves_block(sym, b, out),
         HStmt::ForC { init, cond, step, body, .. } => {
-            collect_param_moves_stmt(init, out);
-            collect_param_moves_expr(cond, out);
-            collect_param_moves_stmt(step, out);
-            collect_param_moves_block(body, out);
+            collect_param_moves_stmt(sym, init, out);
+            collect_param_moves_expr(sym, cond, out);
+            collect_param_moves_stmt(sym, step, out);
+            collect_param_moves_block(sym, body, out);
         }
         HStmt::ForEach { src, body, .. } => {
-            collect_param_moves_expr(src, out);
-            collect_param_moves_block(body, out);
+            collect_param_moves_expr(sym, src, out);
+            collect_param_moves_block(sym, body, out);
         }
-        HStmt::Propagate { value: Some(v), .. } => collect_param_moves_expr(v, out),
+        HStmt::Propagate { value: Some(v), .. } => collect_param_moves_expr(sym, v, out),
         HStmt::Propagate { value: None, .. } => {}
         HStmt::Break(_) | HStmt::Continue(_) => {}
     }
 }
-fn collect_param_moves_expr(e: &HExpr, out: &mut std::collections::HashSet<LocalId>) {
+fn collect_param_moves_expr(sym: &SymTab, e: &HExpr, out: &mut std::collections::HashSet<LocalId>) {
     match &e.kind {
         HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } => {
             for a in args {
-                if matches!(a.ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
+                if ty_owns_heap(sym, &a.ty) {
                     if let HExprKind::Local(id) = a.kind { out.insert(id); }
                 }
-                collect_param_moves_expr(a, out);
+                collect_param_moves_expr(sym, a, out);
             }
         }
         HExprKind::Bin { lhs, rhs, .. } => {
-            collect_param_moves_expr(lhs, out);
-            collect_param_moves_expr(rhs, out);
+            collect_param_moves_expr(sym, lhs, out);
+            collect_param_moves_expr(sym, rhs, out);
         }
-        HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } => collect_param_moves_expr(expr, out),
-        HExprKind::AddrOfRef { place, .. } => collect_param_moves_expr(place, out),
-        HExprKind::Field { base, .. } => collect_param_moves_expr(base, out),
+        HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } => collect_param_moves_expr(sym, expr, out),
+        HExprKind::AddrOfRef { place, .. } => collect_param_moves_expr(sym, place, out),
+        HExprKind::Field { base, .. } => collect_param_moves_expr(sym, base, out),
         HExprKind::Index { base, idx } => {
-            collect_param_moves_expr(base, out);
-            collect_param_moves_expr(idx, out);
+            collect_param_moves_expr(sym, base, out);
+            collect_param_moves_expr(sym, idx, out);
         }
         HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. }
-        | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr) => collect_param_moves_expr(expr, out),
-        HExprKind::ArrayToSlice { base, .. } => collect_param_moves_expr(base, out),
-        HExprKind::HeapAlloc(inner) | HExprKind::Free(inner) => collect_param_moves_expr(inner, out),
+        | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr) => collect_param_moves_expr(sym, expr, out),
+        HExprKind::ArrayToSlice { base, .. } => collect_param_moves_expr(sym, base, out),
+        HExprKind::HeapAlloc(inner) | HExprKind::Free(inner) => collect_param_moves_expr(sym, inner, out),
         HExprKind::CallIndirect { callee, args } => {
-            collect_param_moves_expr(callee, out);
-            for a in args { collect_param_moves_expr(a, out); }
+            collect_param_moves_expr(sym, callee, out);
+            for a in args { collect_param_moves_expr(sym, a, out); }
         }
-        HExprKind::Closure { env_values, .. } => for v in env_values { collect_param_moves_expr(v, out); },
+        HExprKind::Closure { env_values, .. } => for v in env_values { collect_param_moves_expr(sym, v, out); },
         HExprKind::Transfer(inner) => {
             if let Some(id) = root_local(inner) { out.insert(id); }
-            collect_param_moves_expr(inner, out);
+            collect_param_moves_expr(sym, inner, out);
         }
-        HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => collect_param_moves_expr(inner, out),
+        HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => collect_param_moves_expr(sym, inner, out),
         HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => {
-            for (_, fe) in fields { collect_param_moves_expr(fe, out); }
+            for (_, fe) in fields { collect_param_moves_expr(sym, fe, out); }
         }
-        HExprKind::ArrayLit(es) => for e in es { collect_param_moves_expr(e, out); },
+        HExprKind::ArrayLit(es) => for e in es { collect_param_moves_expr(sym, e, out); },
         _ => {}
     }
 }
 
 fn append_param_drops_to_returns(
+    sym: &SymTab,
     b: &mut HBlock,
     params: &[LocalId],
     locals: &[LocalInfo],
@@ -1588,14 +1634,16 @@ fn append_param_drops_to_returns(
         match s {
             HStmt::Return { value, heap_drops, .. } => {
                 let returning_id = value.as_ref().and_then(|v| {
-                    if matches!(v.ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
+                    if ty_owns_heap(sym, &v.ty) {
                         if let HExprKind::Local(id) = v.kind { Some(id) } else { None }
                     } else { None }
                 });
                 for &pid in params.iter().rev() {
                     let li = &locals[pid.0 as usize];
-                    if matches!(li.storage, StorageClass::Heap)
-                        && matches!(li.ty, HType::Heap { .. } | HType::OwnPtr { .. })
+                    let owns = (matches!(li.storage, StorageClass::Heap)
+                            && matches!(li.ty, HType::Heap { .. } | HType::OwnPtr { .. }))
+                        || is_owning_value_composite(sym, &li.ty);
+                    if owns
                         && !param_moved.contains(&pid)
                         && returning_id != Some(pid)
                         && !heap_drops.contains(&pid)
@@ -1605,14 +1653,14 @@ fn append_param_drops_to_returns(
                 }
             }
             HStmt::If { then_b, else_b, .. } => {
-                append_param_drops_to_returns(then_b, params, locals, param_moved);
-                if let Some(eb) = else_b { append_param_drops_to_returns(eb, params, locals, param_moved); }
+                append_param_drops_to_returns(sym, then_b, params, locals, param_moved);
+                if let Some(eb) = else_b { append_param_drops_to_returns(sym, eb, params, locals, param_moved); }
             }
             HStmt::While { body, .. } | HStmt::Block(body) | HStmt::Unsafe(body, _) => {
-                append_param_drops_to_returns(body, params, locals, param_moved);
+                append_param_drops_to_returns(sym, body, params, locals, param_moved);
             }
             HStmt::ForC { body, .. } | HStmt::ForEach { body, .. } => {
-                append_param_drops_to_returns(body, params, locals, param_moved);
+                append_param_drops_to_returns(sym, body, params, locals, param_moved);
             }
             _ => {}
         }
