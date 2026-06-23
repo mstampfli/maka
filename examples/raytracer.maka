@@ -1,0 +1,289 @@
+// forge - a ray tracer written in Maka, rendering the classic three-spheres
+// scene to a PPM image on stdout.
+//
+// It is here to exercise the whole language at once:
+//   * tagged enums + exhaustive match   -> Material (Lambertian/Metal/Dielectric)
+//   * ownership + alloc + auto-free      -> the scene lives in an `own &World`
+//   * recursion                          -> ray_color bounces rays
+//   * generics + compile-time reflection -> describe<T> via `inline for fields`
+//   * constexpr functions                -> image dimensions folded at compile time
+//   * extern / cinclude                  -> libm sqrt
+//   * module-scope mutable globals       -> the RNG
+//
+// Build & run:
+//   makac examples/raytracer.maka -o /tmp/forge --link -lm
+//   /tmp/forge > forge.ppm        # open forge.ppm in any image viewer
+
+cinclude "math.h";
+extern float sqrt(float x);
+
+// ----- compile-time render configuration -----
+// HEIGHT and the ray budget are computed by constexpr functions at compile time.
+constexpr int aspect_h(int w) { return w * 9 / 16; }
+constexpr int primary_rays(int w, int h, int s) { return w * h * s; }
+
+constexpr int WIDTH     = 400;
+constexpr int HEIGHT    = aspect_h(WIDTH);          // 225
+constexpr int SAMPLES   = 100;
+constexpr int MAX_DEPTH = 24;
+constexpr int RAY_BUDGET = primary_rays(WIDTH, HEIGHT, SAMPLES);
+
+// A plain record of primitives - fed to the reflection-based describe<T>.
+data RenderConfig {
+    int width;
+    int height;
+    int samples;
+    int max_depth;
+    int objects;
+    int primary_rays;
+}
+
+// ----- RNG: a 31-bit LCG in a module-scope mutable global -----
+mut int rng_state = 2463534242;
+
+float rand01() {
+    rng_state = (rng_state * 1103515245 + 12345) & 2147483647;
+    return (rng_state as float) / 2147483647.0;
+}
+
+// ----- scalar helpers (kept in Maka, no libm beyond sqrt) -----
+float f_abs(float x) { if (x < 0.0) { return -x; } return x; }
+float f_min(float a, float b) { if (a < b) { return a; } return b; }
+float f_max(float a, float b) { if (a > b) { return a; } return b; }
+float clamp01(float x) { return f_max(0.0, f_min(1.0, x)); }
+
+// ----- Vec3 -----
+data V3 { float x; float y; float z; }
+
+V3 vec(float x, float y, float z) { return V3 { x = x, y = y, z = z }; }
+V3 vadd(V3 a, V3 b) { return V3 { x = a.x + b.x, y = a.y + b.y, z = a.z + b.z }; }
+V3 vsub(V3 a, V3 b) { return V3 { x = a.x - b.x, y = a.y - b.y, z = a.z - b.z }; }
+V3 vmul(V3 a, V3 b) { return V3 { x = a.x * b.x, y = a.y * b.y, z = a.z * b.z }; }
+V3 vscale(V3 a, float t) { return V3 { x = a.x * t, y = a.y * t, z = a.z * t }; }
+V3 vneg(V3 a) { return V3 { x = -a.x, y = -a.y, z = -a.z }; }
+float vdot(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+float vlen(V3 a) { return sqrt(vdot(a, a)); }
+V3 vnorm(V3 a) { float l = vlen(a); return vscale(a, 1.0 / l); }
+
+bool near_zero(V3 a) {
+    float s = 0.00000001;
+    return f_abs(a.x) < s && f_abs(a.y) < s && f_abs(a.z) < s;
+}
+
+V3 reflect(V3 v, V3 n) { return vsub(v, vscale(n, 2.0 * vdot(v, n))); }
+
+V3 refract(V3 uv, V3 n, float etai_over_etat) {
+    float cos_theta = f_min(vdot(vneg(uv), n), 1.0);
+    V3 perp = vscale(vadd(uv, vscale(n, cos_theta)), etai_over_etat);
+    V3 par = vscale(n, -sqrt(f_abs(1.0 - vdot(perp, perp))));
+    return vadd(perp, par);
+}
+
+// A random unit vector via rejection sampling inside the unit ball.
+V3 rand_unit() {
+    mut int guard = 0;
+    while (guard < 64) {
+        V3 p = vec(2.0 * rand01() - 1.0, 2.0 * rand01() - 1.0, 2.0 * rand01() - 1.0);
+        float l2 = vdot(p, p);
+        if (l2 > 0.0000001 && l2 <= 1.0) { return vnorm(p); }
+        guard = guard + 1;
+    }
+    return vec(0.0, 0.0, 1.0);
+}
+
+// ----- Ray -----
+data Ray { V3 orig; V3 dir; }
+V3 ray_at(Ray r, float t) { return vadd(r.orig, vscale(r.dir, t)); }
+
+// ----- Material: a tagged enum, scattered via exhaustive match -----
+enum Material {
+    Lambertian { V3 albedo },
+    Metal { V3 albedo, float fuzz },
+    Dielectric { float ir },
+}
+
+// Schlick reflectance approximation.
+float reflectance(float cosine, float ref_idx) {
+    float r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
+    float r2 = r0 * r0;
+    float omc = 1.0 - cosine;
+    return r2 + (1.0 - r2) * omc * omc * omc * omc * omc;
+}
+
+// ----- Hit record + Sphere -----
+data Hit { mut V3 p; mut V3 normal; mut float t; mut bool front; mut Material mat; }
+data Sphere { V3 center; float radius; Material mat; }
+
+Sphere sphere(V3 c, float r, Material m) { return Sphere { center = c, radius = r, mat = m }; }
+
+bool hit_sphere(Sphere s, Ray r, float tmin, float tmax, &mut Hit rec) {
+    V3 oc = vsub(r.orig, s.center);
+    float a = vdot(r.dir, r.dir);
+    float half_b = vdot(oc, r.dir);
+    float c = vdot(oc, oc) - s.radius * s.radius;
+    float disc = half_b * half_b - a * c;
+    if (disc < 0.0) { return false; }
+    float sd = sqrt(disc);
+    mut float root = (-half_b - sd) / a;
+    if (root < tmin || root > tmax) {
+        root = (-half_b + sd) / a;
+        if (root < tmin || root > tmax) { return false; }
+    }
+    rec.t = root;
+    rec.p = ray_at(r, root);
+    V3 outward = vscale(vsub(rec.p, s.center), 1.0 / s.radius);
+    rec.front = vdot(r.dir, outward) < 0.0;
+    rec.normal = if (rec.front) { yield outward; } else { yield vneg(outward); };
+    rec.mat = s.mat;
+    return true;
+}
+
+// ----- World: a fixed scene, heap-allocated and auto-freed -----
+data World { mut [16]Sphere objs; mut int count; }
+
+unit add_sphere(&mut World w, Sphere s) {
+    w.objs[w.count] = s;
+    w.count = w.count + 1;
+}
+
+bool world_hit(&World w, Ray r, float tmin, float tmax, &mut Hit rec) {
+    mut bool hit_any = false;
+    mut float closest = tmax;
+    mut int i = 0;
+    while (i < w.count) {
+        if (hit_sphere(w.objs[i], r, tmin, closest, rec)) {
+            hit_any = true;
+            closest = rec.t;
+        }
+        i = i + 1;
+    }
+    return hit_any;
+}
+
+// The result of scattering: whether it scattered, the attenuation, and the
+// bounced ray.
+data Scatter { bool ok; V3 atten; Ray ray; }
+
+Scatter scatter(Material m, Ray r_in, Hit rec) {
+    return match (m) {
+        Lambertian { albedo } {
+            mut V3 dir = vadd(rec.normal, rand_unit());
+            if (near_zero(dir)) { dir = rec.normal; }
+            yield Scatter { ok = true, atten = albedo, ray = Ray { orig = rec.p, dir = dir } };
+        },
+        Metal { albedo, fuzz } {
+            V3 refl = reflect(vnorm(r_in.dir), rec.normal);
+            V3 dir = vadd(refl, vscale(rand_unit(), fuzz));
+            bool ok = vdot(dir, rec.normal) > 0.0;
+            yield Scatter { ok = ok, atten = albedo, ray = Ray { orig = rec.p, dir = dir } };
+        },
+        Dielectric { ir } {
+            float ri = if (rec.front) { yield 1.0 / ir; } else { yield ir; };
+            V3 ud = vnorm(r_in.dir);
+            float cos_theta = f_min(vdot(vneg(ud), rec.normal), 1.0);
+            float sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+            bool cannot = ri * sin_theta > 1.0;
+            mut V3 dir = refract(ud, rec.normal, ri);
+            if (cannot || reflectance(cos_theta, ri) > rand01()) {
+                dir = reflect(ud, rec.normal);
+            }
+            yield Scatter { ok = true, atten = vec(1.0, 1.0, 1.0), ray = Ray { orig = rec.p, dir = dir } };
+        },
+    };
+}
+
+// ----- recursive ray color -----
+V3 ray_color(&World w, Ray r, int depth) {
+    if (depth <= 0) { return vec(0.0, 0.0, 0.0); }
+    mut Hit rec = Hit {
+        p = vec(0.0, 0.0, 0.0), normal = vec(0.0, 0.0, 1.0),
+        t = 0.0, front = false, mat = Material.Lambertian { albedo = vec(0.0, 0.0, 0.0) }
+    };
+    if (world_hit(w, r, 0.001, 100000000.0, &mut rec)) {
+        Scatter sc = scatter(rec.mat, r, rec);
+        if (sc.ok) {
+            return vmul(sc.atten, ray_color(w, sc.ray, depth - 1));
+        }
+        return vec(0.0, 0.0, 0.0);
+    }
+    // sky gradient
+    V3 udir = vnorm(r.dir);
+    float t = 0.5 * (udir.y + 1.0);
+    return vadd(vscale(vec(1.0, 1.0, 1.0), 1.0 - t), vscale(vec(0.5, 0.7, 1.0), t));
+}
+
+// ----- compile-time reflection: describe any struct of primitives -----
+// One generic body; unrolled per field at monomorphization.  Used to write the
+// render settings into the PPM as `#` comment lines, so the output file
+// documents itself.
+unit describe<T>(string prefix, &T value) {
+    inline for (f in fields(value)) {
+        log(format("# {}.{} = {}", prefix, f.name, f.value));
+    }
+}
+
+int to_byte(float c) {
+    float g = sqrt(clamp01(c));      // gamma 2.0
+    return (g * 255.99) as int;
+}
+
+World build_world() {
+    mut World w = World {
+        count = 0,
+        objs = [sphere(vec(0.0, 0.0, 0.0), 0.0, Material.Lambertian { albedo = vec(0.0, 0.0, 0.0) }); 16]
+    };
+    add_sphere(&mut w, sphere(vec(0.0, -100.5, -1.0), 100.0, Material.Lambertian { albedo = vec(0.8, 0.8, 0.0) }));
+    add_sphere(&mut w, sphere(vec(0.0, 0.0, -1.0), 0.5, Material.Lambertian { albedo = vec(0.1, 0.2, 0.5) }));
+    add_sphere(&mut w, sphere(vec(-1.0, 0.0, -1.0), 0.5, Material.Dielectric { ir = 1.5 }));
+    add_sphere(&mut w, sphere(vec(1.0, 0.0, -1.0), 0.5, Material.Metal { albedo = vec(0.8, 0.6, 0.2), fuzz = 0.05 }));
+    return w;
+}
+
+unit main() {
+    World world = build_world();
+
+    // simple camera
+    float aspect = (WIDTH as float) / (HEIGHT as float);
+    float vh = 2.0;
+    float vw = aspect * vh;
+    float focal = 1.0;
+    V3 origin = vec(0.0, 0.0, 0.0);
+    V3 horizontal = vec(vw, 0.0, 0.0);
+    V3 vertical = vec(0.0, vh, 0.0);
+    V3 llc = vsub(vsub(vsub(origin, vscale(horizontal, 0.5)), vscale(vertical, 0.5)), vec(0.0, 0.0, focal));
+
+    // PPM header.  The `#` comment lines must live inside the header (before the
+    // maxval), so the reflection-generated config goes right after the magic.
+    RenderConfig cfg = RenderConfig {
+        width = WIDTH, height = HEIGHT, samples = SAMPLES,
+        max_depth = MAX_DEPTH, objects = world.count, primary_rays = RAY_BUDGET
+    };
+    log("P3");
+    describe("config", &cfg);          // self-documenting, via compile-time reflection
+    log(format("{} {}", WIDTH, HEIGHT));
+    log("255");
+
+    mut int j = HEIGHT - 1;
+    while (j >= 0) {
+        mut int i = 0;
+        while (i < WIDTH) {
+            mut V3 col = vec(0.0, 0.0, 0.0);
+            mut int s = 0;
+            while (s < SAMPLES) {
+                float u = ((i as float) + rand01()) / ((WIDTH - 1) as float);
+                float v = ((j as float) + rand01()) / ((HEIGHT - 1) as float);
+                V3 dir = vsub(vadd(vadd(llc, vscale(horizontal, u)), vscale(vertical, v)), origin);
+                Ray r = Ray { orig = origin, dir = dir };
+                col = vadd(col, ray_color(&world, r, MAX_DEPTH));
+                s = s + 1;
+            }
+            float scale = 1.0 / (SAMPLES as float);
+            int ir = to_byte(col.x * scale);
+            int ig = to_byte(col.y * scale);
+            int ib = to_byte(col.z * scale);
+            log(format("{} {} {}", ir, ig, ib));
+            i = i + 1;
+        }
+        j = j - 1;
+    }
+}
