@@ -218,7 +218,8 @@ V3 ray_color(&World w, Ray r, int depth) {
 // documents itself.
 unit describe<T>(string prefix, &T value) {
     inline for (f in fields(value)) {
-        log(format("# {}.{} = {}", prefix, f.name, f.value));
+        string line = format("# {}.{} = {}", prefix, f.name, f.value);
+        log(line);
     }
 }
 
@@ -262,7 +263,8 @@ unit main() {
     };
     log("P3");
     describe("config", &cfg);          // self-documenting, via compile-time reflection
-    log(format("{} {}", WIDTH, HEIGHT));
+    string dims = format("{} {}", WIDTH, HEIGHT);
+    log(dims);
     log("255");
 
     mut int j = HEIGHT - 1;
@@ -283,7 +285,8 @@ unit main() {
             int ir = to_byte(col.x * scale);
             int ig = to_byte(col.y * scale);
             int ib = to_byte(col.z * scale);
-            log(format("{} {} {}", ir, ig, ib));
+            string px = format("{} {} {}", ir, ig, ib);
+            log(px);
             i = i + 1;
         }
         j = j - 1;
