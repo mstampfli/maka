@@ -20,6 +20,9 @@ fn main() {
     let mut output: Option<String> = None;
     let mut emit_c = false;
     let mut run = false;
+    // Optimization level for the generated C.  Default O0 (fast builds, easy to
+    // debug); `--release` / `-O2` turns on optimization.
+    let mut opt_level = String::from("-O0");
     let mut rust_profile: Option<String> = None;
     let mut no_rust = false;
     // Freestanding mode — strip the libc-using codegen prologue, skip the
@@ -35,6 +38,8 @@ fn main() {
             "-o" => { i += 1; output = Some(args[i].clone()); }
             "--emit-c" => { emit_c = true; }
             "--run" => { run = true; }
+            "--release" => { opt_level = String::from("-O2"); }
+            "-O0" | "-O1" | "-O2" | "-O3" | "-Os" => { opt_level = a.clone(); }
             "--no-rust" => { no_rust = true; }
             "--freestanding" => { freestanding = true; no_rust = true; }
             "--rust-profile" => { i += 1; rust_profile = Some(args[i].clone()); }
@@ -191,7 +196,12 @@ fn main() {
     let tmp = format!("/tmp/{}.c", stem);
     std::fs::write(&tmp, &c_code).expect("write C tmp");
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-    let mut cc_args: Vec<String> = vec!["-std=c11".into(), "-O0".into(),
+    let mut cc_args: Vec<String> = vec!["-std=c11".into(), opt_level.clone(),
+        // Define integer overflow as two's-complement wrap (Maka `int` is i64
+        // and is expected to wrap, e.g. hashes/RNGs), and disable strict
+        // aliasing since the runtime reinterprets memory through several pointer
+        // types.  Both are no-ops at -O0 but make -O2 builds well-defined.
+        "-fwrapv".into(), "-fno-strict-aliasing".into(),
         "-Wno-error".into(), "-Wno-int-conversion".into(),
         "-Wno-incompatible-pointer-types".into(),
         "-Wno-return-type".into(),
