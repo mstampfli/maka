@@ -1027,6 +1027,19 @@ impl<'a> TypeChecker<'a> {
                 return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
             }
         };
+        // Fast path: all-scalar placeholders lower to a single `__maka_format1`
+        // (one allocation) instead of a chain of per-arg concat mallocs.  Returns
+        // `own *char`, auto-freed like the concat result.
+        if let Some((pf, vals)) = self.build_printf_parts(&fmt_str, &args[1..]) {
+            let mut hargs = Vec::with_capacity(vals.len() + 1);
+            hargs.push(HExpr { kind: HExprKind::LitStr(pf), ty: HType::Str, span: sp });
+            hargs.extend(vals);
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(u32::MAX - 59), args: hargs },
+                ty: HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) },
+                span: sp,
+            };
+        }
         let parts: Vec<&str> = fmt_str.split("{}").collect();
         let expected = parts.len().saturating_sub(1);
         let provided = args.len() - 1;
@@ -1049,24 +1062,30 @@ impl<'a> TypeChecker<'a> {
         acc
     }
 
-    /// Try to lower `log(format(fmt, args...))` to a single printf-style builtin
-    /// call (no intermediate string allocation).  Returns None - so the caller
-    /// falls back to the normal format()+log path - if the placeholder count
-    /// mismatches or any argument's type is not a printf-able scalar.
-    fn try_log_format_print(&mut self, fmt: &str, fmt_args: &[ast::Expr], sp: Span) -> Option<HExpr> {
+    /// Translate a `{}` format template + args into a printf format string (no
+    /// trailing newline) and the checked value exprs - shared by the
+    /// `log(format(...))->printf` and `format(...)->snprintf` lowerings.  Returns
+    /// None if the placeholder count mismatches or any arg isn't a printf-able
+    /// scalar, so the caller falls back to the (correctly-erroring) concat path.
+    fn build_printf_parts(&mut self, fmt: &str, fmt_args: &[ast::Expr]) -> Option<(String, Vec<HExpr>)> {
         let parts: Vec<&str> = fmt.split("{}").collect();
         if parts.len().saturating_sub(1) != fmt_args.len() { return None; }
         let mut pf = String::new();
         let mut vals: Vec<HExpr> = Vec::with_capacity(fmt_args.len());
         for (i, arg) in fmt_args.iter().enumerate() {
             pf.push_str(&parts[i].replace('%', "%%"));
-            let h = self.check_expr(arg, None);
-            let h = match &h.ty {
+            let mut h = self.check_expr(arg, None);
+            h = match &h.ty {
                 HType::Ref { inner, .. } if matches!(**inner, HType::Int | HType::SizedInt { .. } | HType::Float | HType::Bool | HType::Char) => self.auto_deref(h),
                 _ => h,
             };
-            // Same set format() supports; a `{}` for anything else bails to the
-            // (correctly-erroring) format path.
+            // An owned `own *char` argument is consumed as a borrowed view here
+            // (printf/snprintf reads it, doesn't take ownership).  Retype it as
+            // `string` so the move analysis treats it as borrowed - the value is
+            // still a fresh-temp Call, so the lifetime pass hoists and frees it.
+            if matches!(&h.ty, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char)) {
+                h.ty = HType::Str;
+            }
             let spec = match &h.ty {
                 HType::Int | HType::SizedInt { .. } => "%lld",
                 HType::Float | HType::SizedFloat { .. } => "%g",
@@ -1080,6 +1099,12 @@ impl<'a> TypeChecker<'a> {
             vals.push(h);
         }
         pf.push_str(&parts[parts.len() - 1].replace('%', "%%"));
+        Some((pf, vals))
+    }
+
+    /// Lower `log(format(fmt, args...))` to a printf builtin (no allocation).
+    fn try_log_format_print(&mut self, fmt: &str, fmt_args: &[ast::Expr], sp: Span) -> Option<HExpr> {
+        let (mut pf, vals) = self.build_printf_parts(fmt, fmt_args)?;
         pf.push('\n'); // log() appends a newline
         let mut hargs = Vec::with_capacity(vals.len() + 1);
         hargs.push(HExpr { kind: HExprKind::LitStr(pf), ty: HType::Str, span: sp });

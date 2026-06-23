@@ -288,7 +288,7 @@ impl<'a> Cx<'a> {
         // which modern gcc (14+) then rejects as implicit declarations.
         self.w("#ifndef _GNU_SOURCE\n#define _GNU_SOURCE 1\n#endif\n");
         self.w("#endif\n");
-        self.w("#include <stdio.h>\n#include <stdlib.h>\n#include <stdint.h>\n#include <stdbool.h>\n#include <string.h>\n#include <wchar.h>\n");
+        self.w("#include <stdio.h>\n#include <stdlib.h>\n#include <stdint.h>\n#include <stdbool.h>\n#include <string.h>\n#include <wchar.h>\n#include <stdarg.h>\n");
         // POSIX system headers used by the runtime: process control, fds, and
         // process wait.  Emitted up front so the functions are declared before
         // any runtime code calls them (modern gcc rejects implicit decls).
@@ -402,6 +402,9 @@ impl<'a> Cx<'a> {
         self.w("static const char* __maka_bool_to_str(bool b) { return b ? \"true\" : \"false\"; }\n");
         self.w("static char* __maka_float_to_str(maka_float v){ char buf[40]; snprintf(buf, sizeof(buf), \"%g\", v);             size_t L=strlen(buf); char* r=(char*)malloc(L+1); memcpy(r,buf,L+1); return r; }\n");
         self.w("static char* __maka_char_to_str(maka_char c)  { char* r=(char*)malloc(2); r[0]=(char)c; r[1]=0; return r; }\n");
+        // `format(...)` with all-scalar placeholders lowers to one of these (a
+        // single allocation), instead of a chain of per-arg concat mallocs.
+        self.w("static char* __maka_format1(const char* fmt, ...) { va_list ap; va_start(ap, fmt); va_list ap2; va_copy(ap2, ap); int n = vsnprintf((char*)0, 0, fmt, ap); va_end(ap); char* r = (char*)malloc((size_t)(n < 0 ? 0 : n) + 1); vsnprintf(r, (size_t)(n < 0 ? 0 : n) + 1, fmt, ap2); va_end(ap2); return r; }\n");
         // stdin readers: `read_line()` returns one heap line without the trailing
         // newline (NULL on EOF); `read_int()` reads a base-10 integer (panics on
         // malformed input).
@@ -7456,6 +7459,15 @@ impl<'a> Cx<'a> {
                     }
                     return format!("(printf({}), MAKA_UNIT)", parts.join(", "));
                 }
+                // `format(...)` with scalar placeholders -> one __maka_format1 alloc.
+                if callee.0 == u32::MAX - 59 {
+                    let mut parts: Vec<String> = vec![self.emit_inline_expr(inline_f, &args[0], tag)];
+                    for a in &args[1..] {
+                        let s = self.emit_inline_expr(inline_f, a, tag);
+                        parts.push(printf_conv(s, &a.ty));
+                    }
+                    return format!("__maka_format1({})", parts.join(", "));
+                }
                 if callee.0 == u32::MAX - 3 {
                     if let Some(a) = args.first() {
                         let s = self.emit_inline_expr(inline_f, a, tag);
@@ -7960,6 +7972,15 @@ impl<'a> Cx<'a> {
                         parts.push(printf_conv(s, &a.ty));
                     }
                     return format!("(printf({}), MAKA_UNIT)", parts.join(", "));
+                }
+                // `format(...)` with scalar placeholders -> one __maka_format1 alloc.
+                if callee.0 == u32::MAX - 59 {
+                    let mut parts: Vec<String> = vec![self.emit_expr(f, &args[0])];
+                    for a in &args[1..] {
+                        let s = self.emit_expr(f, a);
+                        parts.push(printf_conv(s, &a.ty));
+                    }
+                    return format!("__maka_format1({})", parts.join(", "));
                 }
                 // Built-in `spawn(closure)` — fiber tier.  Compound-stmt expr
                 // wraps the closure once so its env malloc happens exactly once

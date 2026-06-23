@@ -1267,10 +1267,11 @@ fn is_owning_temp(sym: &SymTab, e: &HExpr) -> bool {
         HExprKind::HeapAlloc(_) => true,
         HExprKind::Call { callee, .. } => {
             let c = callee.0;
-            // malloc'ing string builtins: concat / read_line / int|float|char_to_str
+            // malloc'ing string builtins: concat / read_line / int|float|char_to_str / format1
             if c == u32::MAX - 5 || c == u32::MAX - 8 || c == u32::MAX - 9 || c == u32::MAX - 10
                 || c == u32::MAX - 6
                 || c == u32::MAX - 11 || c == u32::MAX - 13 || c == u32::MAX - 14
+                || c == u32::MAX - 59
             {
                 return true;
             }
