@@ -7,7 +7,7 @@ data Box { int v; }
 
 unit main() {
     own *Box b = alloc Box { v = 42 };
-    Atomic    a = atomic_new(0);
+    Atomic<int>    a = atomic_new(0);
 
     // [b]: moves the owner into the thread (transfer).
     // [a]: copies the opaque atomic handle (share).

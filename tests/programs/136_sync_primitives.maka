@@ -14,7 +14,7 @@ mut int once_runs = 0;
 mut int locked_counter = 0;
 
 unit main() {
-    Atomic    a  = atomic_new(0);
+    Atomic<int>    a  = atomic_new(0);
     Mutex     mu = mutex_new();
     WaitGroup wg = wg_new();
     Once      o  = once_new();

@@ -343,21 +343,41 @@ pub Once once_new()                              { Once o = { h = __once_new() }
 pub unit once_destroy(Once o)                    { __once_destroy(o.h); }
 // `once_do(o, init)` is a compiler builtin — see typeck dispatch.
 
-// === Atomic<int> ===
-pub data Atomic { *unit h; }
-extern "maka_atomic_i64_new"     *unit __atomic_new(int v);
-extern "maka_atomic_i64_load"    int                      __atomic_load(*unit a);
-extern "maka_atomic_i64_store"   unit                     __atomic_store(*unit a, int v);
-extern "maka_atomic_i64_add"     int                      __atomic_add(*unit a, int delta);
-extern "maka_atomic_i64_cas"     int                      __atomic_cas_raw(*unit a, int expected, int desired);
-extern "maka_atomic_i64_destroy" unit                     __atomic_destroy(*unit a);
+// === Atomic<T> — one generic atomic for every word-sized value ===
+//
+// Backed by a single SEQ_CST i64 cell.  Any `T` that round-trips through an
+// i64 word can be stored: the `AtomicWord` attr says how (`to_word`/`from_word`).
+// Impls are provided for int, bool, char, and raw pointers; a user type opts in
+// by implementing `AtomicWord`.  This replaces the old separate Atomic /
+// AtomicBool / AtomicPtr.
+pub attr AtomicWord {
+    int to_word(&_ self);
+    _   from_word(int w);
+}
+pub int  has AtomicWord { int to_word(&int self)  { return self; }            int  from_word(int w) { return w; } }
+pub bool has AtomicWord { int to_word(&bool self) { if (self) { return 1; } return 0; } bool from_word(int w) { return w != 0; } }
+pub char has AtomicWord { int to_word(&char self) { return self as int; }     char from_word(int w) { return w as char; } }
 
-pub Atomic atomic_new(int v)                            { Atomic a = { h = __atomic_new(v) }; return a; }
-pub int    atomic_get(Atomic a)                          { return __atomic_load(a.h); }
-pub unit   atomic_set(Atomic a, int v)                   { __atomic_store(a.h, v); }
-pub int    atomic_add(Atomic a, int delta)               { return __atomic_add(a.h, delta); }
-pub int    atomic_compare_swap(Atomic a, int e, int d)   { return __atomic_cas_raw(a.h, e, d); }
-pub unit   atomic_destroy(Atomic a)                      { __atomic_destroy(a.h); }
+pub data Atomic<T> { *unit h; }
+extern "maka_atomic_i64_new"     *unit __atomic_new_raw(int v);
+extern "maka_atomic_i64_load"    int   __atomic_load_raw(*unit a);
+extern "maka_atomic_i64_store"   unit  __atomic_store_raw(*unit a, int v);
+extern "maka_atomic_i64_add"     int   __atomic_add_raw(*unit a, int delta);
+extern "maka_atomic_i64_cas"     int   __atomic_cas_raw(*unit a, int expected, int desired);
+extern "maka_atomic_i64_destroy" unit  __atomic_destroy_raw(*unit a);
+
+pub Atomic<T> atomic_new<T>(T v) where T has AtomicWord {
+    Atomic<T> a = { h = __atomic_new_raw((&v).to_word()) };
+    return a;
+}
+pub T    atomic_get<T>(Atomic<T> a)        where T has AtomicWord { return from_word(__atomic_load_raw(a.h)); }
+pub unit atomic_set<T>(Atomic<T> a, T v)   where T has AtomicWord { __atomic_store_raw(a.h, (&v).to_word()); }
+pub bool atomic_compare_swap<T>(Atomic<T> a, T e, T d) where T has AtomicWord {
+    return __atomic_cas_raw(a.h, (&e).to_word(), (&d).to_word()) != 0;
+}
+pub unit atomic_destroy<T>(Atomic<T> a)    where T has AtomicWord { __atomic_destroy_raw(a.h); }
+// Fetch-and-add is integer arithmetic, so it is `Atomic<int>`-only.
+pub int  atomic_add(Atomic<int> a, int delta) { return __atomic_add_raw(a.h, delta); }
 
 // Byte-channel: variable-size items, set per channel via item_size.  Use
 // these to build typed channels in user code — wrap the *unit handle in a
@@ -464,31 +484,8 @@ pub unit   rwlock_write_lock(RwLock r)         { __rwlock_write_lock(r.h); }
 pub unit   rwlock_unlock    (RwLock r)         { __rwlock_unlock(r.h); }
 pub unit   rwlock_destroy   (RwLock r)         { __rwlock_destroy(r.h); }
 
-// =====================================================================
-// Atomics for non-int payloads — bool packs as 0/1, ptr round-trips
-// through intptr_t.  Both reuse the i64 atomic under the hood, so
-// operations are SEQ_CST.
-// =====================================================================
-extern "__maka_atomic_bool_new" *unit __atomic_bool_new(int v);
-extern "__maka_atomic_bool_get" int   __atomic_bool_get(*unit a);
-extern "__maka_atomic_bool_set" unit  __atomic_bool_set(*unit a, int v);
-extern "__maka_atomic_ptr_new"  *unit __atomic_ptr_new (*unit p);
-extern "__maka_atomic_ptr_get"  *unit __atomic_ptr_get (*unit a);
-extern "__maka_atomic_ptr_set"  unit  __atomic_ptr_set (*unit a, *unit p);
-pub data AtomicBool { *unit h; }
-pub AtomicBool atomic_bool_new(bool v) {
-    mut int iv = 0;
-    if (v) { iv = 1; }
-    AtomicBool a = { h = __atomic_bool_new(iv) };
-    return a;
-}
-pub bool atomic_bool_get(AtomicBool a)         { return __atomic_bool_get(a.h) != 0; }
-pub unit atomic_bool_set(AtomicBool a, bool v) { if (v) { __atomic_bool_set(a.h, 1); } else { __atomic_bool_set(a.h, 0); } }
-
-pub data AtomicPtr { *unit h; }
-pub AtomicPtr atomic_ptr_new(*unit p)            { AtomicPtr a = { h = __atomic_ptr_new(p) }; return a; }
-pub *unit     atomic_ptr_get(AtomicPtr a)        { return __atomic_ptr_get(a.h); }
-pub unit      atomic_ptr_set(AtomicPtr a, *unit p) { __atomic_ptr_set(a.h, p); }
+// (bool / pointer atomics are now covered by the generic `Atomic<T>` above
+// via their `AtomicWord` impls - no separate AtomicBool / AtomicPtr needed.)
 
 // =====================================================================
 // Filesystem ops — minimal cross-platform set built on the file_open /

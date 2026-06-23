@@ -389,7 +389,14 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                             if h.attr_args.len() != attr_args_concrete.len() { return false; }
                             if !h.attr_args.iter().zip(attr_args_concrete.iter())
                                 .all(|(a, b)| typeck::type_eq(a, b)) { return false; }
-                            if !has_impl_visible(h, &req.caller_module, &req.caller_has_imports) { return false; }
+                            // The bound is part of the generic's contract: satisfy
+                            // it if the impl is visible from the generic's DEFINING
+                            // module (it knows its own impls - e.g. std's
+                            // `int has AtomicWord` for a std generic) OR from the
+                            // caller's module.  Without the former, callers would
+                            // have to `use` an impl they never name.
+                            if !has_impl_visible(h, &template_sig.module_path, &template_sig.has_imports)
+                                && !has_impl_visible(h, &req.caller_module, &req.caller_has_imports) { return false; }
                             // Validate assoc-type bindings: substitute the impl's
                             // type vars (via receiver_unify against recv_concrete),
                             // then compare each binding's value.

@@ -1362,11 +1362,11 @@ impl<'a> TypeChecker<'a> {
             // Sync primitives recognized by name (auto-recognized stdlib types).
             HType::Struct(id) => {
                 let info = self.sym.struct_info(*id);
-                let n = &info.name;
-                if matches!(n.as_str(),
-                    "Mutex" | "RwLock" | "Spinlock" | "Channel" | "AtomicI8" | "AtomicI16"
-                    | "AtomicI32" | "AtomicI64" | "AtomicU8" | "AtomicU16" | "AtomicU32"
-                    | "AtomicU64" | "AtomicBool" | "AtomicPtr" | "Thread"
+                // For an instantiation (e.g. `Atomic<int>`), match the template
+                // base name ("Atomic"), not the mangled instantiation name.
+                let n = info.template.as_deref().unwrap_or(info.name.as_str());
+                if matches!(n,
+                    "Mutex" | "RwLock" | "Spinlock" | "Channel" | "Thread"
                     | "Atomic" | "WaitGroup" | "Once" | "IntChan" | "FloatChan" | "ByteChan"
                     | "TlsConn") {
                     return true;
@@ -3536,6 +3536,28 @@ impl<'a> TypeChecker<'a> {
                     })
                 }).cloned().collect();
                 if !filtered.is_empty() { tied = filtered; }
+            }
+        }
+        // Subject-based narrowing: a no-self attr method (e.g. `from_word(w) -> T`)
+        // is selected by its arguments only as a last resort.  When still tied and
+        // a `where T has Attr` clause is in scope, keep the impl whose type matches
+        // the bound subject T (post-subst) - that is the impl being called for.
+        if tied.len() > 1 {
+            let subjects: Vec<(String, String)> = self.cur_where_bounds.iter()
+                .filter_map(|(trait_name, args, _)| {
+                    if args.is_empty() { return None; }
+                    let subj = args[0].subst(&self.subst);
+                    crate::resolve::underlying_struct_key(self.sym, &subj).map(|k| (trait_name.clone(), k))
+                })
+                .collect();
+            if !subjects.is_empty() {
+                let filtered: Vec<(FuncId, FuncSig)> = tied.iter().filter(|(fid, _)| {
+                    match self.sym.has_impls.iter().find(|h| h.func_ids.contains(fid)) {
+                        Some(h) => subjects.iter().any(|(attr, k)| *attr == h.attr_name && *k == h.type_key),
+                        None => true,
+                    }
+                }).cloned().collect();
+                if !filtered.is_empty() && filtered.len() < tied.len() { tied = filtered; }
             }
         }
         if tied.len() > 1 {

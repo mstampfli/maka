@@ -25,7 +25,7 @@ extern unit  __mk_free_buf(*unit buf);
 
 mut int g_port = 0;
 
-unit serve_one(int cfd, Atomic ok_count, WaitGroup wg) {
+unit serve_one(int cfd, Atomic<int> ok_count, WaitGroup wg) {
     unsafe {
         *unit buf = __mk_alloc_buf();
         int n = read_async(cfd, buf, 4);
@@ -39,7 +39,7 @@ unit serve_one(int cfd, Atomic ok_count, WaitGroup wg) {
     wg_done(wg);
 }
 
-unit server_body(int listen_fd, int n_conns, Atomic ok_count, WaitGroup wg) {
+unit server_body(int listen_fd, int n_conns, Atomic<int> ok_count, WaitGroup wg) {
     for (int i in 0..n_conns) {
         int cfd = tcp_accept_async(listen_fd);
         *Thread t = spawn(unit() [cfd, ok_count, wg] { serve_one(cfd, ok_count, wg); });
@@ -47,7 +47,7 @@ unit server_body(int listen_fd, int n_conns, Atomic ok_count, WaitGroup wg) {
     }
 }
 
-unit client_one(int port, Atomic ok_count, WaitGroup wg) {
+unit client_one(int port, Atomic<int> ok_count, WaitGroup wg) {
     int s = tcp_connect_v4(127, 0, 0, 1, port);
     if (s >= 0) {
         unsafe {
@@ -69,8 +69,8 @@ unit main() {
     g_port = 39119;
     int listen_fd = tcp_listen(g_port, 256);
 
-    Atomic    srv_ok = atomic_new(0);
-    Atomic    cli_ok = atomic_new(0);
+    Atomic<int>    srv_ok = atomic_new(0);
+    Atomic<int>    cli_ok = atomic_new(0);
     WaitGroup srv_wg = wg_new();
     WaitGroup cli_wg = wg_new();
 

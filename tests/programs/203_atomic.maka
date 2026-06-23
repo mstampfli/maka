@@ -1,0 +1,18 @@
+// Generic Atomic<T>: one atomic for int, bool (and any AtomicWord type).
+import std.{Atomic, atomic_new, atomic_get, atomic_set, atomic_add, atomic_compare_swap, atomic_destroy};
+unit main() {
+    Atomic<int> a = atomic_new(10);
+    log(atomic_get(a));                 // 10
+    log(atomic_add(a, 5));              // 10 (fetch-add returns old)
+    log(atomic_get(a));                 // 15
+    atomic_set(a, 100);
+    log(atomic_get(a));                 // 100
+    if (atomic_compare_swap(a, 100, 7)) { log(1); } else { log(0); }  // 1
+    log(atomic_get(a));                 // 7
+    atomic_destroy(a);
+
+    Atomic<bool> b = atomic_new(false);
+    atomic_set(b, true);
+    if (atomic_get(b)) { log(1); } else { log(0); }   // 1
+    atomic_destroy(b);
+}

@@ -9,7 +9,7 @@ data Box { int v; }
 
 unit main() {
     own *Box b = alloc Box { v = 7 };
-    Atomic    a = atomic_new(0);
+    Atomic<int>    a = atomic_new(0);
 
     *Thread t = thread(unit() [b, a] {
         // `b` is captured by value; the harvest pass saw `b` was known-non-null

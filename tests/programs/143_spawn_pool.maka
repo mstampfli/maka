@@ -13,7 +13,7 @@ import std.{ Atomic, Mutex, WaitGroup, Once,
 };
 
 unit main() {
-    Atomic    a = atomic_new(0);
+    Atomic<int>    a = atomic_new(0);
     WaitGroup wg = wg_new();
     int N = 200;
     wg_add(wg, N);
