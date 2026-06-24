@@ -1,0 +1,15 @@
+import std.Vec;
+data Box { int v; }
+int getv(*Box b) { if (b == null) { return -1; } return b!.v; }
+Vec<own *Box> make(int n) {
+    Vec<own *Box> xs = [];
+    mut int i = 0;
+    while (i < n) { push(xs, alloc Box { v = i }); i = i + 1; }
+    return xs;
+}
+unit main() {
+    Vec<own *Box> v = make(4);
+    mut int s = 0;
+    for (usize i in 0..v.len) { s = s + getv(v[i]); }
+    log(s);   // 6
+}

@@ -1,0 +1,11 @@
+import std.Vec;
+data Box { int v; }
+int getv(*Box b) { if (b == null) { return -1; } return b!.v; }
+unit main() {
+    Vec<own *Box> xs = [];
+    push(xs, alloc Box { v = 1 });
+    push(xs, alloc Box { v = 2 });
+    xs[0] = alloc Box { v = 99 };   // overwrite: old Box{1} must be freed
+    log(getv(xs[0]));               // 99
+    log(getv(xs[1]));               // 2
+}
