@@ -1,0 +1,16 @@
+data Tree<T> { T val; mut own *Tree<T> left; mut own *Tree<T> right; }
+own *Tree<int> leaf(int v) {
+    return alloc Tree { val = v, left = null, right = null };
+}
+int tsum(*Tree<int> t) {
+    if (t == null) { return 0; }
+    return t!.val + tsum(t!.left) + tsum(t!.right);
+}
+unit main() {
+    own *Tree<int> root = alloc Tree {
+        val = 1,
+        left = alloc Tree { val = 2, left = null, right = leaf(4) },
+        right = leaf(3),
+    };
+    log(tsum(root));
+}

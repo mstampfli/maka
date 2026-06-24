@@ -1,0 +1,27 @@
+data Node<T> { T val; mut own *Node<T> next; }
+own *Node<T> rev<T>(own *Node<T> head) {
+    own *Node<T> prev = null;
+    own *Node<T> cur = head;
+    while (cur != null) {
+        own *Node<T> nxt = cur!.next;
+        cur!.next = prev;
+        prev = cur;
+        cur = nxt;
+    }
+    return prev;
+}
+int len<T>(*Node<T> n) {
+    if (n == null) { return 0; }
+    return 1 + len(n!.next);
+}
+int firstv<T>(*Node<T> n) {
+    if (n == null) { return -1; }
+    return n!.val;
+}
+unit main() {
+    own *Node<int> h = alloc Node { val = 1, next = alloc Node { val = 2, next = alloc Node { val = 3, next = null } } };
+    log(firstv(h));   // 1
+    h = rev(h);
+    log(firstv(h));   // 3
+    log(len(h));      // 3
+}

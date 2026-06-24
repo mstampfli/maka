@@ -1,0 +1,24 @@
+data Node<T> { T val; mut own *Node<T> next; }
+own *Node<T> append<T>(own *Node<T> lst, T v) {
+    if (lst == null) {
+        return alloc Node { val = v, next = null };
+    }
+    lst!.next = append(lst!.next, v);
+    return lst;
+}
+int len<T>(*Node<T> n) {
+    if (n == null) { return 0; }
+    return 1 + len(n!.next);
+}
+int first<T>(*Node<T> n, T dflt) {
+    if (n == null) { return 0; }
+    return n!.val;
+}
+unit main() {
+    own *Node<int> h = null;
+    h = append(h, 10);
+    h = append(h, 20);
+    h = append(h, 30);
+    log(len(h));
+    log(first(h, 0));
+}

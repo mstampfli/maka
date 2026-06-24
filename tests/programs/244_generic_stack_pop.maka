@@ -1,0 +1,27 @@
+data Node<T> { T val; mut own *Node<T> next; }
+data Stack<T> { mut own *Node<T> top; mut int count; }
+
+unit push<T>(&mut Stack<T> s, T v) {
+    s.top = alloc Node { val = v, next = s.top };
+    s.count = s.count + 1;
+}
+int pop<T>(&mut Stack<T> s, T dflt) {
+    if (s.top == null) { return 0; }
+    own *Node<T> n = s.top;        // move the top node out
+    if (n == null) { return 0; }
+    s.top = n!.next;              // detach: hand the tail back to the stack
+    n!.next = null;              // n now owns only itself
+    int r = n!.val;
+    s.count = s.count - 1;
+    return r;                     // n auto-frees here
+}
+unit main() {
+    mut Stack<int> s = Stack { top = null, count = 0 };
+    push(&mut s, 5);
+    push(&mut s, 9);
+    push(&mut s, 7);
+    log(s.count);     // 3
+    log(pop(&mut s, 0));  // 7
+    log(pop(&mut s, 0));  // 9
+    log(s.count);     // 1
+}
