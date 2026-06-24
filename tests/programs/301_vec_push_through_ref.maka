@@ -1,0 +1,37 @@
+// Vec push/pop must work when the receiver is a `&mut Vec<T>` reference, not
+// only a directly-named Vec. Regression: the push/pop builtin resolved only a
+// bare `Vec<T>` receiver type, so a helper taking the vector by `&mut Vec<T>`
+// (the idiomatic way to grow a caller's vector) failed with "unknown function
+// push". A mutable Vec reference is already a `Vec*`, so it is used directly as
+// the growth target; pushing owning elements through it stays leak-clean.
+data Node { int v; }
+data Box { own &Node n; }
+
+unit fill_ints(&mut Vec<int> v, int n) {
+  mut int i = 0;
+  while (i < n) { v.push(i); i = i + 1; }
+}
+
+int pop_one(&mut Vec<int> v) { return v.pop(); }
+
+unit fill_boxes(&mut Vec<Box> v, int n) {
+  mut int i = 0;
+  while (i < n) { v.push(Box { n = alloc Node { v = i } }); i = i + 1; }
+}
+
+unit main() {
+  mut Vec<int> v = [];
+  fill_ints(&mut v, 5);          // 0,1,2,3,4
+  mut int s = 0;
+  for (int x in &v) { s = s + x; }
+  log(s);                        // 10
+  log(pop_one(&mut v));          // 4
+  log(v.len as int);             // 4
+
+  // owning elements pushed through a &mut Vec reference drop cleanly
+  mut Vec<Box> b = [];
+  fill_boxes(&mut b, 4);         // boxes 0,1,2,3
+  mut int bs = 0;
+  for (&Box x in &b) { bs = bs + x.n.v; }
+  log(bs);                       // 6
+}

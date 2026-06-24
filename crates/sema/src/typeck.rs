@@ -3294,15 +3294,35 @@ impl<'a> TypeChecker<'a> {
         // taken by mutable reference so the growth is visible to the caller.
         if (name == "push" || name == "pop") && qualifier.is_none() {
             let vh = self.check_expr(&args[0], None);
-            if let HType::Vec { elem } = vh.ty.clone() {
-                let elem = (*elem).clone();
-                if !matches!(&vh.kind, HExprKind::Local(_) | HExprKind::Field { .. } | HExprKind::Index { .. } | HExprKind::GlobalRef(_)) {
-                    self.err(format!("`{}` target must be a `Vec` variable, field, or element", name), sp);
+            // The receiver is either a `Vec<T>` place (take a mutable ref to it)
+            // or already a mutable reference/pointer to a `Vec<T>` (a helper that
+            // received the vector by `&mut Vec<T>` / `*Vec<T>` - use it directly,
+            // since it is already a `Vec*`).  `already_ref` records which.
+            let vec_info: Option<(HType, bool)> = match &vh.ty {
+                HType::Vec { elem } => Some(((**elem).clone(), false)),
+                HType::Ref { mutable: true, inner } | HType::Ptr { mutable: true, inner }
+                    if matches!(inner.as_ref(), HType::Vec { .. }) =>
+                {
+                    match inner.as_ref() {
+                        HType::Vec { elem } => Some(((**elem).clone(), true)),
+                        _ => None,
+                    }
                 }
-                let vref = HExpr {
-                    kind: HExprKind::AddrOfRef { mutable: true, place: Box::new(vh) },
-                    ty: HType::Ref { mutable: true, inner: Box::new(HType::Vec { elem: Box::new(elem.clone()) }) },
-                    span: sp,
+                _ => None,
+            };
+            if let Some((elem, already_ref)) = vec_info {
+                let vref = if already_ref {
+                    // `vh` is already a `Vec*`; use it as the mutable ref.
+                    vh
+                } else {
+                    if !matches!(&vh.kind, HExprKind::Local(_) | HExprKind::Field { .. } | HExprKind::Index { .. } | HExprKind::GlobalRef(_)) {
+                        self.err(format!("`{}` target must be a `Vec` variable, field, or element", name), sp);
+                    }
+                    HExpr {
+                        kind: HExprKind::AddrOfRef { mutable: true, place: Box::new(vh) },
+                        ty: HType::Ref { mutable: true, inner: Box::new(HType::Vec { elem: Box::new(elem.clone()) }) },
+                        span: sp,
+                    }
                 };
                 if name == "push" {
                     if args.len() != 2 { self.err("push expects (Vec v, T value)", sp); }
