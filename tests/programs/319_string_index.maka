@@ -1,0 +1,12 @@
+// A string is an array of chars: s[i] reads the i-th byte as a char, bounds-
+// checked against the string length. Part of making string array-like.
+import std.{str_len};
+unit main() {
+  string s = "hello";
+  log(s[0] as int);     // 104
+  log(s[4] as int);     // 111
+  mut int sum = 0;
+  mut int i = 0;
+  while (i < str_len(s) as int) { sum = sum + (s[i] as int); i = i + 1; }
+  log(sum);             // 532
+}

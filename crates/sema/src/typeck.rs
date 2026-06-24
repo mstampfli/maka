@@ -1974,6 +1974,8 @@ impl<'a> TypeChecker<'a> {
             HType::Array { elem, .. } => (**elem).clone(),
             HType::Slice { elem, .. } => (**elem).clone(),
             HType::Vec { elem } => (**elem).clone(),
+            // A string is an array of chars: `s[i]` reads the i-th byte as a char.
+            HType::Str => HType::Char,
             HType::Heap { inner } => match inner.as_ref() {
                 HType::Array { elem, .. } | HType::Vec { elem } => (**elem).clone(),
                 HType::Ptr { inner, .. } => match inner.as_ref() {

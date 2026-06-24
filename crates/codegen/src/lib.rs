@@ -8310,6 +8310,9 @@ impl<'a> Cx<'a> {
                     format!("(({}).data[maka_check_idx((maka_int)({}), ({}).len, \"vec idx\")])", base_s, idx_s, base_s)
                 }
             }
+            // A string is an array of chars; index its byte, bounds-checked
+            // against its length (strlen, since the length is not stored).
+            HType::Str => format!("(({0})[maka_check_idx((maka_int)({1}), (maka_int)strlen({0}), \"string idx\")])", base_s, idx_s),
             HType::Heap { inner } => match inner.as_ref() {
                 // heap fixed array: base is already the element pointer (no deref).
                 HType::Array { len, .. } => {
