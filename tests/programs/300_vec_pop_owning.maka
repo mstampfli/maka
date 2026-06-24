@@ -1,0 +1,37 @@
+// Popping owning values out of a Vec transfers ownership to the caller: the
+// popped Box must be freed by the binding that received it, and the Vec's own
+// drop must not free the already-popped (and freed) elements. Draining the Vec
+// fully and then letting the (empty) Vec drop must be leak- and double-free-
+// clean. Returning a Vec of owning structs by value also moves the whole
+// container to the caller, which then drops it.
+data Node { int v; }
+data Box { own &Node n; }
+
+Vec<Box> make(int n) {
+  mut Vec<Box> v = [];
+  mut int i = 0;
+  while (i < n) { v.push(Box { n = alloc Node { v = i } }); i = i + 1; }
+  return v;
+}
+
+int drain_sum() {
+  mut Vec<Box> v = make(4);   // boxes with v = 0,1,2,3
+  mut int s = 0;
+  while (v.len > 0) {
+    Box b = v.pop();          // ownership of b moves here; freed at loop-iter end
+    s = s + b.n.v;
+  }
+  return s;                   // empty Vec drops cleanly
+}
+
+int partial_drain() {
+  mut Vec<Box> v = make(5);   // boxes with v = 0..4
+  Box first = v.pop();        // pop one (v = 4); the rest stay in the Vec
+  int r = first.n.v;
+  return r;                   // first drops here; v (with 4 boxes) drops too
+}
+
+unit main() {
+  log(drain_sum());           // 0+1+2+3 = 6
+  log(partial_drain());       // 4
+}
