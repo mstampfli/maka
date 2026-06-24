@@ -410,7 +410,7 @@ pub fn resolve_type_in(
             // and borrowed views keep the primitive `string` type; constructors
             // (`a + b`, `read_line()`) and any function that allocates returns
             // `String`.  Coerces to `string` for borrowed reads.
-            "String" => HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) },
+            "String" => HType::owned_string(),
             other => {
                 if other == "_" {
                     errors.push(SemaError {

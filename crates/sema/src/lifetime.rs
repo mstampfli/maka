@@ -1354,7 +1354,7 @@ fn owning_type_of(e: &HExpr) -> HType {
         HType::OwnPtr { .. } | HType::Heap { .. } => e.ty.clone(),
         // A `Str`-typed temp is really a malloc'd `char*` (e.g. a concat result
         // coerced to the borrowed `string` view), so the hidden local must own it.
-        HType::Str => HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) },
+        HType::Str => HType::owned_string(),
         // An owning value type (struct / Vec / enum returned by value): declare
         // the hidden local with the real type so its drop glue frees it.
         other => other.clone(),

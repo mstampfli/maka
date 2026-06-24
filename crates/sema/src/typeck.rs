@@ -562,7 +562,7 @@ impl<'a> TypeChecker<'a> {
         // Use-site coercion (`own *char` → `string`) keeps source code ergonomic.
         if matches!(declared, HType::Str) {
             if let Some(probed_ty) = Self::probe_init_ty(self.sym, init) {
-                if matches!(&probed_ty, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char)) {
+                if probed_ty.is_owned_string() {
                     declared = probed_ty;
                 }
             }
@@ -584,13 +584,13 @@ impl<'a> TypeChecker<'a> {
                 // the type still resolves to a numeric and `binding_kind` is fine.
                 // We only consult this result when declared == Str, so a numeric
                 // init at a Str slot will error normally via coerce.
-                Some(HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) })
+                Some(HType::owned_string())
             }
             ast::Expr::Call { callee, .. } => {
                 // Builtins that return a freshly-owned `own *char`: binding their
                 // result to a `string` slot should own + free it.
                 if matches!(callee.as_ref(), ast::Expr::Ident(n, _) if n == "read_line" || n == "format") {
-                    Some(HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) })
+                    Some(HType::owned_string())
                 } else {
                     None
                 }
@@ -1122,7 +1122,7 @@ impl<'a> TypeChecker<'a> {
             hargs.extend(vals);
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 59), args: hargs },
-                ty: HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) },
+                ty: HType::owned_string(),
                 span: sp,
             };
         }
@@ -1169,7 +1169,7 @@ impl<'a> TypeChecker<'a> {
             // (printf/snprintf reads it, doesn't take ownership).  Retype it as
             // `string` so the move analysis treats it as borrowed - the value is
             // still a fresh-temp Call, so the lifetime pass hoists and frees it.
-            if matches!(&h.ty, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char)) {
+            if h.ty.is_owned_string() {
                 h.ty = HType::Str;
             }
             let spec = match &h.ty {
@@ -1178,7 +1178,7 @@ impl<'a> TypeChecker<'a> {
                 HType::Bool => "%s",
                 HType::Char => "%c",
                 HType::Str => "%s",
-                HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char) => "%s",
+                t if t.is_owned_string() => "%s",
                 _ => return None,
             };
             pf.push_str(spec);
@@ -1202,7 +1202,7 @@ impl<'a> TypeChecker<'a> {
     /// Each primitive type maps to a reserved builtin FuncId; strings pass
     /// through unchanged.
     fn format_arg_to_string(&mut self, h: HExpr, sp: Span) -> HExpr {
-        let result_ty = HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) };
+        let result_ty = HType::owned_string();
         match &h.ty {
             HType::Int | HType::SizedInt { .. } => HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 11), args: vec![h] },
@@ -1235,9 +1235,8 @@ impl<'a> TypeChecker<'a> {
     /// family used by `a + b`.  Picks the right freeing variant based on
     /// which side owns its buffer.
     fn format_concat(&self, l: HExpr, r: HExpr, sp: Span) -> HExpr {
-        let is_owning_char = |t: &HType| matches!(t, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char));
-        let l_owns = is_owning_char(&l.ty);
-        let r_owns = is_owning_char(&r.ty);
+        let l_owns = l.ty.is_owned_string();
+        let r_owns = r.ty.is_owned_string();
         let helper_id = match (l_owns, r_owns) {
             (false, false) => u32::MAX - 5,
             (true,  false) => u32::MAX - 8,
@@ -1246,7 +1245,7 @@ impl<'a> TypeChecker<'a> {
         };
         HExpr {
             kind: HExprKind::Call { callee: FuncId(helper_id), args: vec![l, r] },
-            ty: HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) },
+            ty: HType::owned_string(),
             span: sp,
         }
     }
@@ -1301,20 +1300,19 @@ impl<'a> TypeChecker<'a> {
                 // is `own *char` — auto-freed at scope exit, coerces back to `string`
                 // anywhere a borrowed view is wanted.  Chained concats `a + b + c`
                 // therefore work end-to-end and free each intermediate.
-                let is_owning_char = |t: &HType| matches!(t, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char));
-                let is_strish = |t: &HType| matches!(t, HType::Str) || is_owning_char(t);
+                let is_strish = |t: &HType| matches!(t, HType::Str) || t.is_owned_string();
                 if matches!(op, Add) && is_strish(&l.ty) && is_strish(&r.ty) {
                     // Pick the helper that frees whichever operands were owning
                     // intermediates, so chained `a + b + c` doesn't leak.
-                    let l_owns = is_owning_char(&l.ty);
-                    let r_owns = is_owning_char(&r.ty);
+                    let l_owns = l.ty.is_owned_string();
+                    let r_owns = r.ty.is_owned_string();
                     let helper_id = match (l_owns, r_owns) {
                         (false, false) => u32::MAX - 5,    // both borrowed
                         (true,  false) => u32::MAX - 8,    // free left  → _freel
                         (false, true ) => u32::MAX - 9,    // free right → _freer
                         (true,  true ) => u32::MAX - 10,   // free both  → _freeb
                     };
-                    let result_ty = HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) };
+                    let result_ty = HType::owned_string();
                     return HExpr {
                         kind: HExprKind::Call {
                             callee: FuncId(helper_id),
@@ -3416,7 +3414,7 @@ impl<'a> TypeChecker<'a> {
             if !args.is_empty() { self.err("read_line takes no arguments", sp); }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 6), args: Vec::new() },
-                ty: HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) },
+                ty: HType::owned_string(),
                 span: sp,
             };
         }
@@ -3470,7 +3468,7 @@ impl<'a> TypeChecker<'a> {
                     for leaf in &mut leaves {
                         // Owned pieces become borrowed string views (printf reads
                         // them); fresh-temp pieces are freed by the lifetime pass.
-                        if matches!(&leaf.ty, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char)) {
+                        if leaf.ty.is_owned_string() {
                             leaf.ty = HType::Str;
                         }
                         pf.push_str("%s");
@@ -3486,7 +3484,7 @@ impl<'a> TypeChecker<'a> {
                     HType::Ref { inner, .. } if matches!(**inner, HType::Int | HType::SizedInt { .. } | HType::Float | HType::Bool | HType::Char | HType::Enum(_)) => self.auto_deref(h),
                     _ => h,
                 };
-                let h = if matches!(&h.ty, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char)) {
+                let h = if h.ty.is_owned_string() {
                     self.coerce(h, &HType::Str)
                 } else { h };
                 return HExpr { kind: HExprKind::Call { callee: FuncId(u32::MAX), args: vec![h] }, ty: HType::Unit, span: sp };
@@ -3501,7 +3499,7 @@ impl<'a> TypeChecker<'a> {
                 };
                 // Coerce `own *char` to `string` so log dispatches to the string
                 // helper, not the pointer helper.
-                let h = if matches!(&h.ty, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char)) {
+                let h = if h.ty.is_owned_string() {
                     self.coerce(h, &HType::Str)
                 } else {
                     h
@@ -5137,16 +5135,15 @@ impl<'a> TypeChecker<'a> {
         if matches!(e.ty, HType::NullT) && matches!(target, HType::Ptr { .. }) {
             return HExpr { ty: target.clone(), ..e };
         }
-        // `own *char` → `string` — read-only view of a heap-allocated NUL-terminated buffer.
-        if matches!(target, HType::Str)
-            && matches!(&e.ty, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char)) {
+        // owned string → `string` — read-only borrowed view of the heap NUL-terminated buffer.
+        if matches!(target, HType::Str) && e.ty.is_owned_string() {
             return HExpr { ty: HType::Str, ..e };
         }
-        // `own *char` → `*string` — the nullable sibling of the view above: a read-only
+        // owned string → `*string` — the nullable sibling of the view above: a read-only
         // view that preserves nullability so the buffer pointer can be `== null` checked
         // (e.g. iterating a HashMap's keys, where empty slots hold a null key).
         if matches!(target, HType::Ptr { inner, .. } if matches!(inner.as_ref(), HType::Str))
-            && matches!(&e.ty, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char)) {
+            && e.ty.is_owned_string() {
             return HExpr { ty: target.clone(), ..e };
         }
         // null → raw *T (raw pointers are also nullable)
@@ -5900,10 +5897,9 @@ fn param_compatible_impl(param: &HType, actual: &HType, type_params: &[String], 
             }
         }
     }
-    // Allow `own *char` → `string` (heap-allocated NUL-terminated buffer
+    // Allow owned string → `string` (heap-allocated NUL-terminated buffer
     // produced by string concat / read_line, viewed read-only).
-    if matches!(param, HType::Str)
-        && matches!(actual, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char)) {
+    if matches!(param, HType::Str) && actual.is_owned_string() {
         return true;
     }
     // Allow ref-mut → ref-const.

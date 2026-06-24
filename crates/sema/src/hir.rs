@@ -89,6 +89,18 @@ impl HType {
     pub fn is_heap(&self) -> bool { matches!(self, HType::Heap { .. }) }
     pub fn strip_heap(&self) -> &HType { if let HType::Heap { inner } = self { inner } else { self } }
 
+    /// The owned heap-string type (what `String` and every allocating string
+    /// builtin - concat, `read_line`, `format`, `*_to_str` - produce).  Single
+    /// source of truth for its internal representation: a mutable, nullable
+    /// owning pointer to a NUL-terminated buffer, auto-freed at scope exit.
+    pub fn owned_string() -> HType {
+        HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) }
+    }
+    /// True if `self` is the owned heap-string type produced by `owned_string()`.
+    pub fn is_owned_string(&self) -> bool {
+        matches!(self, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char))
+    }
+
     /// Replace any TyVar(name) with the matching substitution.
     pub fn subst(&self, env: &std::collections::HashMap<String, HType>) -> HType {
         match self {
