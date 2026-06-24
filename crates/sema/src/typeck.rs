@@ -4230,6 +4230,48 @@ impl<'a> TypeChecker<'a> {
         let lifted_fid = FuncId((self.sym.sigs.len() + self.synth_sigs.len()) as u32);
         let lifted_name = format!("__lambda_cap_{}", env_idx);
         let env_ref_ty = HType::Ref { mutable: false, inner: Box::new(HType::Struct(env_struct_id)) };
+
+        // Reserve this lambda's signature and function slots BEFORE checking the
+        // body.  A nested capturing lambda is checked by the sub-checker below;
+        // it allocates its own env/func ids from the synthetic collections, so
+        // those collections must already contain this (outer) lambda's slots or
+        // the inner lambda would collide on `env_idx`/`lifted_fid` (reusing this
+        // lambda's lifted function - an infinite self-recursion).  The signature
+        // is fully known here; the function body is filled in after the sub-check.
+        let mut sig_param_names: Vec<String> = vec!["__env".to_string()];
+        for p in params { sig_param_names.push(p.name.clone()); }
+        for c in &caps { sig_param_names.push(format!("__capture_{}", c.name)); }
+        let mut sig_param_tys: Vec<HType> = vec![env_ref_ty.clone()];
+        sig_param_tys.extend(resolved_params.clone());
+        self.synth_sigs.push(FuncSig {
+            name: lifted_name.clone(),
+            param_tys: sig_param_tys,
+            param_names: sig_param_names,
+            ret: resolved_ret.clone(),
+            is_extern: false,
+            c_name: lifted_name.clone(),
+            logic: None,
+            type_params: Vec::new(),
+            is_inline: false,
+            is_gate: false,
+            is_variadic: false,
+            is_pub: false,
+            module_path: self.cur_module.clone(),
+            imports: self.cur_imports.clone(),
+            has_imports: self.cur_has_imports.clone(),
+            where_bounds: self.cur_where_bounds.clone(),
+        });
+        let reserved_func_idx = self.synth_funcs.len();
+        self.synth_funcs.push(HFunc {
+            id: lifted_fid,
+            name: lifted_name.clone(),
+            params: Vec::new(),
+            ret: resolved_ret.clone(),
+            locals: Vec::new(),
+            body: HBlock { stmts: Vec::new(), heap_to_free: Vec::new(), ptr_nulls: Vec::new(), span: sp },
+            span: sp,
+        });
+
         let mut sub = TypeChecker::new_with_logic(self.sym, None);
         // Inherit the enclosing function's imports / has-imports / module path
         // so closure bodies can call the same names that worked in the outer
@@ -4240,6 +4282,12 @@ impl<'a> TypeChecker<'a> {
         sub.cur_where_bounds = self.cur_where_bounds.clone();
         // Lambda body is lexically inside the caller's `unsafe { }` scope (if any).
         sub.in_unsafe = self.in_unsafe;
+        // Hand the synthetics accumulated so far (env struct + reserved slots) to
+        // the sub-checker so nested lambdas allocate fresh, non-colliding ids;
+        // take the augmented sets back afterwards.
+        sub.synth_structs = std::mem::take(&mut self.synth_structs);
+        sub.synth_sigs = std::mem::take(&mut self.synth_sigs);
+        sub.synth_funcs = std::mem::take(&mut self.synth_funcs);
         sub.enter_scope();
 
         // First param: the env reference.
@@ -4271,13 +4319,20 @@ impl<'a> TypeChecker<'a> {
         };
         let hir_body = sub.check_block(&body_block);
         sub.leave_scope();
-        let sub_errors = std::mem::take(&mut sub.errors);
-        self.errors.extend(sub_errors);
+        self.errors.extend(std::mem::take(&mut sub.errors));
+        self.instantiation_requests.extend(std::mem::take(&mut sub.instantiation_requests));
+        self.send_probes.extend(std::mem::take(&mut sub.send_probes));
+        self.sync_probes.extend(std::mem::take(&mut sub.sync_probes));
+        // Take back the synthetics, now including any nested lambdas the sub-check
+        // produced.
+        self.synth_structs = std::mem::take(&mut sub.synth_structs);
+        self.synth_sigs = std::mem::take(&mut sub.synth_sigs);
+        self.synth_funcs = std::mem::take(&mut sub.synth_funcs);
 
-        // The synthetic HFunc params = [env, lambda_params...].
+        // Fill the reserved function slot with the real body.
         let mut params_list: Vec<LocalId> = vec![env_param_id];
         params_list.extend(lambda_param_ids.iter().copied());
-        let synth_func = HFunc {
+        self.synth_funcs[reserved_func_idx] = HFunc {
             id: lifted_fid,
             name: lifted_name.clone(),
             params: params_list,
@@ -4286,33 +4341,6 @@ impl<'a> TypeChecker<'a> {
             body: hir_body,
             span: sp,
         };
-        // Track the capture local ids so codegen can emit env-extraction at function entry.
-        // Encode via a side channel: store on the FuncSig's param_names.
-        let mut sig_param_names: Vec<String> = vec!["__env".to_string()];
-        for p in params { sig_param_names.push(p.name.clone()); }
-        for c in &caps { sig_param_names.push(format!("__capture_{}", c.name)); }
-        // FuncSig: caller's perspective is `(env*, lambda_params...)`.
-        let mut sig_param_tys: Vec<HType> = vec![env_ref_ty];
-        sig_param_tys.extend(resolved_params.clone());
-        self.synth_sigs.push(FuncSig {
-            name: lifted_name.clone(),
-            param_tys: sig_param_tys,
-            param_names: sig_param_names,
-            ret: resolved_ret.clone(),
-            is_extern: false,
-            c_name: lifted_name,
-            logic: None,
-            type_params: Vec::new(),
-            is_inline: false,
-            is_gate: false,
-            is_variadic: false,
-            is_pub: false,
-            module_path: self.cur_module.clone(),
-            imports: self.cur_imports.clone(),
-            has_imports: self.cur_has_imports.clone(),
-            where_bounds: self.cur_where_bounds.clone(),
-        });
-        self.synth_funcs.push(synth_func);
 
         // Build the closure HExpr: env-init values from the current scope's locals.
         let env_inits: Vec<HExpr> = caps.iter().map(|c| {

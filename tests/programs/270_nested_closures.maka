@@ -1,0 +1,16 @@
+// Nested capturing closures: an inner capturing lambda defined inside an outer
+// capturing lambda's body.  Both are lifted to __lambda_cap_N functions with
+// synthesized env structs; the inner must get its OWN distinct ids, not reuse
+// the outer's (which previously caused the inner call to re-enter the outer -
+// infinite self-recursion).
+unit run(int base) {
+    unit() outer = unit() [base] {
+        int(int) inner = int(int y) [base] { return y + base; };
+        log(inner(5));        // 5 + base
+        log(inner(7));        // 7 + base
+    };
+    outer();
+}
+unit main() {
+    run(10);   // 15, 17
+}
