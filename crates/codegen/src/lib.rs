@@ -8003,6 +8003,17 @@ impl<'a> Cx<'a> {
                     format!("(({})[maka_check_idx((maka_int)({}), (maka_int){}, \"array idx\")])", base_s, idx_s, len)
                 }
             }
+            // Borrow / pointer to a Vec or Slice: deref to the struct, then index
+            // its buffer.  `&Vec<T>` is `Vec_T*`, so the element lives at
+            // `(*base).data[i]` (Vec) / `(*base).ptr[i]` (Slice).
+            HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::OwnPtr { inner, .. }
+                if matches!(inner.as_ref(), HType::Vec { .. }) => {
+                format!("(((*({0})).data)[maka_check_idx((maka_int)({1}), (*({0})).len, \"vec idx\")])", base_s, idx_s)
+            }
+            HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::OwnPtr { inner, .. }
+                if matches!(inner.as_ref(), HType::Slice { .. }) => {
+                format!("(((*({0})).ptr)[maka_check_idx((maka_int)({1}), (*({0})).len, \"slice idx\")])", base_s, idx_s)
+            }
             _ => format!("(({})[{}])", base_s, idx_s),
         }
     }
@@ -8073,8 +8084,9 @@ impl<'a> Cx<'a> {
                         _ => "0".into(),
                     },
                     // `.len` through a borrow / non-owning pointer to an array or vec.
-                    HType::Ref { inner: i, .. } | HType::Ptr { inner: i, .. } => match i.as_ref() {
-                        HType::Vec { .. } => format!("({}).len", s),
+                    // `&Vec<T>` is `Vec_T*`, so the count is at `(*base).len`.
+                    HType::Ref { inner: i, .. } | HType::Ptr { inner: i, .. } | HType::OwnPtr { inner: i, .. } => match i.as_ref() {
+                        HType::Vec { .. } => format!("({})->len", s),
                         HType::Array { len, .. } => format!("(maka_int){}", len),
                         _ => "0".into(),
                     },

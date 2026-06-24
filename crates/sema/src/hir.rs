@@ -111,6 +111,10 @@ impl HType {
                 args: args.iter().map(|a| a.subst(env)).collect(),
                 is_enum: *is_enum,
             },
+            HType::FnPtr { ret, params } => HType::FnPtr {
+                ret: Box::new(ret.subst(env)),
+                params: params.iter().map(|p| p.subst(env)).collect(),
+            },
             _ => self.clone(),
         }
     }

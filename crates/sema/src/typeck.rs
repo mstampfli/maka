@@ -5476,6 +5476,17 @@ fn param_compatible_impl(param: &HType, actual: &HType, type_params: &[String], 
             if pm == am => { if param_compatible_impl(pi, ai, type_params, sym) { return true; } }
         (HType::OwnPtr { mutable: pm, inner: pi }, HType::OwnPtr { mutable: am, inner: ai })
             if pm == am => { if param_compatible_impl(pi, ai, type_params, sym) { return true; } }
+        // Function-pointer / closure params: recurse so a generic `'T('T)`
+        // parameter accepts a concrete `int(int)` argument (higher-order
+        // generics).  Contravariance is not modelled - exact arity, recursive
+        // compatibility on return + each param.
+        (HType::FnPtr { ret: pr, params: pp }, HType::FnPtr { ret: ar, params: ap })
+            if pp.len() == ap.len() => {
+                if param_compatible_impl(pr, ar, type_params, sym)
+                    && pp.iter().zip(ap.iter()).all(|(p, a)| param_compatible_impl(p, a, type_params, sym)) {
+                    return true;
+                }
+            }
         _ => {}
     }
     // Allow trivial implicit conversions (struct embedding upcast deferred).
@@ -5585,6 +5596,14 @@ fn unify_impl(pat: &HType, actual: &HType, env: &mut std::collections::HashMap<S
         (HType::Array { elem: pi, .. }, HType::Array { elem: ai, .. }) => unify_impl(pi, ai, env, sym),
         (HType::Slice { elem: pi, .. }, HType::Slice { elem: ai, .. }) => unify_impl(pi, ai, env, sym),
         (HType::Vec { elem: pi }, HType::Vec { elem: ai }) => unify_impl(pi, ai, env, sym),
+        (HType::OwnPtr { inner: pi, .. }, HType::OwnPtr { inner: ai, .. }) => unify_impl(pi, ai, env, sym),
+        (HType::RawPtr { inner: pi, .. }, HType::RawPtr { inner: ai, .. }) => unify_impl(pi, ai, env, sym),
+        // Bind type vars through function-pointer / closure types so a generic
+        // arg that appears only inside a `'T('T)` parameter is still inferred.
+        (HType::FnPtr { ret: pr, params: pp }, HType::FnPtr { ret: ar, params: ap }) => {
+            unify_impl(pr, ar, env, sym);
+            for (p, a) in pp.iter().zip(ap.iter()) { unify_impl(p, a, env, sym); }
+        }
         // Also accept passing `T` value for `&T`/`&mut T` parameter.
         (HType::Ref { inner: pi, .. }, other) => unify_impl(pi, other, env, sym),
         (HType::Ptr { inner: pi, .. }, other) => unify_impl(pi, other, env, sym),

@@ -1,0 +1,34 @@
+import std.Vec;
+
+// Generic higher-order map: apply a closure to each element of a Vec<T>.
+Vec<T> vmap<T>(&Vec<T> src, T(T) f) {
+    Vec<T> out = [];
+    for (usize i in 0..src.len) {
+        push(out, f(src[i]));
+    }
+    return out;
+}
+
+// Generic fold.
+T vfold<T>(&Vec<T> src, T init, T(T, T) f) {
+    mut T acc = init;
+    for (usize i in 0..src.len) {
+        acc = f(acc, src[i]);
+    }
+    return acc;
+}
+
+unit main() {
+    Vec<int> nums = [];
+    push(nums, 1); push(nums, 2); push(nums, 3); push(nums, 4);
+
+    int factor = 10;
+    Vec<int> scaled = vmap(&nums, int(int x) [factor] x * factor);
+    for (usize i in 0..scaled.len) { log(scaled[i]); }   // 10 20 30 40
+
+    int sum = vfold(&nums, 0, int(int a, int b) a + b);
+    log(sum);                                             // 10
+
+    int prod = vfold(&nums, 1, int(int a, int b) a * b);
+    log(prod);                                            // 24
+}
