@@ -1,0 +1,16 @@
+// A Vec of closures: each element is a fat callable; calling one through an index
+// (fs[i](x)) is an indirect call, and dropping the Vec frees each capture env.
+import std.Vec;
+unit main() {
+    Vec<int(int)> fs = [];
+    int a = 1;
+    int b = 10;
+    int c = 100;
+    push(fs, int(int x) [a] x + a);
+    push(fs, int(int x) [b] x + b);
+    push(fs, int(int x) [c] x + c);
+    mut int total = 0;
+    for (usize i in 0..fs.len) { total = total + fs[i](5); }
+    log(total);            // 6 + 15 + 105 = 126
+    log(fs.len as int);    // 3
+}

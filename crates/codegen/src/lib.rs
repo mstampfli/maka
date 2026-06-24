@@ -132,10 +132,12 @@ impl<'a> Cx<'a> {
         for f in &funcs {
             self.scan_func(f);
         }
+        // Callable typedefs first: slice/vec element types may be closures
+        // (`Vec<int(int)>` -> buffer of Callable_int_int_).
+        self.emit_callable_typedefs();
         self.emit_slice_typedefs();
         self.emit_vec_typedefs();
         self.emit_dyn_typedefs();
-        self.emit_callable_typedefs();
 
         // Raw user C from `cblock "...";` directives — pasted verbatim at module scope.
         let blocks: Vec<String> = self.module_cblocks.to_vec();
@@ -4829,11 +4831,11 @@ impl<'a> Cx<'a> {
             if !s.type_params.is_empty() { continue; }
             for f in &s.fields { self.note_type(&f.ty); }
         }
+        // FnPtr struct fields (and slice/vec-of-closure element types) need their
+        // Callable typedef defined before the struct/container body that uses it.
+        self.emit_callable_typedefs();
         self.emit_slice_typedefs();
         self.emit_vec_typedefs();
-        // FnPtr struct fields need their Callable typedef defined before the
-        // struct body that embeds them.
-        self.emit_callable_typedefs();
 
         // Index every emittable type by name: (is_enum, index).
         let mut kind_of: std::collections::HashMap<String, (bool, usize)> = std::collections::HashMap::new();
@@ -5299,11 +5301,10 @@ impl<'a> Cx<'a> {
             HType::Str => "str".into(),
             HType::NullT => "nullptr_t".into(),
             HType::Dyn { traits } => format!("Dyn_{}", traits.join("_")),
-            HType::FnPtr { ret, params } => {
-                let mut s = format!("fn_{}_", self.type_key(ret));
-                for p in params { s.push_str(&self.type_key(p)); s.push('_'); }
-                s
-            }
+            // Key a closure/fn-pointer by its fat-callable type name, so a
+            // container element (`Vec<int(int)>`) resolves via c_type_from_key to
+            // the `Callable_*` struct, not a bogus raw-fn-ptr name.
+            HType::FnPtr { ret, params } => format!("Callable_{}", fn_sig_key(ret, params)),
             HType::TyVar(n) => format!("T_{}", n),
             HType::AssocType { on, segment, .. } => format!("AT_{}_{}", self.type_key(on), segment),
             HType::GenericPattern { template_name, args, .. } => {

@@ -2186,6 +2186,34 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             _ => {
+                // General indirect call: any callee expression whose type is a
+                // FnPtr (or a pointer/heap to one) - e.g. `fs[i](x)` calling a
+                // closure stored in a Vec/array element.
+                let callee_h = self.check_expr(callee, None);
+                let (fnptr_ty, via_deref) = match &callee_h.ty {
+                    HType::FnPtr { .. } => (Some(callee_h.ty.clone()), false),
+                    HType::OwnPtr { inner, .. } | HType::Ptr { inner, .. } | HType::Heap { inner }
+                        if matches!(inner.as_ref(), HType::FnPtr { .. }) => (Some((**inner).clone()), true),
+                    _ => (None, false),
+                };
+                if let Some(HType::FnPtr { ret, params }) = fnptr_ty {
+                    let ret_ty = (*ret).clone();
+                    let hargs: Vec<HExpr> = args.iter().enumerate().map(|(i, a)| {
+                        let want = params.get(i).cloned().unwrap_or(HType::Int);
+                        self.check_expr_coerce(a, &want)
+                    }).collect();
+                    let callee_final = if via_deref {
+                        let fnptr = HType::FnPtr { ret: Box::new(ret_ty.clone()), params };
+                        HExpr { kind: HExprKind::DerefRef(Box::new(callee_h)), ty: fnptr, span: sp }
+                    } else {
+                        callee_h
+                    };
+                    return HExpr {
+                        kind: HExprKind::CallIndirect { callee: Box::new(callee_final), args: hargs },
+                        ty: ret_ty,
+                        span: sp,
+                    };
+                }
                 self.err("only direct function calls are supported", sp);
                 return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
             }
