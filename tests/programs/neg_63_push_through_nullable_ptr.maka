@@ -1,0 +1,8 @@
+// Pushing through a bare nullable pointer to a Vec is rejected: the pointer
+// could be null, so it would crash. The user must prove non-null first by
+// dereferencing (p!.push(..)) or pass a non-null &mut Vec.
+unit main() {
+  *Vec<int> p = null;
+  p.push(3);
+  log(0);
+}

@@ -1,0 +1,18 @@
+// push/pop may target a dereferenced pointer to a Vec (p!.push(..), p!.pop())
+// once the pointer is proven non-null (the `!`). The dereferenced place
+// &mut (*p) is a valid mutable target and mutations are visible through the
+// original Vec. A bare nullable pointer without the deref is rejected (see
+// neg test 63) - this only allows the proven-non-null form.
+unit main() {
+  mut Vec<int> v = [];
+  *Vec<int> p = &mut v;     // known non-null from &mut v
+  p!.push(10);
+  p!.push(20);
+  p!.push(30);
+  int last = p!.pop();      // 30
+  log(v.len as int);        // 2
+  log(last);                // 30
+  mut int s = 0;
+  for (int x in &v) { s = s + x; }
+  log(s);                   // 30
+}

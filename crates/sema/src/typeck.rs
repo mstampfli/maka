@@ -3299,13 +3299,24 @@ impl<'a> TypeChecker<'a> {
         // taken by mutable reference so the growth is visible to the caller.
         if (name == "push" || name == "pop") && qualifier.is_none() {
             let vh = self.check_expr(&args[0], None);
+            // A bare nullable pointer to a Vec (`*Vec` / `own *Vec` / `raw *Vec`)
+            // is not a valid target: pushing/popping through a null pointer would
+            // crash.  Require an explicit deref (`p!.push(..)`), which proves the
+            // pointer non-null - consistent with every other nullable-pointer use.
+            if matches!(&vh.ty,
+                HType::Ptr { inner, .. } | HType::OwnPtr { inner, .. } | HType::RawPtr { inner, .. }
+                    if matches!(inner.as_ref(), HType::Vec { .. }))
+            {
+                self.err(format!("cannot `{0}` through a nullable pointer to a `Vec`; dereference it first with `!` (`p!.{0}(..)`)", name), sp);
+                return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
+            }
             // The receiver is either a `Vec<T>` place (take a mutable ref to it)
-            // or already a mutable reference/pointer to a `Vec<T>` (a helper that
-            // received the vector by `&mut Vec<T>` / `*Vec<T>` - use it directly,
-            // since it is already a `Vec*`).  `already_ref` records which.
+            // or already a non-null mutable reference to a `Vec<T>` (a helper that
+            // received the vector by `&mut Vec<T>` - use it directly, since it is
+            // already a `Vec*`).  `already_ref` records which.
             let vec_info: Option<(HType, bool)> = match &vh.ty {
                 HType::Vec { elem } => Some(((**elem).clone(), false)),
-                HType::Ref { mutable: true, inner } | HType::Ptr { mutable: true, inner }
+                HType::Ref { mutable: true, inner }
                     if matches!(inner.as_ref(), HType::Vec { .. }) =>
                 {
                     match inner.as_ref() {
@@ -3320,7 +3331,10 @@ impl<'a> TypeChecker<'a> {
                     // `vh` is already a `Vec*`; use it as the mutable ref.
                     vh
                 } else {
-                    if !matches!(&vh.kind, HExprKind::Local(_) | HExprKind::Field { .. } | HExprKind::Index { .. } | HExprKind::GlobalRef(_)) {
+                    // A deref place (`p!.push(..)` where `p` is a `*Vec`/`&mut Vec`,
+                    // e.g. a Vec borrowed in place via hm_get_ref) is a valid
+                    // mutable target: `&mut (*p)` is the pointee Vec.
+                    if !matches!(&vh.kind, HExprKind::Local(_) | HExprKind::Field { .. } | HExprKind::Index { .. } | HExprKind::GlobalRef(_) | HExprKind::Unwrap { .. } | HExprKind::DerefRef(_)) {
                         self.err(format!("`{}` target must be a `Vec` variable, field, or element", name), sp);
                     }
                     HExpr {
