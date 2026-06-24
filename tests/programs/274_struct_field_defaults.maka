@@ -1,0 +1,13 @@
+// Struct literals may omit fields that declare a default value; the declared
+// default (literal or negated numeric literal) is spliced in.
+data Config { int width = 80; int height = 24; bool fs = false; int level = -1; char sep = '/'; }
+unit main() {
+    Config c = { width = 100 };
+    log(c.width);        // 100 (provided)
+    log(c.height);       // 24  (default)
+    log(c.fs);           // false (default)
+    log(c.level);        // -1  (negated-literal default)
+    log(c.sep as int);   // 47  (char default)
+    Config d = { };
+    log(d.width);        // 80  (all defaults)
+}

@@ -4946,15 +4946,15 @@ impl<'a> TypeChecker<'a> {
                 out.push((i, h));
                 continue;
             }
-            // Default: pointer fields default to null, otherwise use literal default or error
-            match &f.ty {
-                HType::Ptr { .. } => {
-                    let null = HExpr { kind: HExprKind::LitNull, ty: f.ty.clone(), span: sp };
-                    out.push((i, null));
-                }
-                _ => {
-                    self.err(format!("missing field `{}` (no default available)", f.name), sp);
-                }
+            // Missing field: use the declared default value (`int w = 80;`) if
+            // any; else a nullable pointer field defaults to null; else error.
+            if let Some(def) = &f.default {
+                out.push((i, def.clone()));
+            } else if let HType::Ptr { .. } = &f.ty {
+                let null = HExpr { kind: HExprKind::LitNull, ty: f.ty.clone(), span: sp };
+                out.push((i, null));
+            } else {
+                self.err(format!("missing field `{}` (no default available)", f.name), sp);
             }
         }
         HExpr { kind: HExprKind::Struct { id: sid, fields: out }, ty: HType::Struct(sid), span: sp }

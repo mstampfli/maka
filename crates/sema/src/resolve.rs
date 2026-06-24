@@ -8,6 +8,34 @@ pub fn resolve_type(sym: &SymTab, t: &ast::Type, errors: &mut Vec<SemaError>) ->
     resolve_type_in(sym, t, &[], errors)
 }
 
+/// Lower a struct/variant field's default expression to an HExpr so it can be
+/// spliced in when a struct literal omits the field.  Supports literal defaults
+/// (and a negated numeric literal); anything more complex is left as `None`
+/// (the field then has no usable default and must be supplied explicitly).
+fn lower_field_default(d: Option<&ast::Expr>, ty: &HType) -> Option<HExpr> {
+    fn lit_kind(l: &ast::Lit) -> Option<HExprKind> {
+        Some(match l {
+            ast::Lit::Int(n) => HExprKind::LitInt(*n),
+            ast::Lit::Float(x) => HExprKind::LitFloat(*x),
+            ast::Lit::Bool(b) => HExprKind::LitBool(*b),
+            ast::Lit::Char(c) => HExprKind::LitChar(*c),
+            ast::Lit::Str(s) => HExprKind::LitStr(s.clone()),
+            ast::Lit::Null => HExprKind::LitNull,
+            ast::Lit::Unit => HExprKind::LitUnit,
+        })
+    }
+    let (kind, span) = match d? {
+        ast::Expr::Lit(l, sp) => (lit_kind(l)?, *sp),
+        ast::Expr::Un { op: ast::UnOp::Neg, expr, span } => match expr.as_ref() {
+            ast::Expr::Lit(ast::Lit::Int(n), _) => (HExprKind::LitInt(-*n), *span),
+            ast::Expr::Lit(ast::Lit::Float(x), _) => (HExprKind::LitFloat(-*x), *span),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(HExpr { kind, ty: ty.clone(), span })
+}
+
 /// Peel references/pointers/heap to find the underlying struct/enum and return its
 /// canonical name as a string key, or `None` if the type isn't a nominal type.
 /// Used to record trait impls: the first parameter's underlying nominal type is the
@@ -656,13 +684,13 @@ impl SymTab {
                     // Slices must be initialized at construction.
                     // Embed fields pass mutability through to their inner struct.
                     let mut_payload = if f.is_embed { true } else { matches!(f.mutness, Mutness::Mut) };
-                    // default expression — we defer typechecking of these to use sites for v1 simplicity.
-                    let _default = f.default.clone();
+                    // Lower a literal default so struct literals may omit the field.
+                    let default = lower_field_default(f.default.as_ref(), &ty);
                     fields.push(FieldInfo {
                         name: f.name.clone(),
                         ty,
                         mut_payload,
-                        default: None,
+                        default,
                         is_embed: f.is_embed,
                         span: f.span,
                     });
