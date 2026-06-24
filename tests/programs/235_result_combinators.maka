@@ -1,0 +1,12 @@
+import std.{Result, is_ok, unwrap_err};
+Result<int, int> safediv(int a, int b) {
+    if (b == 0) { return Result.Err { err = 999 }; }
+    return Result.Ok { value = a / b };
+}
+unit main() {
+    Result<int, int> ok = safediv(10, 2);
+    Result<int, int> bad = safediv(1, 0);
+    if (is_ok(&ok)) { log(1); } else { log(0); }
+    if (is_ok(&bad)) { log(1); } else { log(0); }
+    log(unwrap_err(bad));
+}

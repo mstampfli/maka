@@ -1,0 +1,13 @@
+enum E { A { int v }, B }
+int peek(&E e) {
+    return match (e) {
+        E.A { v } v,
+        E.B 0,
+    };
+}
+unit main() {
+    E x = E.A { v = 42 };
+    log(peek(&x));   // 42
+    E y = E.B;
+    log(peek(&y));   // 0
+}

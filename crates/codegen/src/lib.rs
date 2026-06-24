@@ -9147,8 +9147,13 @@ impl<'a> Cx<'a> {
     }
 
     fn emit_match_switch(&mut self, f: &HFunc, scrutinee: &HExpr, arms: &[HMatchArm], result_ty: &HType, eid: EnumId) -> String {
-        let s = self.emit_expr(f, scrutinee);
-        let scrut_c = self.c_type(&scrutinee.ty);
+        let mut s = self.emit_expr(f, scrutinee);
+        let mut scrut_c = self.c_type(&scrutinee.ty);
+        // Matching on a borrow / pointer to an enum: deref so __s holds the value.
+        if let Some(enum_ty) = enum_pointee(&scrutinee.ty) {
+            scrut_c = self.c_type(&enum_ty);
+            s = format!("(*({}))", s);
+        }
         let res_c = self.c_type(result_ty);
         let needs_value = !matches!(result_ty, HType::Unit);
         let tag_expr = if self.sym.enum_info(eid).is_simple() { "__s" } else { "__s.tag" };
@@ -9207,8 +9212,14 @@ impl<'a> Cx<'a> {
         //     } while (0);
         //     __r;
         //   })
-        let s = self.emit_expr(f, scrutinee);
-        let scrut_c = self.c_type(&scrutinee.ty);
+        let mut s = self.emit_expr(f, scrutinee);
+        let mut scrut_c = self.c_type(&scrutinee.ty);
+        // Matching on a borrow / pointer to an enum: deref so __s holds the enum
+        // value (tag and payload are read with `.`, not on a pointer).
+        if let Some(enum_ty) = enum_pointee(&scrutinee.ty) {
+            scrut_c = self.c_type(&enum_ty);
+            s = format!("(*({}))", s);
+        }
         let res_c = self.c_type(result_ty);
         let needs_value = !matches!(result_ty, HType::Unit);
 
@@ -9503,6 +9514,18 @@ fn place_root_is(e: &HExpr, iv: u32) -> bool {
 }
 
 /// The root local id of a place expression, if it bottoms out in a local.
+/// If `t` is a borrow / pointer to an enum (`&E`, `*E`, `own *E`, ...), return
+/// the pointee enum type, so a `match` on it can deref to the value.
+fn enum_pointee(t: &HType) -> Option<HType> {
+    match t {
+        HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::RawPtr { inner, .. }
+        | HType::OwnPtr { inner, .. } | HType::Heap { inner } => {
+            if matches!(inner.as_ref(), HType::Enum(_)) { Some((**inner).clone()) } else { None }
+        }
+        _ => None,
+    }
+}
+
 fn place_root_local(e: &HExpr) -> Option<u32> {
     match &e.kind {
         HExprKind::Local(id) => Some(id.0),
