@@ -9298,11 +9298,21 @@ impl<'a> Cx<'a> {
     fn emit_match_switch(&mut self, f: &HFunc, scrutinee: &HExpr, arms: &[HMatchArm], result_ty: &HType, eid: EnumId) -> String {
         let mut s = self.emit_expr(f, scrutinee);
         let mut scrut_c = self.c_type(&scrutinee.ty);
+        let via_ptr = enum_pointee(&scrutinee.ty).is_some();
         // Matching on a borrow / pointer to an enum: deref so __s holds the value.
         if let Some(enum_ty) = enum_pointee(&scrutinee.ty) {
             scrut_c = self.c_type(&enum_ty);
             s = format!("(*({}))", s);
         }
+        // A freshly-produced owned-enum rvalue scrutinee (a call result or a
+        // nested match value) is materialized into __s and has no other owner, so
+        // __s must be dropped after the switch (with its moved-out payload fields
+        // nulled first).  Anything that views a value owned elsewhere - a place
+        // (local/field/index/global), a deref (`e!`), or a borrow (via_ptr) - is
+        // freed by that owner, so __s (a shallow copy) must NOT be dropped here.
+        let scrut_is_temp_owned = !via_ptr
+            && self.drop_ty_owns(&scrutinee.ty)
+            && matches!(&scrutinee.kind, HExprKind::Call { .. } | HExprKind::Match { .. });
         let res_c = self.c_type(result_ty);
         let needs_value = !matches!(result_ty, HType::Unit);
         let tag_expr = if self.sym.enum_info(eid).is_simple() { "__s" } else { "__s.tag" };
@@ -9343,6 +9353,9 @@ impl<'a> Cx<'a> {
             body.push_str("} break; ");
         }
         body.push_str("} ");
+        if scrut_is_temp_owned {
+            body.push_str(&format!("__maka_drop_{}(&__s); ", scrut_c));
+        }
         if needs_value { body.push_str("__r; "); } else { body.push_str("MAKA_UNIT; "); }
         body.push_str("})");
         body
@@ -9572,6 +9585,17 @@ impl<'a> Cx<'a> {
             HExprKind::Local(id) if matches!(scrutinee.ty, HType::Enum(_)) => {
                 let li = &f.locals[id.0 as usize];
                 local_name(*id, &li.name)
+            }
+            // A freshly-produced owned-enum rvalue scrutinee (call/match result)
+            // lives in `__s` (dropped after the switch); null the fields it moves
+            // out so that drop does not double-free the escaped payload.  Must
+            // mirror `scrut_is_temp_owned` in emit_match_switch exactly.
+            _ if matches!(scrutinee.ty, HType::Enum(_))
+                && self.drop_ty_owns(&scrutinee.ty)
+                && enum_pointee(&scrutinee.ty).is_none()
+                && matches!(&scrutinee.kind, HExprKind::Call { .. } | HExprKind::Match { .. }) =>
+            {
+                "__s".to_string()
             }
             _ => return String::new(),
         };

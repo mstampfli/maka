@@ -1,0 +1,43 @@
+// Matching on a temporary (rvalue) owned-enum scrutinee, e.g. match (mk(n)),
+// must free that temporary after the match. Regression: the scrutinee was
+// materialized into __s but, unlike a named local (freed at scope exit), the
+// temporary __s was never dropped, so an owning payload that an arm only read
+// leaked. An arm that moves the payload out must still null the field in __s so
+// the post-switch drop does not double-free it.
+import std.{str_dup, str_len};
+data Node { int v; }
+enum Opt<T> { Some { T v }, None }
+
+// Returns an owning-payload enum, constructed in a match-yield then returned.
+Opt<String> lookup(int n) {
+  return match (n) {
+    0 { yield Opt.Some { v = str_dup("zero") }; },
+    1 { yield Opt.Some { v = str_dup("oneoneone") }; },
+    else { yield Opt.None; },
+  };
+}
+
+// Reads the payload only (does NOT move it out): the temporary must be freed.
+int name_len(int n) {
+  return match (lookup(n)) {
+    Some { v } { yield str_len(v) as int; },
+    None { yield -1; },
+  };
+}
+
+// Moves the payload out: must transfer ownership without double-free.
+Opt<own &Node> make_node(int v) { return Opt.Some { v = alloc Node { v = v } }; }
+int take(int v) {
+  own &Node n = match (make_node(v)) {
+    Some { v } { yield v; },
+    None { yield alloc Node { v = -1 }; },
+  };
+  return n.v;
+}
+
+unit main() {
+  log(name_len(0));    // 4
+  log(name_len(1));    // 9
+  log(name_len(9));    // -1
+  log(take(42));       // 42
+}
