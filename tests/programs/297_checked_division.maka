@@ -1,0 +1,26 @@
+// Integer division and modulo with a runtime divisor are guarded against a
+// zero divisor (a zero divisor is C undefined behaviour; it now panics cleanly
+// with "divide by zero" instead of trapping). The guard is type-preserving and
+// must not change results for non-zero divisors, including negative operands.
+// A literal non-zero divisor elides the check.
+unit main() {
+  // Runtime divisors (guarded path) compute the same results as before.
+  mut int a = 100;
+  mut int b = 7;
+  log(a / b);          // 14
+  log(a % b);          // 2
+
+  // Negative operands: C truncates toward zero; the guard must preserve that.
+  mut int n = -100;
+  mut int d = 7;
+  log(n / d);          // -14
+  log(n % d);          // -2
+
+  // Divisor that is a negative runtime value.
+  mut int e = -4;
+  log(a / e);          // -25
+
+  // Literal divisor (check elided) still correct.
+  log(a / 5);          // 20
+  log(a % 9);          // 1
+}

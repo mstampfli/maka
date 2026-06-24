@@ -296,6 +296,10 @@ impl<'a> Cx<'a> {
         // Minimal helpers the rest of codegen assumes are present.
         // `maka_check_idx` is emitted by array/slice access; route to panic.
         self.w("static inline maka_int maka_check_idx(maka_int i, maka_int len, const char* msg){ if(i<0||i>=len) maka_panic(msg); return i; }\n");
+        // `maka_check_div` guards an integer division/modulo divisor: a zero
+        // divisor is C undefined behaviour (a hardware trap), so panic cleanly
+        // instead.  Type-preserving so the division keeps its operand width.
+        self.w("#define maka_check_div(d) (__extension__ ({ __typeof__(d) __mdz = (d); if (__mdz == 0) maka_panic(\"divide by zero\"); __mdz; }))\n");
         // Atomic intrinsics — `__atomic_*` are compiler builtins (gcc/clang
         // emit them inline, no libc).  The runtime helpers that wrap them
         // in `maka_atomic_*` symbols are kept here for any extern decl that
@@ -419,6 +423,7 @@ impl<'a> Cx<'a> {
         // No MAKA_UNWRAP: the sema pass proves every `*T` deref is non-null,
         // so codegen emits a raw `(*p)` and never needs a runtime null check.
         self.w("static inline maka_int maka_check_idx(maka_int i, maka_int len, const char* msg){ if(i<0||i>=len) maka_panic(msg); return i; }\n");
+        self.w("#define maka_check_div(d) (__extension__ ({ __typeof__(d) __mdz = (d); if (__mdz == 0) maka_panic(\"divide by zero\"); __mdz; }))\n");
         // log helpers
         self.w("static void maka_log_int(maka_int v) { printf(\"%lld\\n\", (long long)v); }\n");
         self.w("static void maka_log_float(maka_float v) { printf(\"%g\\n\", v); }\n");
@@ -7741,6 +7746,9 @@ impl<'a> Cx<'a> {
             HExprKind::Bin { op, lhs, rhs } => {
                 let l = self.emit_inline_expr(inline_f, lhs, tag);
                 let r = self.emit_inline_expr(inline_f, rhs, tag);
+                if needs_div_guard(*op, &lhs.ty, rhs) {
+                    return format!("(({}) {} maka_check_div({}))", l, binop_c(*op), r);
+                }
                 format!("(({}) {} ({}))", l, binop_c(*op), r)
             }
             HExprKind::Un { op, expr } => {
@@ -8411,6 +8419,9 @@ impl<'a> Cx<'a> {
                             return format!("(({}).tag {} ({}).tag)", l, opc, r);
                         }
                     }
+                }
+                if needs_div_guard(*op, &lhs.ty, rhs) {
+                    return format!("(({}) {} maka_check_div({}))", l, opc, r);
                 }
                 format!("(({}) {} ({}))", l, opc, r)
             }
@@ -9838,6 +9849,16 @@ fn printf_conv(s: String, ty: &HType) -> String {
         HType::Float | HType::SizedFloat { .. } => format!("(double)({})", s),
         _ => s,
     }
+}
+
+/// An integer `/` or `%` whose divisor is not a known-non-zero literal needs a
+/// runtime zero-check (`maka_check_div`): a zero divisor is C undefined
+/// behaviour.  Float division is defined (inf/nan) so it is never guarded, and a
+/// literal non-zero divisor is provably safe so the check is elided.
+fn needs_div_guard(op: HBinOp, lhs_ty: &HType, rhs: &HExpr) -> bool {
+    matches!(op, HBinOp::Div | HBinOp::Mod)
+        && matches!(lhs_ty, HType::Int | HType::SizedInt { .. } | HType::Char)
+        && !matches!(&rhs.kind, HExprKind::LitInt(n) if *n != 0)
 }
 
 fn binop_c(op: HBinOp) -> &'static str {
