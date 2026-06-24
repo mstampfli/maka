@@ -1,0 +1,33 @@
+// A closure that captures an owning Vec by value and then mutates it (push) and
+// iterates it must take ownership of the buffer cleanly: the captured vector is
+// grown inside the closure env, read back, and freed exactly once when the
+// closure/env is done. A three-way interaction of closure capture, owning
+// container, and in-place mutation - verified leak- and double-free-clean.
+int build() {
+  mut Vec<int> v = [];
+  v.push(1);
+  int() run = int() [v] {
+    v.push(2);
+    v.push(3);
+    mut int s = 0;
+    for (int x in &v) { s = s + x; }
+    return s;
+  };
+  return run();
+}
+
+// Also push to a Vec field through a &mut struct parameter.
+data Bag { Vec<int> items; }
+unit add_n(&mut Bag b, int n) {
+  mut int i = 0;
+  while (i < n) { b.items.push(i * i); i = i + 1; }
+}
+
+unit main() {
+  log(build());          // 1 + 2 + 3 = 6
+  mut Bag bag = Bag { items = [] };
+  add_n(&mut bag, 4);    // 0,1,4,9
+  mut int s = 0;
+  for (int x in &bag.items) { s = s + x; }
+  log(s);                // 14
+}
