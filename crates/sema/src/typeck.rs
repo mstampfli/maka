@@ -949,9 +949,14 @@ impl<'a> TypeChecker<'a> {
                 // ONLY inside `unsafe { ... }` (the manual-memory escape hatch,
                 // paired with `free p;` for teardown).
                 let inner_expected = match expected {
+                    // Skip the push-down when the expected pointee still carries an
+                    // unsolved type variable (a generic call `f(alloc T{...})` whose
+                    // `T` is not yet inferred): forcing the value to a bare TyVar
+                    // fails ("expected 'T, got struct").  Infer the value naturally
+                    // instead; the result's pointee type then drives unification.
                     Some(HType::OwnPtr { inner, .. })
                     | Some(HType::Heap { inner })
-                    | Some(HType::RawPtr { inner, .. }) => Some((**inner).clone()),
+                    | Some(HType::RawPtr { inner, .. }) if !has_tyvar(inner) => Some((**inner).clone()),
                     _ => None,
                 };
                 let h = if let Some(ie) = inner_expected.as_ref() {

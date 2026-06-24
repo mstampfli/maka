@@ -1,0 +1,21 @@
+// A generic function whose parameter is own &T / own *T can be called with an
+// `alloc` argument: T is inferred from the allocation. Regression: the alloc
+// value was checked against the un-inferred pointee TyVar (expected 'T), so it
+// failed before unification could solve T. The alloc is now inferred naturally
+// when the expected pointee is still a type variable, and its result type drives
+// inference.
+data Node { int v; }
+data Pair { int a; int b; }
+
+int run_get<T>(own &T x, int(&T) get) { return get(x); }
+int node_v(&Node n) { return n.v; }
+int pair_sum(&Pair p) { return p.a + p.b; }
+
+unit main() {
+  mut int s = 0;
+  for (int i in 0..1000) {
+    s = s + run_get(alloc Node { v = 5 }, node_v);
+    s = s + run_get(alloc Pair { a = 1, b = 2 }, pair_sum);
+  }
+  log(s);   // 1000 * (5 + 3) = 8000
+}
