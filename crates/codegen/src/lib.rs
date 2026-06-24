@@ -9632,7 +9632,13 @@ impl<'a> Cx<'a> {
     /// move.  Used to decide whether a matched owning payload escapes.
     fn value_moves_binding(&self, value: &HExpr, target: LocalId) -> bool {
         match &value.kind {
-            HExprKind::Local(id) => *id == target,
+            // A bare `Local` is a move only if it still carries an owning type here.
+            // When the binding was coerced to a borrowed view (an owning `String`
+            // passed to a `string` / `&T` / `*T` parameter, e.g. `str_len(body)`),
+            // its type at this site no longer owns heap, so ownership does NOT
+            // escape - the scrutinee keeps it and its drop frees it.  Treating
+            // such a borrow as a move would null the scrutinee field and leak.
+            HExprKind::Local(id) => *id == target && self.drop_ty_owns(&value.ty),
             HExprKind::Transfer(inner)
             | HExprKind::Cast { expr: inner, .. }
             | HExprKind::CheckedCast { expr: inner, .. }

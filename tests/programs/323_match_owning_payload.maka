@@ -1,0 +1,19 @@
+// Matching an enum that binds an owning payload (here a String) must free the
+// payload exactly once. If the arm only READS the binding (borrow, e.g. passes
+// it to str_len), ownership stays with the scrutinee and its drop frees it. If
+// the arm MOVES it out (yields it as the result), the scrutinee field is nulled
+// and the result owns it. Neither path may leak or double-free.
+import std.{str_len};
+enum Msg { Text { String body }, Empty }
+
+int sz(Msg m) { return match (m) { Text { body } str_len(body) as int, Empty 0, }; }
+String take(Msg m) { return match (m) { Text { body } body, Empty "none" + "", }; }
+
+unit main() {
+  mut int a = 0;
+  for (int i in 0..100) { a = a + sz(Msg.Text { body = "hello" + "" }); }   // read/borrow path
+  log(a);                                                                    // 500
+  mut int b = 0;
+  for (int i in 0..100) { String s = take(Msg.Text { body = "hi" + "" }); b = b + (str_len(s) as int); }  // move-out path
+  log(b);                                                                    // 200
+}
