@@ -1,0 +1,30 @@
+// A Vec whose element type is itself an owning heap pointer (`Vec<own &Node>`)
+// must compile and free each element on drop. Regression: the container element
+// type key for an `own &T` (Heap) element was emitted as an undefined C type
+// (`Vec_h_Node { h_Node* data; ... }`), because c_type_from_key handled the
+// pointer prefixes (p_/pm_/pc_) but not the heap prefix (h_). It now maps
+// `h_<inner>` to `<inner>*`, matching c_type, so the vector stores `Node*`
+// elements and drops them exactly once.
+data Node { int v; }
+
+int build_index() {
+  mut Vec<own &Node> v = [];
+  v.push(alloc Node { v = 1 });
+  v.push(alloc Node { v = 2 });
+  v.push(alloc Node { v = 3 });
+  return v[0].v + v[1].v + v[2].v;   // 6; Vec drop frees all three
+}
+
+int pop_owning() {
+  mut Vec<own &Node> v = [];
+  v.push(alloc Node { v = 5 });
+  v.push(alloc Node { v = 6 });
+  own &Node last = v.pop();           // ownership moves to last (v = 6)
+  int r = last.v + v[0].v;            // 6 + 5
+  return r;                           // last drops here, v[0] drops with the Vec
+}
+
+unit main() {
+  log(build_index());   // 6
+  log(pop_owning());    // 11
+}

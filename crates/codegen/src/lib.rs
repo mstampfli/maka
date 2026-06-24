@@ -5347,6 +5347,15 @@ impl<'a> Cx<'a> {
         if let Some(rest) = k.strip_prefix("pc_") {
             return format!("const {}*", self.c_type_from_key(rest));
         }
+        // Heap keys (`own &T`, encoded `h_<inner>`) land as `<inner>*` in C,
+        // matching c_type - except `own &[*]T` (a Vec), which is the Vec struct
+        // by value with no extra indirection.
+        if let Some(rest) = k.strip_prefix("h_") {
+            if rest.starts_with("Vec_") {
+                return self.c_type_from_key(rest);
+            }
+            return format!("{}*", self.c_type_from_key(rest));
+        }
         match k {
             "str" => "const char*".into(),
             other => other.to_string(),
