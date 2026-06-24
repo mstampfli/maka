@@ -1,0 +1,26 @@
+// An early return from inside a loop, in a function that owns a Vec of owning
+// allocs, must free the Vec exactly once.  Previously the owning temporaries
+// push'd into the Vec before the loop were freed both as temporaries and as Vec
+// elements on the early-return path (double free), because the loop body did not
+// inherit the moves made before it.  (Verified out of band with ASan.)
+import std.{Vec, push};
+data Box { int v; }
+int find_first_over(int threshold) {
+    Vec<own *Box> xs = [];
+    push(xs, alloc Box { v = 3 });
+    push(xs, alloc Box { v = 7 });
+    push(xs, alloc Box { v = 12 });
+    mut int i = 0;
+    while (i < xs.len as int) {
+        *Box b = xs[i];
+        if (b != null) {
+            if (b!.v > threshold) { return b!.v; }   // early return frees xs once
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+unit main() {
+    log(find_first_over(5));    // 7
+    log(find_first_over(20));   // -1
+}

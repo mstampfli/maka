@@ -1478,10 +1478,14 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
         }
     }
 
-    fn visit_block(sym: &SymTab, locals: &[LocalInfo], b: &mut HBlock, scope_chain: &mut Vec<Vec<LocalId>>, loop_start: Option<usize>) {
+    fn visit_block(sym: &SymTab, locals: &[LocalInfo], b: &mut HBlock, scope_chain: &mut Vec<Vec<LocalId>>, loop_start: Option<usize>, inherited: &std::collections::HashSet<LocalId>) {
         scope_chain.push(Vec::new());
-        // Track moves up to each position in the block.
-        let mut moved: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+        // Track moves up to each position in the block.  Start from the moves
+        // already in effect at block entry (made by enclosing statements), so a
+        // `return` inside a nested block does not re-drop a value the parent
+        // already moved out (e.g. an owning temporary push'd into a Vec before a
+        // loop, then an early return inside that loop - that would double-free).
+        let mut moved: std::collections::HashSet<LocalId> = inherited.clone();
         for s in &mut b.stmts {
             match s {
                 HStmt::Let { local, init, .. } => {
@@ -1537,12 +1541,12 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     *heap_drops = drops;
                 }
                 HStmt::If { then_b, else_b, .. } => {
-                    visit_block(sym, locals, then_b, scope_chain, loop_start);
-                    if let Some(b) = else_b { visit_block(sym, locals, b, scope_chain, loop_start); }
+                    visit_block(sym, locals, then_b, scope_chain, loop_start, &moved);
+                    if let Some(b) = else_b { visit_block(sym, locals, b, scope_chain, loop_start, &moved); }
                 }
-                HStmt::While { body, .. } => visit_block(sym, locals, body, scope_chain, Some(scope_chain.len())),
-                HStmt::Block(b) => visit_block(sym, locals, b, scope_chain, loop_start),
-                HStmt::Unsafe(b, _) => visit_block(sym, locals, b, scope_chain, loop_start),
+                HStmt::While { body, .. } => visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved),
+                HStmt::Block(b) => visit_block(sym, locals, b, scope_chain, loop_start, &moved),
+                HStmt::Unsafe(b, _) => visit_block(sym, locals, b, scope_chain, loop_start, &moved),
                 HStmt::Break { heap_drops, .. } | HStmt::Continue { heap_drops, .. } => {
                     // Free owning locals declared inside the enclosing loop before
                     // the jump leaves the loop-body scope chain (same idea as the
@@ -1558,8 +1562,8 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                         *heap_drops = drops;
                     }
                 }
-                HStmt::ForC { body, .. } => visit_block(sym, locals, body, scope_chain, Some(scope_chain.len())),
-                HStmt::ForEach { body, .. } => visit_block(sym, locals, body, scope_chain, Some(scope_chain.len())),
+                HStmt::ForC { body, .. } => visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved),
+                HStmt::ForEach { body, .. } => visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved),
                 HStmt::Propagate { value: Some(v), .. } => {
                     moved_locals_in_expr(sym, v, &mut moved);
                 }
@@ -1578,7 +1582,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
 
     let mut chain = Vec::new();
     let locals = f.locals.clone();
-    visit_block(sym, &locals, &mut f.body, &mut chain, None);
+    visit_block(sym, &locals, &mut f.body, &mut chain, None, &std::collections::HashSet::new());
 
     // Append owning parameters to the body's heap_to_free so they auto-free at
     // function scope-exit — unless they were transferred out somewhere in the
