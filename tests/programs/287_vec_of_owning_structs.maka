@@ -1,0 +1,17 @@
+import std.{Vec, push};
+data Box { int v; }
+data Pair { own *Box a; int tag; }
+int run() {
+    Vec<Pair> ps = [];
+    push(ps, Pair { a = alloc Box { v = 1 }, tag = 10 });
+    push(ps, Pair { a = alloc Box { v = 2 }, tag = 20 });
+    mut int sum = 0;
+    mut int i = 0;
+    while (i < ps.len as int) { sum = sum + ps[i].tag; i = i + 1; }
+    return sum;
+}
+unit main() {
+    mut int t = 0; mut int k = 0;
+    while (k < 1000) { t = run(); k = k + 1; }
+    log(t);   // 30
+}

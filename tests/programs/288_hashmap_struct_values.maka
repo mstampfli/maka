@@ -1,0 +1,12 @@
+import std.{HashMap, hashmap, hm_put, hm_get};
+data Point { int x; int y; }
+unit main() {
+    Point dflt = { x = 0, y = 0 };
+    mut HashMap<Point> m = hashmap(dflt);
+    hm_put(&mut m, "a", Point { x = 1, y = 2 });
+    hm_put(&mut m, "b", Point { x = 3, y = 4 });
+    Point p = hm_get(&m, "a");
+    log(p.x + p.y);    // 3
+    Point q = hm_get(&m, "b");
+    log(q.x + q.y);    // 7
+}
