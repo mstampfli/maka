@@ -6280,12 +6280,12 @@ impl<'a> Cx<'a> {
         self.w("    if (!s) return 0;\n");
         self.w("    char* end; long long v = strtoll(s, &end, 10); return (int64_t)v;\n");
         self.w("}\n");
-        self.w("const char* __maka_rt_int_to_str(int64_t n) {\n");
+        self.w("maka_char* __maka_rt_int_to_str(int64_t n) {\n");
         self.w("    char buf[32]; int len = snprintf(buf, sizeof(buf), \"%lld\", (long long)n);\n");
         self.w("    if (len < 0) len = 0;\n");
         self.w("    char* s = (char*)malloc((size_t)len + 1);\n");
         self.w("    memcpy(s, buf, (size_t)len + 1);\n");
-        self.w("    return s;\n");
+        self.w("    return (maka_char*)s;\n");
         self.w("}\n");
         self.w("int64_t __maka_rt_str_find(const char* s, const char* needle) {\n");
         self.w("    if (!s || !needle) return -1;\n");

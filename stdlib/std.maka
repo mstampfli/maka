@@ -716,10 +716,10 @@ pub unit   process_exit(int code)   { __process_exit(code); }
 // String conversions + search.
 // =====================================================================
 extern "__maka_rt_str_to_int"   int    __str_to_int (string s);
-extern "__maka_rt_int_to_str"   string __int_to_str (int n);
+extern "__maka_rt_int_to_str"   String __int_to_str (int n);
 extern "__maka_rt_str_find"     int    __str_find   (string s, string needle);
 pub int    str_to_int(string s)            { return __str_to_int(s); }
-pub string int_to_str(int n)               { return __int_to_str(n); }
+pub String int_to_str(int n)               { return __int_to_str(n); }
 pub int    str_find  (string s, string needle) { return __str_find(s, needle); }
 
 // =====================================================================
