@@ -1,0 +1,16 @@
+// Operator overloading is general, not String-specific: any type that implements
+// the std `Add` / `Eq` attrs gets `+` and `==`. Operands auto-borrow into the
+// `&Self` parameters, so they are not consumed.
+import std.{Add, Eq};
+data V2 { int x; int y; }
+V2 has Add { V2 add(&V2 a, &V2 b) { return V2 { x = a.x + b.x, y = a.y + b.y }; } }
+V2 has Eq  { bool eq (&V2 a, &V2 b) { return a.x == b.x && a.y == b.y; } }
+unit main() {
+  V2 a = V2 { x = 1, y = 2 };
+  V2 b = V2 { x = 3, y = 4 };
+  V2 c = a + b;
+  log(c.x); log(c.y);                                          // 4 6
+  if (c == (V2 { x = 4, y = 6 })) { log(1); } else { log(0); }  // 1
+  if (a == b) { log(1); } else { log(0); }                      // 0
+  log(a.x);                                                     // 1 (a not consumed)
+}

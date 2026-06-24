@@ -1350,7 +1350,12 @@ fn hoist_in_expr(sym: &SymTab, e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: 
             // they are not hoisted; only their nested call-args are.
             for (_, fe) in fields.iter_mut() { hoist_in_expr(sym, fe, locals, pre); }
         }
-        HExprKind::Match { arms, .. } => {
+        HExprKind::Match { scrutinee, arms, .. } => {
+            // The scrutinee is evaluated once, so hoist its nested temporaries
+            // (e.g. an auto-borrowed operand temp in `match (a == make_temp()) {}`).
+            // The scrutinee-as-a-whole owning temp is handled by the match's own
+            // __s copy + field-nulling, so this only touches nested temps.
+            hoist_in_expr(sym, scrutinee, locals, pre);
             // Arm bodies are real statement blocks; their conditional values are
             // left to their own scopes.
             for arm in arms.iter_mut() { hoist_block_temps(sym, &mut arm.body, locals); }

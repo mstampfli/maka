@@ -1,0 +1,12 @@
+// An operator (String `==`) whose operand is a temporary, used as a MATCH
+// scrutinee. The scrutinee is evaluated once, so its auto-borrowed operand temp
+// is hoisted before the match. Was emitting invalid C (`&<rvalue>`). Leak-clean.
+import std.{String, StringOps, Eq, string_from};
+unit main() {
+  mut int t = 0;
+  for (int i in 0..500) {
+    int r = match (string_from("a") == string_from("a")) { true 1, else 0, };
+    t = t + r;
+  }
+  log(t);                                              // 500
+}
