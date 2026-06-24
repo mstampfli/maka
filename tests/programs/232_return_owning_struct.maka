@@ -1,0 +1,11 @@
+data Box { int v; }
+data Two { own *Box a; own *Box b; }
+int getv(*Box p) { if (p == null) { return -1; } return p!.v; }
+Two pair(int x, int y) {
+    Two t = { a = alloc Box { v = x }, b = alloc Box { v = y } };
+    return t;   // moves t out
+}
+unit main() {
+    Two t = pair(3, 4);
+    log(getv(t.a) + getv(t.b));   // 7
+}

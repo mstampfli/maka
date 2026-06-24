@@ -1,0 +1,11 @@
+import std.Vec;
+data Box { int v; }
+data Bag { mut Vec<own *Box> items; int tag; }
+int getv(*Box p) { if (p == null) { return -1; } return p!.v; }
+unit main() {
+    mut Bag bag = { items = [], tag = 7 };
+    push(bag.items, alloc Box { v = 10 });
+    push(bag.items, alloc Box { v = 20 });
+    log(bag.tag);                 // 7
+    log(getv(bag.items[0]));      // 10
+}

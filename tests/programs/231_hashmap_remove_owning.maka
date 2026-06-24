@@ -1,0 +1,11 @@
+import std.{HashMap, hashmap, hm_put, hm_has, hm_remove};
+data Box { int v; }
+unit main() {
+    mut HashMap<own *Box> m = hashmap(null);
+    hm_put(&mut m, "a", alloc Box { v = 1 });
+    hm_put(&mut m, "b", alloc Box { v = 2 });
+    bool r = hm_remove(&mut m, "a");   // must free Box{1}
+    log(r);                            // true
+    log(hm_has(&m, "a"));              // false
+    log(m.count);                      // 1
+}
