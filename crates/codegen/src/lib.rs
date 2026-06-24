@@ -4839,6 +4839,15 @@ impl<'a> Cx<'a> {
             if !s.type_params.is_empty() { continue; }
             for f in &s.fields { self.note_type(&f.ty); }
         }
+        // Enum variant payload fields likewise embed container/slice/callable
+        // types by value (e.g. `List { Vec<int> xs }`), so their element typedefs
+        // must be emitted before the variant payload struct that uses them.
+        for e in &enums {
+            if !e.type_params.is_empty() { continue; }
+            for v in &e.variants {
+                for f in &v.fields { self.note_type(&f.ty); }
+            }
+        }
         // FnPtr struct fields (and slice/vec-of-closure element types) need their
         // Callable typedef defined before the struct/container body that uses it.
         self.emit_callable_typedefs();

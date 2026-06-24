@@ -1,0 +1,32 @@
+// An enum variant whose payload embeds a container by value (a Vec or a String)
+// must have that element/container typedef emitted before the variant payload
+// struct. Regression: the dependency pre-scan that emits Vec/Slice/Callable
+// typedefs walked struct fields but not enum variant payload fields, so an enum
+// carrying a Vec only-as-payload referenced an undefined Vec_maka_int. The
+// payloads are also owning, so they must be freed when the enum drops.
+import std.{str_dup, str_len};
+
+enum Data { List { Vec<int> xs }, Empty }
+int sum(Data d) {
+  return match (d) {
+    List { xs } { mut int s = 0; for (int x in &xs) { s = s + x; } yield s; },
+    Empty { yield 0; },
+  };
+}
+
+enum Msg { Text { String s }, Blank }
+int text_len(Msg m) {
+  return match (m) {
+    Text { s } { yield str_len(s) as int; },
+    Blank { yield 0; },
+  };
+}
+
+unit main() {
+  mut Vec<int> xs = [];
+  xs.push(10); xs.push(20); xs.push(30);
+  log(sum(Data.List { xs = xs }));        // 60
+  log(sum(Data.Empty));                   // 0
+  log(text_len(Msg.Text { s = str_dup("hello") }));   // 5
+  log(text_len(Msg.Blank));               // 0
+}
