@@ -1,0 +1,24 @@
+// The full operator-overload surface: a `data` type implementing the std
+// operator attrs (Add/Sub/Mul/Div/Mod/Eq/Ord/bit ops) gets the matching
+// operators. Operands auto-borrow (not consumed). Ord.cmp drives < <= > >=.
+import std.{Add, Sub, Mul, Eq, Ord};
+data V2 { int x; int y; }
+V2 has Add { V2 add(&V2 a, &V2 b) { return V2 { x = a.x + b.x, y = a.y + b.y }; } }
+V2 has Sub { V2 sub(&V2 a, &V2 b) { return V2 { x = a.x - b.x, y = a.y - b.y }; } }
+V2 has Mul { V2 mul(&V2 a, &V2 b) { return V2 { x = a.x * b.x, y = a.y * b.y }; } }
+V2 has Eq  { bool eq(&V2 a, &V2 b) { return a.x == b.x && a.y == b.y; } }
+data Money { int cents; }
+Money has Ord { int cmp(&Money a, &Money b) { return a.cents - b.cents; } }
+unit main() {
+  V2 a = V2 { x = 5, y = 7 };
+  V2 b = V2 { x = 2, y = 3 };
+  V2 s = a + b; log(s.x + s.y);          // 17
+  V2 d = a - b; log(d.x + d.y);          // 7
+  V2 m = a * b; log(m.x + m.y);          // 31
+  if (a == (V2 { x = 5, y = 7 })) { log(1); } else { log(0); }   // 1
+  Money lo = Money { cents = 100 };
+  Money hi = Money { cents = 250 };
+  if (lo < hi) { log(1); } else { log(0); }    // 1
+  if (hi <= lo) { log(1); } else { log(0); }   // 0
+  if (hi >= hi) { log(1); } else { log(0); }   // 1
+}

@@ -630,8 +630,25 @@ pub attr StringOps {
 }
 
 // Operator attrs: `a + b` dispatches to `Add.add`, `a == b` to `Eq.eq`.
-pub attr Add { _   add(&_ a, &_ b); }
-pub attr Eq  { bool eq (&_ a, &_ b); }
+// Operator attrs. Implement one for a `data` type to get the matching operator:
+//   a + b -> Add.add    a - b -> Sub.sub    a * b -> Mul.mul    a / b -> Div.div
+//   a % b -> Mod.mod    a == b / a != b -> Eq.eq
+//   a < b / <= / > / >= -> Ord.cmp (returns <0, 0, >0 like C's memcmp)
+//   a & b -> BitAnd.band   a | b -> BitOr.bor   a ^ b -> BitXor.bxor
+//   a << b -> Shl.shl      a >> b -> Shr.shr
+// Operands auto-borrow into the `&_` parameters, so they are not consumed.
+pub attr Add    { _   add (&_ a, &_ b); }
+pub attr Sub    { _   sub (&_ a, &_ b); }
+pub attr Mul    { _   mul (&_ a, &_ b); }
+pub attr Div    { _   div (&_ a, &_ b); }
+pub attr Mod    { _   mod (&_ a, &_ b); }
+pub attr Eq     { bool eq (&_ a, &_ b); }
+pub attr Ord    { int cmp (&_ a, &_ b); }
+pub attr BitAnd { _   band(&_ a, &_ b); }
+pub attr BitOr  { _   bor (&_ a, &_ b); }
+pub attr BitXor { _   bxor(&_ a, &_ b); }
+pub attr Shl    { _   shl (&_ a, &_ b); }
+pub attr Shr    { _   shr (&_ a, &_ b); }
 
 pub String has StringOps {
     // Number of chars held (excludes the trailing NUL).
