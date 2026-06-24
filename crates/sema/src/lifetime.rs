@@ -593,6 +593,11 @@ impl<'a> Analyzer<'a> {
                     let ty = self.f().locals[id.0 as usize].ty.clone();
                     let is_ptr = matches!(ty, HType::Ptr { .. });
                     let is_owner = matches!(ty, HType::OwnPtr { .. } | HType::Heap { .. });
+                    // The local is freshly assigned, so it is live again even if
+                    // the RHS consumed its previous value (`root = ins(root, k)`):
+                    // `walk_expr(value)` above marked the *old* value moved; the
+                    // assignment re-lives the binding.
+                    self.state[id.0 as usize].moved = false;
                     // Downstream invalidation: if the LHS is an owner whose
                     // pointee is being replaced (or null-assigned), every live
                     // alias of the OLD pointee is now stale.  Reuse the same
@@ -1360,7 +1365,12 @@ pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
                 let k = id.0 as u64;
                 if seen.contains(&k) { return false; }
                 seen.push(k);
-                let r = sym.struct_info(*id).fields.iter().any(|fi| go(sym, &fi.ty, seen));
+                // A `FnPtr` field is owning *as a field*: a closure stored in a
+                // struct owns its heap env, which must be freed when the struct
+                // drops.  (A bare `FnPtr` local is not owning here - those are
+                // handled by the dedicated closure-drop pass, so counting them
+                // would double-free.)
+                let r = sym.struct_info(*id).fields.iter().any(|fi| matches!(fi.ty, HType::FnPtr { .. }) || go(sym, &fi.ty, seen));
                 seen.pop();
                 r
             }
@@ -1368,7 +1378,7 @@ pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
                 let k = (id.0 as u64) | (1u64 << 32);
                 if seen.contains(&k) { return false; }
                 seen.push(k);
-                let r = sym.enum_info(*id).variants.iter().any(|v| v.fields.iter().any(|fi| go(sym, &fi.ty, seen)));
+                let r = sym.enum_info(*id).variants.iter().any(|v| v.fields.iter().any(|fi| matches!(fi.ty, HType::FnPtr { .. }) || go(sym, &fi.ty, seen)));
                 seen.pop();
                 r
             }

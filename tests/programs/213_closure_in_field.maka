@@ -1,0 +1,19 @@
+// A closure / fn-pointer stored in a struct field: `a.f(x)` must lower to an
+// indirect call (not a method lookup), the `Callable` typedef must precede the
+// struct that embeds it, and the captured env must be freed when the struct
+// drops.
+data Op { int(int) f; int tag; }
+
+int run(&Op o, int x) { return o.f(x); }
+
+unit main() {
+    int base = 1000;
+    Op inc = { f = int(int n) [base] n + base, tag = 1 };
+    log(inc.f(5));        // 1005 (direct field call)
+    log(run(&inc, 7));    // 1007 (through a borrow)
+
+    int factor = 3;
+    Op mul = { f = int(int n) [factor] n * factor, tag = 2 };
+    log(mul.f(9));        // 27
+    log(inc.tag + mul.tag); // 3
+}

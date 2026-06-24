@@ -2042,6 +2042,48 @@ impl<'a> TypeChecker<'a> {
                 }
             }
         }
+        // Indirect call through a fn-pointer / closure stored in a struct field:
+        // `recv.field(args)` where `recv` is an in-scope value and `field` has a
+        // FnPtr type.  Without this, `recv.field(...)` is misread as a postfix
+        // method call `field(recv, ...)` ("unknown function field").
+        if let ast::Expr::Field { base, name: fname, span: fsp } = callee {
+            let base_ty = match base.as_ref() {
+                ast::Expr::Ident(bn, _) => self.lookup(bn).map(|id| self.local(id).ty.clone()),
+                _ => None,
+            };
+            if let Some(bty) = base_ty {
+                fn peel_struct(t: &HType) -> Option<StructId> {
+                    match t {
+                        HType::Struct(id) => Some(*id),
+                        HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::RawPtr { inner, .. }
+                        | HType::OwnPtr { inner, .. } | HType::Heap { inner } => peel_struct(inner),
+                        _ => None,
+                    }
+                }
+                if let Some(sid) = peel_struct(&bty) {
+                    let field = self.sym.struct_info(sid).fields.iter().enumerate()
+                        .find(|(_, f)| &f.name == fname)
+                        .map(|(i, f)| (i, f.ty.clone()));
+                    if let Some((fidx, HType::FnPtr { ret, params })) = field {
+                        let base_h = self.check_expr(base, None);
+                        let ret_ty = (*ret).clone();
+                        let hargs: Vec<HExpr> = args.iter().enumerate().map(|(i, a)| {
+                            let want = params.get(i).cloned().unwrap_or(HType::Int);
+                            self.check_expr_coerce(a, &want)
+                        }).collect();
+                        let field_ty = HType::FnPtr { ret: Box::new(ret_ty.clone()), params };
+                        let callee_h = HExpr {
+                            kind: HExprKind::Field { base: Box::new(base_h), field: fidx },
+                            ty: field_ty, span: *fsp,
+                        };
+                        return HExpr {
+                            kind: HExprKind::CallIndirect { callee: Box::new(callee_h), args: hargs },
+                            ty: ret_ty, span: sp,
+                        };
+                    }
+                }
+            }
+        }
         // Decide the call kind based on the callee shape.
         // 1. `name(args)`                  — top-level or in-scope call
         // 2. `Logic.fn(args)`              — qualified call to a logic / attr block

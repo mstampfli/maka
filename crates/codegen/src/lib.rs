@@ -53,6 +53,9 @@ struct Cx<'a> {
     dyn_traits: std::collections::BTreeSet<String>,
     /// Fat-callable signatures seen — emit `Callable_KEY` typedef + raw-fn-ptr typedef.
     callable_sigs: std::collections::BTreeMap<String, (HType, Vec<HType>)>,
+    /// Aggregate type keys already walked by `note_type`, so recursion into
+    /// struct/enum field types terminates on self-referential types.
+    noted_aggregates: std::collections::HashSet<String>,
     /// Functions whose names appear as values — emit trampolines.
     fn_trampolines: std::collections::BTreeSet<u32>,
     /// Lifted-lambda function ids that need closure trampolines (env cast + call).
@@ -101,6 +104,7 @@ impl<'a> Cx<'a> {
             bounded_vars: Vec::new(),
             inline_call_seq: 0,
             inline_ret_stack: Vec::new(),
+            noted_aggregates: Default::default(),
             freestanding: false,
         }
     }
@@ -4585,6 +4589,10 @@ impl<'a> Cx<'a> {
             HType::Vec { .. } => true,
             // `Rust<T>` owns a boxed Rust value, dropped via a generated shim.
             HType::RustOpaque(_) => true,
+            // A closure value owns its malloc'd capture env.  Drives drop-glue
+            // for structs/enums that *store* a closure field; bare closure locals
+            // are scheduled separately by the lifetime pass (no double free).
+            HType::FnPtr { .. } => true,
             HType::Struct(id) => self.drop_owns.contains(&self.sym.struct_info(*id).name),
             HType::Enum(id) => self.drop_owns.contains(&self.sym.enum_info(*id).name),
             HType::Array { elem, .. } => self.drop_ty_owns(elem),
@@ -4818,6 +4826,9 @@ impl<'a> Cx<'a> {
         }
         self.emit_slice_typedefs();
         self.emit_vec_typedefs();
+        // FnPtr struct fields need their Callable typedef defined before the
+        // struct body that embeds them.
+        self.emit_callable_typedefs();
 
         // Index every emittable type by name: (is_enum, index).
         let mut kind_of: std::collections::HashMap<String, (bool, usize)> = std::collections::HashMap::new();
@@ -5017,6 +5028,25 @@ impl<'a> Cx<'a> {
                 self.note_type(ret);
                 for p in params { self.note_type(p); }
             }
+            // Recurse into aggregate field / variant types so a Slice/Vec/FnPtr
+            // used only as a struct field or enum payload still gets its typedef
+            // (e.g. a `int(int)` closure field needs its `Callable_*` typedef).
+            // The `noted_aggregates` guard makes self-referential types terminate.
+            HType::Struct(id) => {
+                let key = self.type_key(t);
+                if self.noted_aggregates.insert(key) {
+                    let fields: Vec<HType> = self.sym.struct_info(*id).fields.iter().map(|f| f.ty.clone()).collect();
+                    for ft in fields { self.note_type(&ft); }
+                }
+            }
+            HType::Enum(id) => {
+                let key = self.type_key(t);
+                if self.noted_aggregates.insert(key) {
+                    let tys: Vec<HType> = self.sym.enum_info(*id).variants.iter()
+                        .flat_map(|v| v.fields.iter().map(|f| f.ty.clone())).collect();
+                    for ft in tys { self.note_type(&ft); }
+                }
+            }
             _ => {}
         }
     }
@@ -5071,12 +5101,17 @@ impl<'a> Cx<'a> {
         let sigs: Vec<(String, HType, Vec<HType>)> = self.callable_sigs.iter()
             .map(|(k, (r, ps))| (k.clone(), r.clone(), ps.clone())).collect();
         for (key, ret, params) in &sigs {
+            // Guard against double emission: this runs both before struct bodies
+            // (so FnPtr struct fields resolve) and again in the prologue (for
+            // FnPtr types that appear only in function bodies).
+            let decl = format!("typedef struct {{ fn_{0}_raw code; void* env; }} Callable_{0};", key);
+            if self.out.contains(&decl) { continue; }
             let ret_c = self.c_ret_type(ret);
             let mut parts: Vec<String> = vec!["void*".to_string()];
             for p in params { parts.push(self.c_type(p)); }
             let plist = parts.join(", ");
             self.wl(&format!("typedef {} (*fn_{}_raw)({});", ret_c, key, plist));
-            self.wl(&format!("typedef struct {{ fn_{0}_raw code; void* env; }} Callable_{0};", key));
+            self.wl(&decl);
         }
     }
 

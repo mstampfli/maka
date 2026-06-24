@@ -1,0 +1,35 @@
+// `root = ins(root, k)` - reassigning an owning local from an expression that
+// consumes it must re-live the binding (the assignment overwrites it), not leave
+// it flagged as moved.  Canonical "build a tree through an owning function".
+data Node { int key; mut own *Node left; mut own *Node right; }
+
+own *Node ins(own *Node n, int k) {
+    if (n == null) { return alloc Node { key = k, left = null, right = null }; }
+    if (k < n!.key) { n!.left = ins(n!.left, k); }
+    else { n!.right = ins(n!.right, k); }
+    return n;
+}
+
+int count(*Node n) {
+    if (n == null) { return 0; }
+    return 1 + count(n!.left) + count(n!.right);
+}
+
+int depth(*Node n) {
+    if (n == null) { return 0; }
+    int l = depth(n!.left);
+    int r = depth(n!.right);
+    if (l > r) { return l + 1; }
+    return r + 1;
+}
+
+unit main() {
+    mut own *Node root = null;
+    root = ins(root, 5);
+    root = ins(root, 3);
+    root = ins(root, 8);
+    root = ins(root, 1);
+    root = ins(root, 4);
+    log(count(root));   // 5
+    log(depth(root));   // 3  (5 -> 3 -> 1/4)
+}
