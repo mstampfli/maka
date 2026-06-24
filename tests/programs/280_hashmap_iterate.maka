@@ -1,0 +1,18 @@
+// Iterate a HashMap by walking its internal keys vector, skipping empty/tombstone
+// slots (null keys).  Requires comparing a borrowed string with null.
+import std.{HashMap, hashmap, hm_put, hm_get};
+unit main() {
+    mut HashMap<int> m = hashmap(0);
+    hm_put(&mut m, "a", 1);
+    hm_put(&mut m, "b", 2);
+    hm_put(&mut m, "c", 3);
+    mut int sum = 0;
+    mut int i = 0;
+    while (i < m.keys.len as int) {
+        string k = m.keys[i];
+        if (k != null) { sum = sum + hm_get(&m, k); }
+        i = i + 1;
+    }
+    log(sum);       // 6
+    log(m.count);   // 3
+}

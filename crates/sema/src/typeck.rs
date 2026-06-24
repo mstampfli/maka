@@ -5050,6 +5050,12 @@ impl<'a> TypeChecker<'a> {
         if matches!(e.ty, HType::NullT) && matches!(target, HType::OwnPtr { .. }) {
             return HExpr { ty: target.clone(), ..e };
         }
+        // null → string (a borrowed string is a `const char*`, which may be null -
+        // e.g. read_line on EOF, or empty HashMap key slots).  Lets `s == null`
+        // null-check a string.
+        if matches!(e.ty, HType::NullT) && matches!(target, HType::Str) {
+            return HExpr { ty: HType::Str, ..e };
+        }
         // alloc value (HType::Heap = strict owning) → own *T (nullable owning).
         // This lets `own *T x = alloc T{};` work just like `own &T x = alloc T{};`.
         if let (HType::Heap { inner: ai }, HType::OwnPtr { mutable: _, inner: bi }) = (&e.ty, target) {
