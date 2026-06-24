@@ -1,0 +1,12 @@
+// Passing an owning pointer to a generic borrow parameter: a generic
+// f<T>(*Box<T>) (or &Box<T>) must accept an own *Box<int> argument by
+// downgrading the owner to a borrow AND inferring T=int from the pointee.
+data Box<T> { T v; }
+int gen_ptr<T>(*Box<T> b) { if (b == null) { return -1; } return 1; }
+int gen_ref<T>(&Box<T> b) { return 2; }
+unit main() {
+    own *Box<int> h = alloc Box { v = 5 };
+    log(gen_ptr(h));        // 1 (own* -> *Box<int>, T inferred = int)
+    own &Box<int> g = alloc Box { v = 9 };
+    log(gen_ref(&g));       // 2
+}

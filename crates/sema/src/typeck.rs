@@ -5683,9 +5683,15 @@ fn param_compatible_impl(param: &HType, actual: &HType, type_params: &[String], 
     if let (HType::Ptr { mutable: false, inner: pi }, HType::Ptr { mutable: true, inner: ai }) = (param, actual) {
         if type_eq(pi, ai) { return true; }
     }
-    // Allow own *T → *T downgrade (passing an owner as a borrow).
+    // Allow own *T → *T downgrade (passing an owner as a borrow).  Recurse into
+    // the inner so a generic borrow param accepts an owning concrete argument
+    // (e.g. `len<T>(*Node<T>)` called with an `own *Node<int>`).
     if let (HType::Ptr { mutable: pm, inner: pi }, HType::OwnPtr { mutable: am, inner: ai }) = (param, actual) {
-        if (*am || !*pm) && type_eq(pi, ai) { return true; }
+        if (*am || !*pm) && param_compatible_impl(pi, ai, type_params, sym) { return true; }
+    }
+    // Allow own &T (Heap) -> *T downgrade as a borrow too.
+    if let (HType::Ptr { inner: pi, .. }, HType::Heap { inner: ai }) = (param, actual) {
+        if param_compatible_impl(pi, ai, type_params, sym) { return true; }
     }
     // `Rust<T>` is one pointer at the ABI; allow it to pass as any `*T`
     // (raw pointer) parameter — bridge-generated externs use that shape
@@ -5693,9 +5699,13 @@ fn param_compatible_impl(param: &HType, actual: &HType, type_params: &[String], 
     if matches!((param, actual), (HType::Ptr { .. }, HType::RustOpaque(_))) {
         return true;
     }
-    // Allow own &T → &T downgrade.
+    // Allow own &T → &T downgrade (recurse into the inner for generics).
     if let (HType::Ref { mutable: _, inner: pi }, HType::Heap { inner: ai }) = (param, actual) {
-        if type_eq(pi, ai) { return true; }
+        if param_compatible_impl(pi, ai, type_params, sym) { return true; }
+    }
+    // Allow own *T (OwnPtr) -> &T downgrade.
+    if let (HType::Ref { inner: pi, .. }, HType::OwnPtr { inner: ai, .. }) = (param, actual) {
+        if param_compatible_impl(pi, ai, type_params, sym) { return true; }
     }
     // Allow slice-mut → slice-const.
     if let (HType::Slice { mutable: false, elem: pi }, HType::Slice { mutable: true, elem: ai }) = (param, actual) {
@@ -5769,6 +5779,12 @@ fn unify_impl(pat: &HType, actual: &HType, env: &mut std::collections::HashMap<S
         (HType::Vec { elem: pi }, HType::Vec { elem: ai }) => unify_impl(pi, ai, env, sym),
         (HType::OwnPtr { inner: pi, .. }, HType::OwnPtr { inner: ai, .. }) => unify_impl(pi, ai, env, sym),
         (HType::RawPtr { inner: pi, .. }, HType::RawPtr { inner: ai, .. }) => unify_impl(pi, ai, env, sym),
+        // own->borrow coercion at a generic param: a `*T` / `&T` parameter
+        // receiving an `own *U` / `own &U` argument binds T from U's inner.
+        (HType::Ptr { inner: pi, .. }, HType::OwnPtr { inner: ai, .. })
+        | (HType::Ptr { inner: pi, .. }, HType::Heap { inner: ai })
+        | (HType::Ref { inner: pi, .. }, HType::OwnPtr { inner: ai, .. })
+        | (HType::Ref { inner: pi, .. }, HType::Heap { inner: ai }) => unify_impl(pi, ai, env, sym),
         // Bind type vars through function-pointer / closure types so a generic
         // arg that appears only inside a `'T('T)` parameter is still inferred.
         (HType::FnPtr { ret: pr, params: pp }, HType::FnPtr { ret: ar, params: ap }) => {
