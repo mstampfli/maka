@@ -1,0 +1,11 @@
+// Multi-dimensional fixed arrays: nested array dimensions must all be emitted
+// after the declarator name (maka_int g[2][3]), not folded into the type prefix.
+unit main() {
+    mut [2][3]int grid = [[1, 2, 3], [4, 5, 6]];
+    grid[1][2] = 99;
+    log(grid[1][2]);     // 99
+    log(grid[0][0]);     // 1
+    log(grid[0][2]);     // 3
+    [2][2][2]int cube = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]];
+    log(cube[1][1][0]);  // 7
+}

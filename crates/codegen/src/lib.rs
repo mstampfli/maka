@@ -5395,7 +5395,19 @@ impl<'a> Cx<'a> {
     /// Like c_type but suitable for declaring a variable named `name` with that type.
     fn c_decl(&self, t: &HType, name: &str) -> String {
         match t {
-            HType::Array { len, elem } => format!("{} {}[{}]", self.c_type(elem), name, len),
+            HType::Array { .. } => {
+                // All array dimensions go after the declarator name, with the base
+                // element type as the prefix: `T name[d0][d1]...`.  A nested array
+                // ([2][3]int) must emit `maka_int name[2][3]`, not the invalid
+                // `maka_int[3] name[2]`.
+                let mut dims = String::new();
+                let mut cur = t;
+                while let HType::Array { len, elem } = cur {
+                    dims.push_str(&format!("[{}]", len));
+                    cur = elem;
+                }
+                format!("{} {}{}", self.c_type(cur), name, dims)
+            }
             HType::FnPtr { ret, params } => {
                 format!("Callable_{} {}", fn_sig_key(ret, params), name)
             }
