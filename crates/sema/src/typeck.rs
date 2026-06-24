@@ -3542,11 +3542,22 @@ impl<'a> TypeChecker<'a> {
                             .into_iter().map(|(f, s)| (f, s.clone())).collect();
                     }
                 }
-                // Open dispatch for postfix method calls: when we have no top-level
-                // candidate but the call has the shape `receiver.method(args)`, look
-                // across every attr / logic namespace for a method with this name —
-                // overload resolution by first-arg type then picks the right one.
-                if v.is_empty() {
+                // Open dispatch for method calls into the attr / logic (has-impl)
+                // namespace.  For a postfix call `receiver.method(args)` we MERGE
+                // every same-named attr method with the free candidates, so a method
+                // that shares a free function's name (e.g. `String.push` vs a user
+                // `push`) still dispatches: overload resolution by receiver type below
+                // picks the right one.  For a free-style call we only fall back to
+                // attr methods when no free function of this name exists (preserving
+                // plain free-call resolution).
+                if is_postfix {
+                    for (i, s) in self.sym.sigs.iter().enumerate() {
+                        if s.name == name && s.logic.is_some()
+                            && !v.iter().any(|(f, _)| f.0 == i as u32) {
+                            v.push((FuncId(i as u32), s.clone()));
+                        }
+                    }
+                } else if v.is_empty() {
                     v = self.sym.sigs.iter().enumerate()
                         .filter(|(_, s)| s.name == name && s.logic.is_some())
                         .map(|(i, s)| (FuncId(i as u32), s.clone()))
@@ -3902,7 +3913,15 @@ impl<'a> TypeChecker<'a> {
                             imp.module_path == callee_sig.module_path && imp.attr_name == *attr
                         )
                     );
-                    if !imported && !authorized_by_use {
+                    // Importing the attr itself by name (`import std.StringOps;`) also
+                    // authorizes calling its methods — bringing a trait into scope brings
+                    // its method set, so `s.push(..)` works without importing each method.
+                    let authorized_by_attr_import = callee_sig.logic.as_ref().is_some_and(|attr|
+                        self.cur_imports.iter().any(|(m, n)|
+                            m == &callee_sig.module_path && (n == attr || n == "*")
+                        )
+                    );
+                    if !imported && !authorized_by_use && !authorized_by_attr_import {
                         self.err(
                             format!(
                                 "`{}` is in module `{}` and must be imported (`import {}.{};`) to call from `{}`",

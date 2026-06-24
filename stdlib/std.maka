@@ -586,6 +586,78 @@ pub Vec<own *string> read_lines(string path) {
 pub own *string str_dup(string s) { return __rt_substr(s, 0, str_len(s) as int); }
 
 // =====================================================================
+// String - a growable, owned string.  Pure Maka.
+//
+// `string` is a borrowed char array and `own *string` a fixed owned one; reach
+// for `String` only when you need to BUILD or GROW text.  It is backed by a
+// `Vec<char>` kept NUL-terminated, so `push` is amortized O(1) (the Vec grows)
+// and `as_str()` hands the buffer back as a borrowed `string` in O(1).  The
+// `Vec<char>` frees itself when the String drops, so a String auto-frees too.
+//
+// The operations are `attr StringOps` methods (a trait), so their names live in
+// the method namespace and never clash with free functions named `push`,
+// `len`, etc.  Call them with dot syntax: `s.length()`, `s.push('x')`,
+// `s.as_str()`.  Construction is via the free `string_new` / `string_from`.
+// =====================================================================
+pub data String {
+    mut Vec<char> buf;     // chars followed by a trailing NUL; length() == buf.len - 1
+}
+
+// An empty growable string.
+pub String string_new() {
+    mut Vec<char> b = [];
+    b.push(0 as char);                 // trailing NUL
+    return String { buf = b };
+}
+
+// A growable owned copy of a borrowed string.
+pub String string_from(string s) {
+    mut Vec<char> b = [];
+    mut int i = 0;
+    int n = str_len(s) as int;
+    while (i < n) { b.push(s[i]); i = i + 1; }
+    b.push(0 as char);
+    return String { buf = b };
+}
+
+// The growable-string operations.  Implemented for `String` below; lives in the
+// method namespace so `push` / `length` don't collide with same-named free fns.
+pub attr StringOps {
+    int    length  (&_ self);
+    string as_str  (&_ self);
+    unit   push    (&mut _ self, char c);
+    unit   push_str(&mut _ self, string s);
+    bool   equals  (&_ self, &_ other);
+}
+
+pub String has StringOps {
+    // Number of chars held (excludes the trailing NUL).
+    int length(&String self) { return (self.buf.len as int) - 1; }
+
+    // Borrow the contents as a `string`.  Valid until the next mutation of
+    // `self` (a push may reallocate the backing buffer).
+    string as_str(&String self) { return &self.buf[0] as string; }
+
+    // Append a single char.
+    unit push(&mut String self, char c) {
+        self.buf[self.buf.len - 1] = c;    // overwrite the NUL with the new char
+        self.buf.push(0 as char);          // restore the trailing NUL
+    }
+
+    // Append a borrowed string.
+    unit push_str(&mut String self, string s) {
+        mut int i = 0;
+        int n = str_len(s) as int;
+        while (i < n) { self.push(s[i]); i = i + 1; }
+    }
+
+    // True if two Strings hold the same bytes.
+    bool equals(&String self, &String other) {
+        return str_eq(self.as_str(), other.as_str());
+    }
+}
+
+// =====================================================================
 // HashMap<V> - generic, string-keyed hash map (open addressing, linear
 // probing, power-of-2 capacity, grows at 75% load).  Pure Maka on top of
 // Vec + str_hash + str_eq; the only C primitives are the hash and an owned
