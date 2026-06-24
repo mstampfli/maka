@@ -1,0 +1,30 @@
+// A generic enum with an owning payload variant (Res<own &Node, int>),
+// constructed inside a match-yield, returned from a function, then matched as a
+// temporary scrutinee. Exercises the composition of: generic enum identity,
+// match-expression yielding an owning value, and dropping a temporary owned-enum
+// match scrutinee. Verified leak- and double-free-clean.
+data Node { int v; }
+enum Res<T, E> { Ok { T v }, Err { E e } }
+
+// Built via a match-yield to an owning generic-enum return type.
+Res<own &Node, int> compute(bool good, int x) {
+  return match (good) {
+    true { yield Res.Ok { v = alloc Node { v = x } }; },
+    else { yield Res.Err { e = x }; },
+  };
+}
+
+// Matched as a temporary scrutinee: the Ok payload is only read, so the
+// temporary Res (and its owned Node) must be freed after the match.
+int value_or_neg(bool good, int x) {
+  return match (compute(good, x)) {
+    Ok { v } { yield v.v; },
+    Err { e } { yield -e; },
+  };
+}
+
+unit main() {
+  log(value_or_neg(true, 7));    // 7
+  log(value_or_neg(false, 3));   // -3
+  log(value_or_neg(true, 100));  // 100
+}
