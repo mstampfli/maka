@@ -1,0 +1,17 @@
+// An if-expression (or match arm) that yields an owning value must move that one
+// allocation out as the arm value, not also emit it as a discarded statement.
+// Previously the yielded alloc was emitted twice (the extra one leaked).
+data Box { int v; }
+own *Box pick(bool b) {
+    return if (b) { yield alloc Box { v = 1 }; } else { yield alloc Box { v = 2 }; };
+}
+unit main() {
+    mut int total = 0;
+    mut int i = 0;
+    while (i < 1000) {
+        own *Box x = pick(i % 2 == 0);
+        if (x != null) { total = total + x!.v; }
+        i = i + 1;
+    }
+    log(total);   // 500*1 + 500*2 = 1500
+}

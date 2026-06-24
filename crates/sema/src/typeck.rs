@@ -4628,10 +4628,23 @@ impl<'a> TypeChecker<'a> {
                         let value = HExpr { kind: HExprKind::Local(yv), ty: t, span: arm.span };
                         (block, Some(value))
                     } else {
-                        let block = self.check_block(b);
+                        let mut block = self.check_block(b);
                         // Statement-form matches don't extract a value from the
-                        // arm body — extracting would double-emit the last stmt.
-                        let value = if as_stmt { None } else { self.extract_yield_value(&block) };
+                        // arm body.  Otherwise the trailing yield (lowered to an
+                        // ExprStmt) becomes the arm value and must be REMOVED from
+                        // the block, else it is emitted twice - once as a discarded
+                        // statement and once as the value - which double-evaluates
+                        // (and leaks) an owning alloc.
+                        let value = if as_stmt {
+                            None
+                        } else if matches!(block.stmts.last(), Some(HStmt::ExprStmt(_))) {
+                            match block.stmts.pop() {
+                                Some(HStmt::ExprStmt(e)) => Some(e),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
                         (block, value)
                     }
                 }
@@ -4795,14 +4808,6 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// If a block has trailing `yield expr;` or expression-statement, extract that as the value.
-    fn extract_yield_value(&self, block: &HBlock) -> Option<HExpr> {
-        // Simple heuristic: last statement, if it's ExprStmt, becomes the block's value.
-        if let Some(HStmt::ExprStmt(e)) = block.stmts.last() {
-            return Some(e.clone());
-        }
-        None
-    }
-
     fn check_variant_ctor(
         &mut self,
         enum_name: &str,
