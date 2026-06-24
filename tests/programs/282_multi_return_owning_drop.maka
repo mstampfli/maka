@@ -1,0 +1,16 @@
+data Box { int v; }
+int check(own *Box b, int mode) {
+    if (b == null) { return -1; }
+    if (mode == 0) { return 0; }        // b must be dropped here
+    if (mode == 1) { return b!.v; }     // and here
+    return b!.v * 2;                     // and here
+}
+unit main() {
+    mut int t = 0;
+    mut int i = 0;
+    while (i < 1000) {
+        t = t + check(alloc Box { v = 5 }, i % 3);
+        i = i + 1;
+    }
+    log(t);
+}

@@ -1,0 +1,21 @@
+import std.{Vec, push};
+data Box { int v; }
+int build_and_sum(int n) {
+    Vec<own *Box> xs = [];
+    mut int i = 0;
+    while (i < n) { push(xs, alloc Box { v = i }); i = i + 1; }
+    mut int sum = 0;
+    i = 0;
+    while (i < n) {
+        *Box b = xs[i];
+        if (b != null) { sum = sum + b!.v; }
+        i = i + 1;
+    }
+    return sum;
+}
+unit main() {
+    mut int t = 0;
+    mut int k = 0;
+    while (k < 1000) { t = build_and_sum(10); k = k + 1; }
+    log(t);   // 45
+}
