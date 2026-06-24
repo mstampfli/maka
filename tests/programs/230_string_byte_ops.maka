@@ -1,0 +1,8 @@
+import std.{str_len, str_byte, str_eq};
+unit main() {
+    string s = "hello";
+    log(str_len(s) as int);     // 5
+    log(str_byte(s, 0));        // 104 ('h')
+    log(str_byte(s, 4));        // 111 ('o')
+    if (str_eq(s, "hello")) { log(1); } else { log(0); }   // 1
+}

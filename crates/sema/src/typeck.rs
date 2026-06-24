@@ -3949,6 +3949,12 @@ impl<'a> TypeChecker<'a> {
                 (Int, SizedInt { .. }) | (SizedInt { .. }, Int)
                     | (SizedInt { .. }, SizedInt { .. })
                     | (SizedInt { .. }, Float) | (Float, SizedInt { .. }) => CastKind::Numeric,
+                // f32 (SizedFloat) numeric casts: to/from int, float, sized int,
+                // and f64/f32.  Without this `f32 as int` etc. were rejected.
+                (SizedFloat { .. }, SizedFloat { .. })
+                    | (SizedFloat { .. }, Float) | (Float, SizedFloat { .. })
+                    | (SizedFloat { .. }, Int) | (Int, SizedFloat { .. })
+                    | (SizedFloat { .. }, SizedInt { .. }) | (SizedInt { .. }, SizedFloat { .. }) => CastKind::Numeric,
                 (Enum(_), Int) => CastKind::EnumToInt,
                 // §3 `int as Enum` — runtime bounds-checked against the
                 // variant count, panics on out-of-range (same shape as

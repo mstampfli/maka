@@ -1,0 +1,11 @@
+unit main() {
+    f32 a = 1.5;
+    f32 b = 2.5;
+    log((a + b) as int);                       // 4
+    if (a < b) { log(1); } else { log(0); }    // 1
+    int i = 10;
+    f32 c = i as f32;
+    log((c * 2.0) as int);                     // 20
+    float d = a as float;                       // f32 -> f64
+    log((d + 0.5) as int);                      // 2
+}
