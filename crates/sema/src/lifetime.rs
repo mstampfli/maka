@@ -1213,7 +1213,11 @@ fn hoist_block_temps(sym: &SymTab, b: &mut HBlock, locals: &mut Vec<LocalInfo>) 
                 hoist_block_temps(sym, then_b, locals);
                 if let Some(e) = else_b { hoist_block_temps(sym, e, locals); }
             }
-            HStmt::While { body, .. } | HStmt::ForC { body, .. } | HStmt::ForEach { body, .. } => {
+            HStmt::While { cond, body, span } => {
+                hoist_block_temps(sym, body, locals);
+                desugar_loop_cond_temps(sym, cond, body, *span, locals);
+            }
+            HStmt::ForC { body, .. } | HStmt::ForEach { body, .. } => {
                 hoist_block_temps(sym, body, locals);
             }
             HStmt::Block(bb) | HStmt::Unsafe(bb, _) => hoist_block_temps(sym, bb, locals),
@@ -1246,6 +1250,37 @@ fn hoist_block_temps(sym: &SymTab, b: &mut HBlock, locals: &mut Vec<LocalInfo>) 
         out.push(s);
     }
     b.stmts = out;
+}
+
+/// Hoist owning temporaries out of a re-evaluated loop condition.  A `while`
+/// condition can't be hoisted *before* the loop (it must run each iteration), so
+/// move the temp bindings and a `break`-if-false to the TOP of the loop body and
+/// make the condition unconditionally true.  The temps then bind and free once per
+/// iteration (correct re-evaluation), and `&<temp>` becomes a valid lvalue instead
+/// of invalid C.  No-op when the condition has no temps to hoist.
+fn desugar_loop_cond_temps(sym: &SymTab, cond: &mut HExpr, body: &mut HBlock, span: Span, locals: &mut Vec<LocalInfo>) {
+    let mut cond_pre: Vec<HStmt> = Vec::new();
+    hoist_in_expr(sym, cond, locals, &mut cond_pre);
+    if cond_pre.is_empty() { return; }
+    // `if (!cond) { break; }` — cond now references the hoisted locals.
+    let neg = HExpr {
+        kind: HExprKind::Un { op: HUnOp::Not, expr: Box::new(cond.clone()) },
+        ty: HType::Bool,
+        span,
+    };
+    let if_break = HStmt::If {
+        cond: neg,
+        then_b: HBlock { stmts: vec![HStmt::Break { heap_drops: Vec::new(), span }],
+                         heap_to_free: Vec::new(), ptr_nulls: Vec::new(), span },
+        else_b: None,
+        span,
+    };
+    let mut new_body: Vec<HStmt> = Vec::with_capacity(cond_pre.len() + 1 + body.stmts.len());
+    new_body.append(&mut cond_pre);
+    new_body.push(if_break);
+    new_body.append(&mut body.stmts);
+    body.stmts = new_body;
+    *cond = HExpr { kind: HExprKind::LitBool(true), ty: HType::Bool, span };
 }
 
 /// Recurse through an expression hoisting owning-temporary call arguments.

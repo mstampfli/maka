@@ -1,0 +1,14 @@
+// An operator (here String `==`) whose operand is a temporary, used in a
+// re-evaluated WHILE condition. The auto-borrowed operand temp can't be hoisted
+// before the loop (it must run each iteration), so the temp binding + a
+// break-if-false move to the top of the loop body: the temp binds and frees once
+// per iteration. Was emitting invalid C (`&<rvalue>`). Must run leak-clean.
+import std.{String, StringOps, Eq, string_from};
+unit main() {
+  mut int i = 0;
+  while (string_from("go") == string_from("go")) {     // both operands are temps
+    i = i + 1;
+    if (i >= 1000) { break; }
+  }
+  log(i);                                               // 1000
+}
