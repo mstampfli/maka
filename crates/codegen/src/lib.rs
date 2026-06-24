@@ -8075,6 +8075,17 @@ impl<'a> Cx<'a> {
                         return;
                     }
                 }
+                // A match-expression whose arms `yield` owning allocations
+                // produces a heap pointer (its result temporary is typed `T*`),
+                // so transfer it directly like the move / call / alloc / field
+                // cases above.  A bare `T` value initializer (e.g. a struct
+                // literal coerced into this owning slot, which also reports a
+                // Heap type) still falls through to be lifted into a fresh box.
+                if matches!(&init.kind, HExprKind::Match { .. }) && matches!(&init.ty, HType::Heap { .. }) {
+                    let s = self.emit_expr(f, init);
+                    self.wl(&format!("{} {} = {};", ptr_ty, name, s));
+                    return;
+                }
                 // New allocation: value expression of type `T` lifted into heap slot.
                 let value_s = self.emit_expr(f, init);
                 let ic = self.c_type(inner);

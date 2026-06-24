@@ -1,0 +1,36 @@
+// A match expression used where an owning value is expected (`own &T`) must
+// propagate that expected type into each arm's `yield`, so an `alloc` in the arm
+// produces the right owning kind. Regression: the owning-arm path checked the
+// trailing yield with no expected type, so `alloc Node{...}` defaulted to
+// `own *T` (OwnPtr) and failed to match the `own &T` (Heap) target. And once it
+// typechecked, a let-binding of a Heap local from a match value emitted invalid
+// C (it tried to lift the already-heap pointer into a fresh box via `*n = ...`)
+// instead of taking the pointer directly.
+data Node { int v; }
+enum Cmd { Make { int v }, Zero }
+
+// match in return position to an owning type.
+own &Node build(Cmd c) {
+  return match (c) {
+    Make { v } { yield alloc Node { v = v }; },
+    Zero { yield alloc Node { v = 0 }; },
+  };
+}
+
+// match in let-binding position to an owning local.
+int via_let(Cmd c) {
+  own &Node n = match (c) {
+    Make { v } { yield alloc Node { v = v }; },
+    Zero { yield alloc Node { v = 0 }; },
+  };
+  return n.v;
+}
+
+unit main() {
+  own &Node a = build(Cmd.Make { v = 9 });
+  own &Node b = build(Cmd.Zero);
+  log(a.v);                 // 9
+  log(b.v);                 // 0
+  log(via_let(Cmd.Make { v = 7 }));  // 7
+  log(via_let(Cmd.Zero));            // 0
+}

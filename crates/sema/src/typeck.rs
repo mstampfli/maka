@@ -31,6 +31,11 @@ pub struct TypeChecker<'a> {
     /// if-expression result) instead of a discarded `ExprStmt` - so a `yield`
     /// nested inside an `if`/`while`/block statement still produces the value.
     yield_target: Vec<(LocalId, HType)>,
+    /// Expected result type for a `yield` in an arm that does NOT use a synthetic
+    /// result local (the owning-value path, where a synthetic local would
+    /// double-free).  Provides the target type for coercion so an `alloc` in the
+    /// arm picks the right owning kind (`own &` vs `own *`), without rebinding.
+    yield_expected: Vec<HType>,
     /// The expected type of the call expression currently being dispatched, set
     /// by `check_expr` before `check_call`.  Lets a generic call infer a type
     /// parameter that appears only in the return type from its context, e.g.
@@ -281,6 +286,7 @@ impl<'a> TypeChecker<'a> {
             cur_ret: HType::Unit,
             cur_type_params: Vec::new(),
             yield_target: Vec::new(),
+            yield_expected: Vec::new(),
             call_ret_expected: None,
             cur_is_inline: false,
             cur_module: Vec::new(),
@@ -494,6 +500,13 @@ impl<'a> TypeChecker<'a> {
                     let h = self.check_expr_coerce(e, &tgt_ty);
                     let place = HExpr { kind: HExprKind::Local(tgt), ty: tgt_ty, span: *span };
                     HStmt::Assign { op: HAssignOp::Assign, place, value: h, span: *span }
+                } else if let Some(ty) = self.yield_expected.last().cloned() {
+                    // Owning-value arm: no synthetic local, but coerce the yielded
+                    // value to the arm's expected type so an `alloc` picks the
+                    // right owning kind.  Stays an ExprStmt (extracted as the arm
+                    // value), so ownership flows out without a double free.
+                    let h = self.check_expr_coerce(e, &ty);
+                    HStmt::ExprStmt(h)
                 } else {
                     let h = self.check_expr(e, None);
                     HStmt::ExprStmt(h)
@@ -4647,7 +4660,14 @@ impl<'a> TypeChecker<'a> {
                         let value = HExpr { kind: HExprKind::Local(yv), ty: t, span: arm.span };
                         (block, Some(value))
                     } else {
+                        // Owning-value arm: provide the expected result type to a
+                        // trailing `yield` (via `yield_expected`, not a synthetic
+                        // local) so an `alloc` picks the right owning kind.
+                        let pushed = if !as_stmt {
+                            if let Some(t) = arm_ty.clone() { self.yield_expected.push(t); true } else { false }
+                        } else { false };
                         let mut block = self.check_block(b);
+                        if pushed { self.yield_expected.pop(); }
                         // Statement-form matches don't extract a value from the
                         // arm body.  Otherwise the trailing yield (lowered to an
                         // ExprStmt) becomes the arm value and must be REMOVED from
