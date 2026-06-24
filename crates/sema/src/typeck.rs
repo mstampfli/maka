@@ -4634,15 +4634,35 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_struct_lit(&mut self, name: Option<&str>, fields: &[(String, ast::Expr)], expected: Option<&HType>, sp: Span) -> HExpr {
-        // Determine struct id either from `name` or expected
-        let sid = if let Some(n) = name {
-            self.sym.struct_by_name(n).map(|(id, _)| id)
-        } else {
-            match expected {
-                Some(HType::Struct(id)) => Some(*id),
-                Some(HType::Heap { inner }) => if let HType::Struct(id) = inner.as_ref() { Some(*id) } else { None },
+        // Peel pointer/ref layers off a (possibly concretized) expected type down
+        // to a Struct id.
+        fn peel_to_struct_id(t: &HType) -> Option<StructId> {
+            match t {
+                HType::Struct(id) => Some(*id),
+                HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::OwnPtr { inner, .. }
+                | HType::RawPtr { inner, .. } | HType::Heap { inner } => peel_to_struct_id(inner),
                 _ => None,
             }
+        }
+        // A concrete instantiation suggested by the expected type (e.g.
+        // `alloc Node { .. }` landing in `own *Node<int>` -> Node<int>).
+        let expected_inst = expected
+            .map(|e| concretize_generic_patterns(e, self.sym))
+            .as_ref()
+            .and_then(peel_to_struct_id);
+
+        // Determine struct id either from `name` or expected.
+        let sid = if let Some(n) = name {
+            let named = self.sym.struct_by_name(n).map(|(id, _)| id);
+            // When `n` is a generic *template* and the expected type is a concrete
+            // instantiation of it, build the instantiation - so field types are the
+            // concrete ones (`int`), not the template's TyVars.  This makes
+            // `alloc Node { .. }` work in a `own *Node<int>` slot.
+            let named_is_template = named.map_or(false, |id| !self.sym.struct_info(id).type_params.is_empty());
+            let inst = expected_inst.filter(|eid| self.sym.struct_info(*eid).template.as_deref() == Some(n));
+            if named_is_template { inst.or(named) } else { named }
+        } else {
+            expected_inst
         };
         let Some(sid) = sid else {
             self.err("cannot infer struct type for struct literal", sp);

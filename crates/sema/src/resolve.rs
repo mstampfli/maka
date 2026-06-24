@@ -680,86 +680,100 @@ impl SymTab {
                 _ => {}
             }
         }
-        // Instantiate each unique request.
+        // Collect the concrete instantiations a (substituted) type refers to: a
+        // `GenericPattern { N, [concrete..] }` means `N<..>` must be instantiated
+        // too.  Recurse through pointers / containers and nested args.
+        fn collect_inst_refs(t: &HType, out: &mut Vec<(String, Vec<HType>)>) {
+            match t {
+                HType::GenericPattern { template_name, args, .. } => {
+                    if !args.iter().any(has_tyvar) {
+                        out.push((template_name.clone(), args.clone()));
+                    }
+                    for a in args { collect_inst_refs(a, out); }
+                }
+                HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::RawPtr { inner, .. }
+                | HType::OwnPtr { inner, .. } | HType::Heap { inner } => collect_inst_refs(inner, out),
+                HType::Array { elem, .. } | HType::Slice { elem, .. } | HType::Vec { elem } => collect_inst_refs(elem, out),
+                HType::FnPtr { ret, params } => { collect_inst_refs(ret, out); for p in params { collect_inst_refs(p, out); } }
+                _ => {}
+            }
+        }
+
+        // Fixpoint worklist.  Each requested instantiation is built, and the
+        // concrete instantiations its substituted fields refer to are enqueued -
+        // so a generic type reachable only *through another instantiation's
+        // fields* (e.g. `Node<int>` inside `Box<int>`, which references itself via
+        // `next`) still gets a concrete Struct/Enum id.  Without this, its
+        // `GenericPattern` spelling never unifies with an explicit annotation of
+        // the same type.
+        // The worklist IS `struct_inst_requests`: transitive discoveries are
+        // appended in place, so after the fixpoint it holds every instantiation
+        // (original + transitive) for the later data-where-bound pass (Pass 4).
         struct_inst_requests.sort_by(|a, b| (a.0.clone(), a.1.iter().map(|t| t.key()).collect::<String>())
             .cmp(&(b.0.clone(), b.1.iter().map(|t| t.key()).collect::<String>())));
         struct_inst_requests.dedup_by(|a, b| a.0 == b.0 && a.1.iter().map(|t| t.key()).collect::<String>() == b.1.iter().map(|t| t.key()).collect::<String>());
-        for (name, args) in &struct_inst_requests {
+        let mut wi = 0;
+        while wi < struct_inst_requests.len() {
+            let (name, args) = struct_inst_requests[wi].clone();
+            wi += 1;
             let key = args.iter().map(|t| t.key()).collect::<Vec<_>>().join(",");
-            if sym.struct_instantiations.contains_key(&(name.clone(), key.clone())) { continue; }
-            let Some((tid, tinfo)) = sym.struct_by_name(name) else { continue; };
-            let template = tinfo.clone();
-            if template.type_params.len() != args.len() { continue; }
-            let mangled = format!("{}__{}", name, args.iter().map(|t| t.key()).collect::<Vec<_>>().join("_"));
-            let env: std::collections::HashMap<String, HType> = template.type_params.iter().cloned().zip(args.iter().cloned()).collect();
-            let new_fields: Vec<FieldInfo> = template.fields.iter().map(|f| {
-                // First substitute the template's type vars with the concrete
-                // args, then resolve any AssocType placeholders against the
-                // registered impls (§10.5 monomorphization-time resolution).
-                let subst_ty = f.ty.subst(&env);
-                let resolved_ty = resolve_assoc_types_in(&sym, &subst_ty);
-                FieldInfo {
-                    name: f.name.clone(),
-                    ty: resolved_ty,
-                    mut_payload: f.mut_payload,
-                    default: f.default.clone(),
-                    is_embed: f.is_embed,
-                    span: f.span,
-                }
-            }).collect();
-            let _ = tid;
-            let new_id = StructId(sym.structs.len() as u32);
-            let tmpl_is_pub = template.is_pub;
-            let tmpl_mod = template.module_path.clone();
-            sym.structs.push(StructInfo {
-                name: mangled,
-                type_params: Vec::new(),
-                template: Some(name.clone()),
-                template_args: args.clone(),
-                fields: new_fields,
-                is_pub: tmpl_is_pub,
-                module_path: tmpl_mod,
-                span: template.span,
-                where_bounds: Vec::new(),
-            });
-            sym.struct_instantiations.insert((name.clone(), key), new_id.0);
-        }
-
-        // Same shape, for enums.  `Option<int>`, `Option<string>` etc. each get
-        // their own EnumInfo whose variant fields have the type-param substituted.
-        for (name, args) in &struct_inst_requests {
-            let key = args.iter().map(|t| t.key()).collect::<Vec<_>>().join(",");
-            if sym.enum_instantiations.contains_key(&(name.clone(), key.clone())) { continue; }
-            let Some((_eid, einfo)) = sym.enum_by_name(name) else { continue; };
-            let template = einfo.clone();
-            if template.type_params.len() != args.len() { continue; }
-            let mangled = format!("{}__{}", name, args.iter().map(|t| t.key()).collect::<Vec<_>>().join("_"));
-            let env: std::collections::HashMap<String, HType> = template.type_params.iter().cloned().zip(args.iter().cloned()).collect();
-            let new_variants: Vec<VariantInfo> = template.variants.iter().map(|v| VariantInfo {
-                name: v.name.clone(),
-                tag: v.tag,
-                fields: v.fields.iter().map(|f| FieldInfo {
-                    name: f.name.clone(),
-                    ty: f.ty.subst(&env),
-                    mut_payload: f.mut_payload,
-                    default: f.default.clone(),
-                    is_embed: f.is_embed,
-                    span: f.span,
-                }).collect(),
-                span: v.span,
-            }).collect();
-            let new_id = EnumId(sym.enums.len() as u32);
-            sym.enums.push(EnumInfo {
-                name: mangled,
-                type_params: Vec::new(),
-                variants: new_variants,
-                is_pub: template.is_pub,
-                module_path: template.module_path.clone(),
-                span: template.span,
-                template: Some(name.clone()),
-                template_args: args.clone(),
-            });
-            sym.enum_instantiations.insert((name.clone(), key), new_id.0);
+            // Clone the template out of `sym` first so the borrow ends before we
+            // push the new instantiation into `sym.structs` / `sym.enums`.
+            let struct_template = sym.struct_by_name(&name).map(|(_, t)| t.clone());
+            let enum_template = if struct_template.is_none() { sym.enum_by_name(&name).map(|(_, e)| e.clone()) } else { None };
+            if let Some(template) = struct_template {
+                if sym.struct_instantiations.contains_key(&(name.clone(), key.clone())) { continue; }
+                if template.type_params.len() != args.len() { continue; }
+                let mangled = format!("{}__{}", name, args.iter().map(|t| t.key()).collect::<Vec<_>>().join("_"));
+                let env: std::collections::HashMap<String, HType> = template.type_params.iter().cloned().zip(args.iter().cloned()).collect();
+                let new_fields: Vec<FieldInfo> = template.fields.iter().map(|f| {
+                    let subst_ty = f.ty.subst(&env);
+                    let resolved_ty = resolve_assoc_types_in(&sym, &subst_ty);
+                    FieldInfo { name: f.name.clone(), ty: resolved_ty, mut_payload: f.mut_payload, default: f.default.clone(), is_embed: f.is_embed, span: f.span }
+                }).collect();
+                for f in &new_fields { collect_inst_refs(&f.ty, &mut struct_inst_requests); }
+                let new_id = StructId(sym.structs.len() as u32);
+                sym.structs.push(StructInfo {
+                    name: mangled,
+                    type_params: Vec::new(),
+                    template: Some(name.clone()),
+                    template_args: args.clone(),
+                    fields: new_fields,
+                    is_pub: template.is_pub,
+                    module_path: template.module_path.clone(),
+                    span: template.span,
+                    where_bounds: Vec::new(),
+                });
+                sym.struct_instantiations.insert((name.clone(), key), new_id.0);
+            } else if let Some(template) = enum_template {
+                if sym.enum_instantiations.contains_key(&(name.clone(), key.clone())) { continue; }
+                if template.type_params.len() != args.len() { continue; }
+                let mangled = format!("{}__{}", name, args.iter().map(|t| t.key()).collect::<Vec<_>>().join("_"));
+                let env: std::collections::HashMap<String, HType> = template.type_params.iter().cloned().zip(args.iter().cloned()).collect();
+                let new_variants: Vec<VariantInfo> = template.variants.iter().map(|v| VariantInfo {
+                    name: v.name.clone(),
+                    tag: v.tag,
+                    fields: v.fields.iter().map(|f| {
+                        let subst_ty = f.ty.subst(&env);
+                        let resolved_ty = resolve_assoc_types_in(&sym, &subst_ty);
+                        FieldInfo { name: f.name.clone(), ty: resolved_ty, mut_payload: f.mut_payload, default: f.default.clone(), is_embed: f.is_embed, span: f.span }
+                    }).collect(),
+                    span: v.span,
+                }).collect();
+                for v in &new_variants { for f in &v.fields { collect_inst_refs(&f.ty, &mut struct_inst_requests); } }
+                let new_id = EnumId(sym.enums.len() as u32);
+                sym.enums.push(EnumInfo {
+                    name: mangled,
+                    type_params: Vec::new(),
+                    variants: new_variants,
+                    is_pub: template.is_pub,
+                    module_path: template.module_path.clone(),
+                    span: template.span,
+                    template: Some(name.clone()),
+                    template_args: args.clone(),
+                });
+                sym.enum_instantiations.insert((name.clone(), key), new_id.0);
+            }
         }
 
         // Pass 3: function signatures (top-level `fn`, `extern`, and `logic`-block funcs)
@@ -1269,6 +1283,33 @@ impl SymTab {
             sig.ret = resolve_assoc_types_in(&sym_snapshot, &sig.ret);
             for pt in sig.param_tys.iter_mut() {
                 *pt = resolve_assoc_types_in(&sym_snapshot, pt);
+            }
+        }
+
+        // Now that every instantiation is registered, concretize generic-pattern
+        // references in instantiated field / variant / signature types.  A self-
+        // or cross-reference such as `Node<int>.next` is left as
+        // `GenericPattern { Node, [int] }` by template substitution (the
+        // instantiation's own Struct id did not exist yet during subst); resolve
+        // it to that Struct id so the field type and an `own *Node<int>`
+        // annotation are the *same* type, not two spellings that compare unequal.
+        let sym_snapshot2 = sym.clone();
+        for s in sym.structs.iter_mut() {
+            for f in s.fields.iter_mut() {
+                f.ty = crate::typeck::concretize_generic_patterns(&f.ty, &sym_snapshot2);
+            }
+        }
+        for e in sym.enums.iter_mut() {
+            for v in e.variants.iter_mut() {
+                for f in v.fields.iter_mut() {
+                    f.ty = crate::typeck::concretize_generic_patterns(&f.ty, &sym_snapshot2);
+                }
+            }
+        }
+        for sig in sym.sigs.iter_mut() {
+            sig.ret = crate::typeck::concretize_generic_patterns(&sig.ret, &sym_snapshot2);
+            for pt in sig.param_tys.iter_mut() {
+                *pt = crate::typeck::concretize_generic_patterns(pt, &sym_snapshot2);
             }
         }
 

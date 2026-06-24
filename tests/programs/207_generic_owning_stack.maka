@@ -1,0 +1,44 @@
+import std.Option;
+
+data Node<T> { T val; mut own *Node<T> next; }
+data Stack<T> { mut own *Node<T> head; mut int size; }
+
+unit spush<T>(&mut Stack<T> s, T v) {
+    s.head = alloc Node { val = v, next = s.head };
+    s.size = s.size + 1;
+}
+
+Option<T> spop<T>(&mut Stack<T> s) {
+    own *Node<T> n = s.head;
+    if (n == null) { return Option.None; }
+    s.head = n!.next;
+    s.size = s.size - 1;
+    T v = n!.val;
+    return Option.Some { value = v };
+}
+
+unit main() {
+    mut Stack<int> s = { head = null, size = 0 };
+    spush(&mut s, 10);
+    spush(&mut s, 20);
+    spush(&mut s, 30);
+    log(s.size);
+
+    mut int total = 0;
+    mut bool go = true;
+    while (go) {
+        Option<int> r = spop(&mut s);
+        match (r) {
+            Option.Some { value } { total = total + value; }
+            Option.None { go = false; }
+        }
+    }
+    log(total);
+    log(s.size);
+
+    mut Stack<int> leaky = { head = null, size = 0 };
+    spush(&mut leaky, 1);
+    spush(&mut leaky, 2);
+    spush(&mut leaky, 3);
+    log(leaky.size);
+}
