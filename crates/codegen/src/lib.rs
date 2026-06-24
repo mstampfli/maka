@@ -133,11 +133,14 @@ impl<'a> Cx<'a> {
             self.scan_func(f);
         }
         // Callable typedefs first: slice/vec element types may be closures
-        // (`Vec<int(int)>` -> buffer of Callable_int_int_).
+        // (`Vec<int(int)>` -> buffer of Callable_int_int_).  Dyn typedefs next,
+        // before slice/vec, because a slice/vec element can be a trait object
+        // (`Vec<&dyn Trait>` -> buffer of Dyn_Trait), so the Dyn_Trait struct must
+        // be defined before the container typedef that stores it.
         self.emit_callable_typedefs();
+        self.emit_dyn_typedefs();
         self.emit_slice_typedefs();
         self.emit_vec_typedefs();
-        self.emit_dyn_typedefs();
 
         // Raw user C from `cblock "...";` directives — pasted verbatim at module scope.
         let blocks: Vec<String> = self.module_cblocks.to_vec();
@@ -5293,7 +5296,16 @@ impl<'a> Cx<'a> {
             HType::Unit => "maka_unit".into(),
             HType::Struct(id) => c_ident(&self.sym.struct_info(*id).name),
             HType::Enum(id) => c_ident(&self.sym.enum_info(*id).name),
-            HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::RawPtr { inner, .. } | HType::OwnPtr { inner, .. } => format!("p_{}", self.type_key(inner)),
+            HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::RawPtr { inner, .. } | HType::OwnPtr { inner, .. } => {
+                // A reference/pointer to a `dyn Trait` collapses to the fat-pointer
+                // value itself (mirrors c_type), so a container element type key
+                // (`Vec<&dyn Trait>`) resolves to `Dyn_Trait`, not `Dyn_Trait*`.
+                if matches!(inner.as_ref(), HType::Dyn { .. }) {
+                    self.type_key(inner)
+                } else {
+                    format!("p_{}", self.type_key(inner))
+                }
+            }
             HType::Heap { inner } => format!("h_{}", self.type_key(inner)),
             HType::Array { len, elem } => format!("a{}_{}", len, self.type_key(elem)),
             HType::Slice { elem, .. } => format!("Slice_{}", self.type_key(elem)),
