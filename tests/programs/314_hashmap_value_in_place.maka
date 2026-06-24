@@ -1,0 +1,27 @@
+// hm_get_ref borrows a map value in place (a pointer to the slot, or null on a
+// miss) instead of copying it out like hm_get, so a stored value can be mutated
+// without a put round-trip. Enabled by allowing a borrow rooted in a reference
+// parameter to be returned (the slot lives in the caller's map).
+import std.{HashMap, hashmap, hm_put, hm_get_ref, hm_get};
+data Counter { mut int hits; mut int total; }
+
+unit bump(&mut HashMap<Counter> m, string k, int amt) {
+  *Counter c = hm_get_ref(&mut m, k);
+  if (c != null) { c!.hits = c!.hits + 1; c!.total = c!.total + amt; }
+}
+
+unit main() {
+  mut HashMap<Counter> m = hashmap(Counter { hits = 0, total = 0 });
+  hm_put(&mut m, "a", Counter { hits = 0, total = 0 });
+  hm_put(&mut m, "b", Counter { hits = 0, total = 0 });
+  bump(&mut m, "a", 10);
+  bump(&mut m, "a", 5);
+  bump(&mut m, "b", 3);
+  Counter a = hm_get(&m, "a");
+  Counter b = hm_get(&m, "b");
+  log(a.hits);     // 2
+  log(a.total);    // 15
+  log(b.total);    // 3
+  *Counter miss = hm_get_ref(&mut m, "zzz");
+  if (miss == null) { log(-1); }   // -1
+}

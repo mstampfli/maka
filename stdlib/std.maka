@@ -670,6 +670,21 @@ pub V hm_get<V>(&HashMap<V> m, string key) {
     return m.dflt;
 }
 
+// Borrow the slot for `key` - a pointer to the stored value, or null if absent.
+// Unlike `hm_get`, this does not copy the value out, so it works for maps whose
+// values own heap (where a copy would alias and double-free): read or mutate
+// through the returned pointer; the map keeps ownership and frees the value when
+// it drops.
+pub *V hm_get_ref<V>(&mut HashMap<V> m, string key) {
+    if (m.cap == 0) { return null; }
+    mut int idx = str_hash(key) & (m.cap - 1);
+    while (m.states[idx] != 0) {
+        if (m.states[idx] == 1 && str_eq(m.keys[idx], key)) { return &mut m.vals[idx]; }
+        idx = (idx + 1) & (m.cap - 1);
+    }
+    return null;
+}
+
 // Is `key` present?
 pub bool hm_has<V>(&HashMap<V> m, string key) {
     if (m.cap == 0) { return false; }
