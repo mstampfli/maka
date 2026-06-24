@@ -1,0 +1,23 @@
+// A `mut Vec<T>` local may be rebound to a whole new vector; the old buffer is
+// freed by the drop-on-reassign path. Regression: `binding_kind` marked every
+// Vec local non-reassignable, so `mut Vec<int> v; v = [...]` was wrongly
+// rejected with "declared without mut" even though it was declared mut.
+// Pushing does not need this (it mutates through a borrow), so a Vec is usable
+// without mut, just not rebindable.
+unit main() {
+  mut Vec<int> v = [1, 2, 3];
+  // Rebind to a fresh vector many times; each old buffer must be freed.
+  for (int i in 0..1000) {
+    v = [i, i, i, i];
+  }
+  log(v.len as int);     // 4
+
+  // Rebind after mutating in place.
+  mut Vec<int> w = [];
+  w.push(7);
+  w.push(8);
+  w = [10, 20, 30];
+  mut int s = 0;
+  for (int x in &w) { s = s + x; }
+  log(s);                // 60
+}

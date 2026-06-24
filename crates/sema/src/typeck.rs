@@ -614,8 +614,15 @@ impl<'a> TypeChecker<'a> {
         let reassignable = match ty {
             // pointers are always reassignable
             HType::Ptr { .. } | HType::RawPtr { .. } | HType::OwnPtr { .. } => true,
-            // refs, slices, arrays, vectors, heap bindings: handle is fixed
-            HType::Ref { .. } | HType::Slice { .. } | HType::Array { .. } | HType::Vec { .. } | HType::Heap { .. } => false,
+            // A `Vec` is an owned value handle: `mut v` may be rebound to a whole
+            // new vector (the old buffer is freed by the general drop-on-reassign
+            // path).  Pushing does not require this flag (it mutates through a
+            // borrow), so a non-`mut` Vec is still usable, just not rebindable.
+            HType::Vec { .. } => matches!(mutness, Mutness::Mut),
+            // refs, slices, fixed arrays, heap bindings: handle is fixed.  (A
+            // fixed array cannot be reassigned wholesale because a C array is not
+            // an assignable value; mutate elements instead.)
+            HType::Ref { .. } | HType::Slice { .. } | HType::Array { .. } | HType::Heap { .. } => false,
             // plain values: reassignable iff mut
             _ => matches!(mutness, Mutness::Mut),
         };
@@ -687,6 +694,10 @@ impl<'a> TypeChecker<'a> {
                 if ok { Ok(()) } else {
                     if matches!(li.ty, HType::Ref { .. }) {
                         Err(format!("cannot assign through `{}` - it is an immutable reference (`&T`); use `&mut T` to write through it", li.name))
+                    } else if li.mut_payload && matches!(li.ty, HType::Array { .. } | HType::Slice { .. }) {
+                        // Declared `mut`, but the whole aggregate cannot be rebound:
+                        // a C array is not an assignable value.
+                        Err(format!("cannot reassign `{}` wholesale - a fixed array cannot be rebound (a C array is not an assignable value); assign its elements instead (`{}[i] = ...`)", li.name, li.name))
                     } else {
                         Err(format!("cannot assign to local `{}` - it was declared without `mut`", li.name))
                     }

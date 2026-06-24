@@ -1,0 +1,9 @@
+// A fixed array cannot be reassigned wholesale even when declared `mut`: a C
+// array is not an assignable value. This must be rejected with a clear message
+// directing the user to assign elements instead, rather than silently emitting
+// an illegal array assignment. (Mutating elements, `a[i] = ...`, is allowed.)
+unit main() {
+  mut [2]int a = [1, 2];
+  a = [3, 4];
+  log(a[0]);
+}
