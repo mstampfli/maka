@@ -1,0 +1,28 @@
+// An owning parameter moved into a returned struct/alloc field must NOT also be
+// dropped at the end of the function.  `cons` consumes `tl` by storing it in the
+// new node's `next`; previously the param-drop pass still freed `tl`, causing a
+// use-after-free as the list was rebuilt link by link.
+data Node { int v; mut own *Node next; }
+
+own *Node cons(int v, own *Node tl) {
+    return alloc Node { v = v, next = tl };
+}
+
+int sum(*Node n) {
+    mut int acc = 0;
+    *Node cur = n;
+    while (cur != null) {
+        acc = acc + cur!.v;
+        cur = cur!.next;
+    }
+    return acc;
+}
+
+unit main() {
+    own *Node h = null;
+    h = cons(1, h);
+    h = cons(2, h);
+    h = cons(3, h);
+    h = cons(4, h);
+    log(sum(h));   // 10
+}

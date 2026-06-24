@@ -1833,7 +1833,15 @@ fn collect_param_moves_expr(sym: &SymTab, e: &HExpr, out: &mut std::collections:
         }
         HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => collect_param_moves_expr(sym, inner, out),
         HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => {
-            for (_, fe) in fields { collect_param_moves_expr(sym, fe, out); }
+            // Storing an owning local/param into a struct or variant field moves it
+            // into the aggregate (e.g. `alloc Node { next = tl }` consumes `tl`).
+            // Mirror the call-argument arm so the moved value is not also dropped.
+            for (_, fe) in fields {
+                if ty_owns_heap(sym, &fe.ty) {
+                    if let HExprKind::Local(id) = fe.kind { out.insert(id); }
+                }
+                collect_param_moves_expr(sym, fe, out);
+            }
         }
         HExprKind::ArrayLit(es) => for e in es { collect_param_moves_expr(sym, e, out); },
         _ => {}
