@@ -360,8 +360,13 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                 for (tp, t) in template_sig.type_params.iter().zip(req.args.iter()) {
                     env.insert(tp.clone(), t.clone());
                 }
-                let new_param_tys: Vec<HType> = template_sig.param_tys.iter().map(|t| t.subst(&env)).collect();
-                let new_ret = template_sig.ret.subst(&env);
+                // Resolve any `T::Assoc` to the impl's concrete type after
+                // substituting the type args, so the instantiated signature (and
+                // thus codegen and overload resolution at the call site) sees the
+                // real type, not an unresolved associated-type placeholder.
+                let new_param_tys: Vec<HType> = template_sig.param_tys.iter()
+                    .map(|t| resolve::resolve_assoc_types_in(&sym, &t.subst(&env))).collect();
+                let new_ret = resolve::resolve_assoc_types_in(&sym, &template_sig.ret.subst(&env));
                 // Enforce where-clause bounds at this instantiation, filtering `has`
                 // impls by visibility: a non-`pub` impl is only usable in its own
                 // module; a `pub` impl is only usable in modules that opted in via

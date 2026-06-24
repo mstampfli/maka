@@ -336,7 +336,7 @@ impl<'a> TypeChecker<'a> {
         // `Name<concrete..>` pattern to its monomorphized struct/enum so the
         // body sees a real Struct/Enum (not a GenericPattern) - needed for
         // field access, codegen c_type, etc. on a generic param like `&mut Map<int>`.
-        self.cur_ret = concretize_generic_patterns(&ret_t.subst(&self.subst), self.sym);
+        self.cur_ret = crate::resolve::resolve_assoc_types_in(self.sym, &concretize_generic_patterns(&ret_t.subst(&self.subst), self.sym));
         self.cur_type_params = f.type_params.clone();
         self.cur_is_inline = f.is_inline;
         // Read the module path off the function's already-resolved sig so we can
@@ -3847,9 +3847,11 @@ impl<'a> TypeChecker<'a> {
             (fid, cp, cr)
         } else {
             let new_param_tys: Vec<HType> = template_param_tys.iter()
-                .map(|t| concretize_generic_patterns(&t.subst(&env), self.sym))
+                .map(|t| crate::resolve::resolve_assoc_types_in(self.sym, &concretize_generic_patterns(&t.subst(&env), self.sym)))
                 .collect();
-            let new_ret = concretize_generic_patterns(&template_ret.subst(&env), self.sym);
+            // Resolve `T::Assoc` in the call's result type so the value's type at
+            // the call site is the impl's concrete type (drives overload/codegen).
+            let new_ret = crate::resolve::resolve_assoc_types_in(self.sym, &concretize_generic_patterns(&template_ret.subst(&env), self.sym));
             let req_idx = self.instantiation_requests.len();
             self.instantiation_requests.push(InstantiationReq {
                 template_fid: fid,

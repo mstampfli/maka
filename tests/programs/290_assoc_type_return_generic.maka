@@ -1,0 +1,30 @@
+// Associated-type returns flowing through generic functions.
+// A generic fn whose return type is `T::Assoc` must, at each instantiation,
+// resolve the associated type to the impl's concrete type so that the body
+// check, the call-site value type (overload resolution), and codegen all
+// agree.  Regression: previously the substituted return stayed an unresolved
+// `int::Out` placeholder, so the value was carried as an opaque pointer.
+attr Producer { type Out; Out produce(&_ self); }
+int has Producer { type Out = int; int produce(&int self) { return self * 2; } }
+
+// Scalar associated-type return.
+T::Out twice<T: Producer>(&T x) { return produce(x); }
+// Chained: the outer generic returns another generic's associated-type result.
+T::Out outer<T: Producer>(&T x) { return twice(x); }
+
+data Pair { int a; int b; }
+attr Maker { type Item; Item make(&_ self); }
+int has Maker { type Item = Pair; Pair make(&int self) { return Pair { a = self, b = self * 2 }; } }
+
+// Struct-valued associated-type return.
+T::Item build<T: Maker>(&T x) { return make(x); }
+
+unit main() {
+  int seed = 21;
+  log(twice(&seed));
+  log(outer(&seed));
+  int n = 5;
+  Pair p = build(&n);
+  log(p.a);
+  log(p.b);
+}
