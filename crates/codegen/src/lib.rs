@@ -5223,7 +5223,12 @@ impl<'a> Cx<'a> {
         }
     }
     fn emit_vec_typedefs(&mut self) {
-        let keys: Vec<String> = self.vec_types.iter().cloned().collect();
+        let mut keys: Vec<String> = self.vec_types.iter().cloned().collect();
+        // Inner Vec typedefs must precede the outer ones that embed them:
+        // `Vec<Vec<int>>` (element key "Vec_maka_int") refers to `Vec<int>`
+        // (key "maka_int"), so emit by ascending nesting depth.  A plain
+        // BTreeSet sorts "Vec_..." before "maka_int" and breaks the C build.
+        keys.sort_by_key(|k| (k.matches("Vec_").count(), k.clone()));
         for key in keys {
             let name = format!("Vec_{}", key);
             if !self.out.contains(&format!("typedef struct {} ", name)) {

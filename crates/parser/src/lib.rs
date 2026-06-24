@@ -1431,10 +1431,15 @@ impl Parser {
                         match kinds.get(q) {
                             Some(TokKind::Lt) => depth += 1,
                             Some(TokKind::Gt) => depth -= 1,
+                            // `>>` (and `>>>` -> ShrOp + Gt) closes two nesting
+                            // levels at once - a nested generic type like
+                            // `Vec<Vec<int>>`.  Without this the skim never
+                            // balances and `looks_like_decl` rejects the `let`.
+                            Some(TokKind::ShrOp) => depth -= 2,
                             _ => {}
                         }
                         q += 1;
-                        if depth == 0 { break; }
+                        if depth <= 0 { break; }
                     }
                     if depth == 0 {
                         return Some(q);

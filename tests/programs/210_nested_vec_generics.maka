@@ -1,0 +1,27 @@
+// Nested generic types: `Vec<Vec<int>>` must parse (the `>>` token) and the
+// inner Vec typedef must be emitted before the outer one.
+import std.Vec;
+
+int row_sum(&Vec<int> r) {
+    mut int acc = 0;
+    for (usize i in 0..r.len) { acc = acc + r[i]; }
+    return acc;
+}
+
+unit main() {
+    Vec<Vec<int>> grid = [];
+    mut int n = 0;
+    while (n < 3) {
+        Vec<int> row = [];
+        mut int j = 0;
+        while (j < 3) { push(row, n * 3 + j); j = j + 1; }
+        push(grid, row);
+        n = n + 1;
+    }
+    // grid = [[0,1,2],[3,4,5],[6,7,8]]
+    log(grid[1][2]);                  // 5
+    log(grid.len);                    // 3
+    mut int total = 0;
+    for (usize i in 0..grid.len) { total = total + row_sum(&grid[i]); }
+    log(total);                       // 0..8 sum = 36
+}
