@@ -1,0 +1,34 @@
+// General temporary cleanup: an owning value produced by a call and then
+// projected or borrowed without being bound to a variable must still be freed,
+// and a temporary in `&` position must compile (a C rvalue has no address).
+// Regression: make().field leaked the temporary, and &make() / an auto-borrowed
+// method receiver on a temporary emitted invalid C. The temp-hoisting pass now
+// binds these temporaries to hidden locals, so the standard drop machinery
+// frees the owning ones and `&hidden` is a valid lvalue.
+data Node { int v; }
+data Box { own &Node n; }
+data Bag { Vec<int> items; }
+
+Box mk_box(int x) { return Box { n = alloc Node { v = x } }; }
+Bag mk_bag() {
+  mut Bag b = Bag { items = [] };
+  b.items.push(1); b.items.push(2); b.items.push(3);
+  return b;
+}
+Node mk_node(int x) { return Node { v = x }; }       // non-owning
+int read(&Node n) { return n.v; }
+
+unit main() {
+  // Project a field off an owning temporary (was a leak).
+  mut int s = 0;
+  for (int i in 0..1000) { s = s + mk_box(7).n.v; }
+  log(s);                          // 7000
+
+  // Project off an owning temporary that holds a Vec (was a leak).
+  mut int t = 0;
+  for (int i in 0..1000) { t = t + (mk_bag().items.len as int); }
+  log(t);                          // 3000
+
+  // Borrow a non-owning temporary (was invalid C).
+  log(read(&mk_node(42)));         // 42
+}

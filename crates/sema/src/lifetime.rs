@@ -1264,10 +1264,35 @@ fn hoist_in_expr(sym: &SymTab, e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: 
         | HExprKind::Free(expr)
         | HExprKind::SliceLen(expr)
         | HExprKind::EnumTag(expr)
-        | HExprKind::ArrayToSlice { base: expr, .. }
-        | HExprKind::AddrOfRef { place: expr, .. } => hoist_in_expr(sym, expr, locals, pre),
-        HExprKind::Field { base, .. } => hoist_in_expr(sym, base, locals, pre),
-        HExprKind::Index { base, idx } => { hoist_in_expr(sym, base, locals, pre); hoist_in_expr(sym, idx, locals, pre); }
+        | HExprKind::ArrayToSlice { base: expr, .. } => hoist_in_expr(sym, expr, locals, pre),
+        // Borrowing a temporary (`&make()`, or an auto-borrowed method receiver
+        // `make().method()`): the temp has no owner and `&<rvalue>` is not a
+        // valid C lvalue, so bind it to a hidden local that lives to scope exit.
+        HExprKind::AddrOfRef { place, .. } => {
+            hoist_in_expr(sym, place, locals, pre);
+            // Any temporary in `&` position needs binding: an owning one to free
+            // it, and even a non-owning rvalue because `&<rvalue>` is not a valid
+            // C lvalue.  A `dyn` value collapses to its fat pointer at codegen
+            // (no real address taken), so leave it alone.
+            if !matches!(place.ty, HType::Dyn { .. })
+                && (is_droppable_temp(sym, place) || !is_lvalue_expr(place))
+            {
+                hoist_one(place, locals, pre);
+            }
+        }
+        // Projecting a field/element off a temporary (`make().field`,
+        // `make()[i]`): nothing owns the temp, so bind it or it leaks after the
+        // access.  The hidden local is a normal owning local from here on, so the
+        // standard move-tracking + scope-exit drop handle it.
+        HExprKind::Field { base, .. } => {
+            hoist_in_expr(sym, base, locals, pre);
+            if is_droppable_temp(sym, base) { hoist_one(base, locals, pre); }
+        }
+        HExprKind::Index { base, idx } => {
+            hoist_in_expr(sym, base, locals, pre);
+            hoist_in_expr(sym, idx, locals, pre);
+            if is_droppable_temp(sym, base) { hoist_one(base, locals, pre); }
+        }
         HExprKind::ArrayLit(es) => { for e2 in es.iter_mut() { hoist_in_expr(sym, e2, locals, pre); } }
         HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => {
             // Field initializers are moved into the aggregate (owned by it), so
@@ -1315,7 +1340,41 @@ fn is_owning_temp(sym: &SymTab, e: &HExpr) -> bool {
 fn owning_type_of(e: &HExpr) -> HType {
     match &e.ty {
         HType::OwnPtr { .. } | HType::Heap { .. } => e.ty.clone(),
-        _ => HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) },
+        // A `Str`-typed temp is really a malloc'd `char*` (e.g. a concat result
+        // coerced to the borrowed `string` view), so the hidden local must own it.
+        HType::Str => HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) },
+        // An owning value type (struct / Vec / enum returned by value): declare
+        // the hidden local with the real type so its drop glue frees it.
+        other => other.clone(),
+    }
+}
+
+/// Whether `e` is a C lvalue (so `&e` is valid without binding it first).
+/// Places - locals, globals, fields, indices, and pointer derefs - are
+/// lvalues; call/match/arithmetic/literal results are not.
+fn is_lvalue_expr(e: &HExpr) -> bool {
+    matches!(
+        &e.kind,
+        HExprKind::Local(_)
+            | HExprKind::GlobalRef(_)
+            | HExprKind::Field { .. }
+            | HExprKind::Index { .. }
+            | HExprKind::Unwrap { .. }
+            | HExprKind::DerefRef(_)
+    )
+}
+
+/// A freshly-produced value that owns heap and has no binding yet, for the
+/// projecting/borrowing positions (`make().field`, `make()[i]`, `&make()`).
+/// Broader than `is_owning_temp` (pointer-only, used for the by-value move-arg
+/// case): also covers owning structs/Vecs/enums returned by value, which leak
+/// when projected or borrowed without being bound.
+fn is_droppable_temp(sym: &SymTab, e: &HExpr) -> bool {
+    if is_owning_temp(sym, e) { return true; }
+    match &e.kind {
+        HExprKind::Call { callee, .. } if (callee.0 as usize) < sym.sigs.len() => ty_owns_heap(sym, &e.ty),
+        HExprKind::Match { .. } => ty_owns_heap(sym, &e.ty),
+        _ => false,
     }
 }
 
