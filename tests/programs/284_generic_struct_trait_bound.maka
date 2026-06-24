@@ -1,0 +1,13 @@
+// A generic struct that implements an attr satisfies a trait bound: calling a
+// bounded generic fn with a Box<int> finds the Box<int> (or Box<T>) has-impl.
+// Previously the bound check compared type_key strings ("Box" vs "Box<int>") and
+// failed; it now also unifies the impl's receiver pattern with the concrete type.
+data Box<T> { T val; }
+attr Doubler { int dbl(&_ self); }
+Box<int> has Doubler { int dbl(&Box<int> self) { return self.val * 2; } }
+int apply<T: Doubler>(&T x) { return dbl(x) + 1; }
+unit main() {
+    Box<int> b = { val = 21 };
+    log(apply(&b));   // 43  (via the generic bound)
+    log(dbl(&b));     // 42  (direct dispatch)
+}

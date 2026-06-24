@@ -386,7 +386,16 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                         None => false,
                         Some(k) => sym.has_impls.iter().any(|h| {
                             if h.attr_name != *trait_name { return false; }
-                            if h.type_key != *k { return false; }
+                            // Primary match: the impl's type_key string equals the
+                            // receiver's underlying name (the proven non-generic
+                            // path).  Fallback: for a generic-struct receiver the
+                            // impl is keyed by its full form (`Box<T>` / `Box<int>`)
+                            // which never string-equals the bare name, so unify the
+                            // impl's receiver pattern against the concrete receiver.
+                            if h.type_key != *k
+                                && hir::receiver_unify_with_sym(&h.receiver_pattern, &recv_concrete, &h.receiver_tyvars, &sym).is_none() {
+                                return false;
+                            }
                             if h.attr_args.len() != attr_args_concrete.len() { return false; }
                             if !h.attr_args.iter().zip(attr_args_concrete.iter())
                                 .all(|(a, b)| typeck::type_eq(a, b)) { return false; }
