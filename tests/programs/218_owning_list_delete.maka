@@ -1,0 +1,28 @@
+// Delete a node from an owning linked list.  `del` returns `rest` on the match
+// branch and `head` otherwise; the matched node (head on the match branch) must
+// be freed there even though head IS returned on the other branch.  A
+// function-wide "param is returned somewhere" flag must not suppress that drop.
+data N { int v; mut own *N next; }
+
+own *N del(own *N head, int target) {
+    if (head == null) { return null; }
+    if (head!.v == target) {
+        own *N rest = head!.next;
+        head!.next = null;
+        return rest;
+    }
+    head!.next = del(head!.next, target);
+    return head;
+}
+
+int len(*N n) { if (n == null) { return 0; } return 1 + len(n!.next); }
+int sum(*N n) { if (n == null) { return 0; } return n!.v + sum(n!.next); }
+
+unit main() {
+    own *N h = alloc N { v = 1, next = alloc N { v = 2, next = alloc N { v = 3, next = alloc N { v = 4, next = null } } } };
+    h = del(h, 2);     // [1,3,4]
+    h = del(h, 4);     // [1,3]
+    h = del(h, 9);     // no-op [1,3]
+    log(len(h));       // 2
+    log(sum(h));       // 4
+}

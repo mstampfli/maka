@@ -1748,10 +1748,13 @@ fn collect_param_moves_stmt(sym: &SymTab, s: &HStmt, out: &mut std::collections:
         }
         HStmt::ExprStmt(e) => collect_param_moves_expr(sym, e, out),
         HStmt::Return { value: Some(v), .. } => {
-            // A return that yields an owning local moves it out.
-            if ty_owns_heap(sym, &v.ty) {
-                if let HExprKind::Local(id) = v.kind { out.insert(id); }
-            }
+            // NOTE: do NOT mark a param moved just because it is returned here.
+            // `param_moved` is function-wide, but a return-move is path-specific:
+            // a param returned on one branch must still be dropped on a sibling
+            // branch that returns something else.  append_param_drops_to_returns
+            // already excludes the per-return `returning_id`, so marking it here
+            // would leak the param on every other return path (e.g. list delete
+            // that does `return rest;` on the match and `return head;` otherwise).
             collect_param_moves_expr(sym, v, out);
         }
         HStmt::Return { .. } => {}
