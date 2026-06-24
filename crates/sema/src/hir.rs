@@ -91,14 +91,16 @@ impl HType {
 
     /// The owned heap-string type (what `String` and every allocating string
     /// builtin - concat, `read_line`, `format`, `*_to_str` - produce).  Single
-    /// source of truth for its internal representation: a mutable, nullable
-    /// owning pointer to a NUL-terminated buffer, auto-freed at scope exit.
+    /// source of truth for its internal representation: `own *string`, a mutable
+    /// nullable owning pointer to a NUL-terminated buffer, auto-freed at scope
+    /// exit.  Lowers to a single `char*` (a string is an array of chars, so
+    /// `own *string` is one owned char buffer, never a `char**`).
     pub fn owned_string() -> HType {
-        HType::OwnPtr { mutable: true, inner: Box::new(HType::Char) }
+        HType::OwnPtr { mutable: true, inner: Box::new(HType::Str) }
     }
     /// True if `self` is the owned heap-string type produced by `owned_string()`.
     pub fn is_owned_string(&self) -> bool {
-        matches!(self, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char))
+        matches!(self, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Str))
     }
 
     /// Replace any TyVar(name) with the matching substitution.

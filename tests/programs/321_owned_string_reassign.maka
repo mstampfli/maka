@@ -1,0 +1,14 @@
+// An owned String reassigned via self-concat (`acc = acc + ...`) frees the old
+// buffer exactly once: the concat helper frees the consumed left operand and the
+// reassignment does not double-free.  Owned String is `own *string` (a char*).
+import std.{str_len, str_eq};
+String build(int n) {
+  mut String acc = "x" + "";
+  for (int i in 0..n) { acc = acc + "ab"; }
+  return acc;
+}
+unit main() {
+  String s = build(3);
+  log(str_len(s) as int);          // 7  (x + ab*3)
+  log(str_eq(s, "xababab"));       // true
+}

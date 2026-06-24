@@ -5278,8 +5278,12 @@ impl<'a> TypeChecker<'a> {
             }
         }
         // Same for `own *T x = T-valued expr` — the value gets heap-allocated implicitly.
+        // Excludes a string `inner`: a `Str` value is a borrowed (often static) `char*`,
+        // not a value to box, so retyping it as owned would alias - and later free - the
+        // literal.  An owned string must be produced by an allocating builtin (concat,
+        // `read_line`, ...), never by implicitly "owning" a borrowed string.
         if let HType::OwnPtr { inner, .. } = target {
-            if type_eq(&e.ty, inner) {
+            if !matches!(inner.as_ref(), HType::Str) && type_eq(&e.ty, inner) {
                 let mut e = e; e.ty = target.clone();
                 return e;
             }

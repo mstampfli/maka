@@ -733,13 +733,13 @@ fn rust_to_maka_ty(ty: &RustType, sp: Span) -> Type {
         RustType::Bool => Type::Named("bool".to_string(), sp),
         RustType::Unit => Type::Unit(sp),
         RustType::StrSlice => Type::Named("string".to_string(), sp),
-        // Returning a Rust `String` is owned heap → Maka `own *char` (= `String`).
-        // Receiving one: Maka caller passes `string`, shim copies into owned String.
-        // We declare both directions as `string` in the Maka extern; the codegen
-        // path for return values handles ownership via the `own` modifier.
+        // Returning a Rust `String` is owned heap → Maka `own *string` (= `String`),
+        // a single owned `char*`.  Receiving one: Maka caller passes `string`, shim
+        // copies into an owned String.  The codegen path for return values handles
+        // ownership via the `own` modifier.
         RustType::OwnedString => Type::OwnPtr {
             mutness: Mutness::Const,
-            inner: Box::new(Type::Named("char".to_string(), sp)),
+            inner: Box::new(Type::Named("string".to_string(), sp)),
             span: sp,
         },
         // Owned: surfaces as `Rust<T>` (= `own *mut unit`).  This is the form

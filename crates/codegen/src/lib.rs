@@ -5316,10 +5316,15 @@ impl<'a> Cx<'a> {
                 // (`Vec<&dyn Trait>`) resolves to `Dyn_Trait`, not `Dyn_Trait*`.
                 if matches!(inner.as_ref(), HType::Dyn { .. }) {
                     self.type_key(inner)
+                } else if matches!(inner.as_ref(), HType::Str) {
+                    // A pointer to a string decays to a single char buffer (mirrors
+                    // c_type): owned -> `char*` (str_own), borrowed -> `const char*` (str).
+                    if matches!(t, HType::OwnPtr { .. }) { "str_own".into() } else { "str".into() }
                 } else {
                     format!("p_{}", self.type_key(inner))
                 }
             }
+            HType::Heap { inner } if matches!(inner.as_ref(), HType::Str) => "str_own".into(),
             HType::Heap { inner } => format!("h_{}", self.type_key(inner)),
             HType::Array { len, elem } => format!("a{}_{}", len, self.type_key(elem)),
             HType::Slice { elem, .. } => format!("Slice_{}", self.type_key(elem)),
@@ -5367,6 +5372,8 @@ impl<'a> Cx<'a> {
         }
         match k {
             "str" => "const char*".into(),
+            // owned string buffer (`own *string` / `own &string`) - a single freeable char*.
+            "str_own" => "char*".into(),
             other => other.to_string(),
         }
     }
@@ -6228,23 +6235,23 @@ impl<'a> Cx<'a> {
         self.w("}\n");
         // Whole-file read: returns a freshly-malloc'd, NUL-terminated buffer of
         // the file's contents (NULL on error).  Maka's `read_file` wraps this as
-        // an owned String, so the return type is `maka_char*` to match.
-        self.w("maka_char* __maka_rt_read_file(const char* path) {\n");
-        self.w("    FILE* fp = fopen(path, \"rb\"); if (!fp) return (maka_char*)0;\n");
-        self.w("    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return (maka_char*)0; }\n");
-        self.w("    long n = ftell(fp); if (n < 0) { fclose(fp); return (maka_char*)0; }\n");
+        // an owned String, so the return type is `char*` to match.
+        self.w("char* __maka_rt_read_file(const char* path) {\n");
+        self.w("    FILE* fp = fopen(path, \"rb\"); if (!fp) return (char*)0;\n");
+        self.w("    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return (char*)0; }\n");
+        self.w("    long n = ftell(fp); if (n < 0) { fclose(fp); return (char*)0; }\n");
         self.w("    rewind(fp);\n");
-        self.w("    char* buf = (char*)malloc((size_t)n + 1); if (!buf) { fclose(fp); return (maka_char*)0; }\n");
-        self.w("    size_t rd = fread(buf, 1, (size_t)n, fp); fclose(fp); buf[rd] = 0; return (maka_char*)buf;\n");
+        self.w("    char* buf = (char*)malloc((size_t)n + 1); if (!buf) { fclose(fp); return (char*)0; }\n");
+        self.w("    size_t rd = fread(buf, 1, (size_t)n, fp); fclose(fp); buf[rd] = 0; return (char*)buf;\n");
         self.w("}\n");
         // Owned substring: a freshly-malloc'd copy of s[start .. start+len].
-        // Returns `maka_char*` so Maka can own/free it (the borrowed
+        // Returns `char*` so Maka can own/free it (the borrowed
         // `__maka_rt_str_substring` would leak it inside a Vec<String>).
-        self.w("maka_char* __maka_rt_substr_owned(const char* s, int64_t start, int64_t len) {\n");
+        self.w("char* __maka_rt_substr_owned(const char* s, int64_t start, int64_t len) {\n");
         self.w("    if (start < 0) start = 0; if (len < 0) len = 0;\n");
         self.w("    char* r = (char*)malloc((size_t)len + 1);\n");
         self.w("    for (int64_t k = 0; k < len; k++) r[k] = s[start + k];\n");
-        self.w("    r[len] = 0; return (maka_char*)r;\n");
+        self.w("    r[len] = 0; return (char*)r;\n");
         self.w("}\n");
         // Whole-file write: writes `len` bytes; returns 0 on success, -1 on error.
         self.w("int64_t __maka_rt_write_file(const char* path, const char* data, int64_t len) {\n");
@@ -6346,12 +6353,12 @@ impl<'a> Cx<'a> {
         self.w("    if (!s) return 0;\n");
         self.w("    char* end; long long v = strtoll(s, &end, 10); return (int64_t)v;\n");
         self.w("}\n");
-        self.w("maka_char* __maka_rt_int_to_str(int64_t n) {\n");
+        self.w("char* __maka_rt_int_to_str(int64_t n) {\n");
         self.w("    char buf[32]; int len = snprintf(buf, sizeof(buf), \"%lld\", (long long)n);\n");
         self.w("    if (len < 0) len = 0;\n");
         self.w("    char* s = (char*)malloc((size_t)len + 1);\n");
         self.w("    memcpy(s, buf, (size_t)len + 1);\n");
-        self.w("    return (maka_char*)s;\n");
+        self.w("    return (char*)s;\n");
         self.w("}\n");
         self.w("int64_t __maka_rt_str_find(const char* s, const char* needle) {\n");
         self.w("    if (!s || !needle) return -1;\n");
@@ -6369,42 +6376,42 @@ impl<'a> Cx<'a> {
         self.w("    if (xl > sl) return 0;\n");
         self.w("    return strcmp(s + sl - xl, suffix) == 0 ? 1 : 0;\n");
         self.w("}\n");
-        self.w("maka_char* __maka_rt_str_to_upper(const char* s) {\n");
-        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return (maka_char*)e; }\n");
+        self.w("char* __maka_rt_str_to_upper(const char* s) {\n");
+        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return (char*)e; }\n");
         self.w("    size_t l = strlen(s);\n");
         self.w("    char* o = (char*)malloc(l + 1);\n");
         self.w("    for (size_t i = 0; i < l; i++) {\n");
         self.w("        char c = s[i]; o[i] = (c >= 'a' && c <= 'z') ? (c - 32) : c;\n");
         self.w("    }\n");
-        self.w("    o[l] = 0; return (maka_char*)o;\n");
+        self.w("    o[l] = 0; return (char*)o;\n");
         self.w("}\n");
-        self.w("maka_char* __maka_rt_str_to_lower(const char* s) {\n");
-        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return (maka_char*)e; }\n");
+        self.w("char* __maka_rt_str_to_lower(const char* s) {\n");
+        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return (char*)e; }\n");
         self.w("    size_t l = strlen(s);\n");
         self.w("    char* o = (char*)malloc(l + 1);\n");
         self.w("    for (size_t i = 0; i < l; i++) {\n");
         self.w("        char c = s[i]; o[i] = (c >= 'A' && c <= 'Z') ? (c + 32) : c;\n");
         self.w("    }\n");
-        self.w("    o[l] = 0; return (maka_char*)o;\n");
+        self.w("    o[l] = 0; return (char*)o;\n");
         self.w("}\n");
-        self.w("maka_char* __maka_rt_str_trim(const char* s) {\n");
-        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return (maka_char*)e; }\n");
+        self.w("char* __maka_rt_str_trim(const char* s) {\n");
+        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return (char*)e; }\n");
         self.w("    const char* p = s;\n");
         self.w("    while (*p == ' ' || *p == '\\t' || *p == '\\n' || *p == '\\r') p++;\n");
         self.w("    const char* e = s + strlen(s);\n");
         self.w("    while (e > p && (e[-1] == ' ' || e[-1] == '\\t' || e[-1] == '\\n' || e[-1] == '\\r')) e--;\n");
         self.w("    size_t l = (size_t)(e - p);\n");
         self.w("    char* o = (char*)malloc(l + 1);\n");
-        self.w("    memcpy(o, p, l); o[l] = 0; return (maka_char*)o;\n");
+        self.w("    memcpy(o, p, l); o[l] = 0; return (char*)o;\n");
         self.w("}\n");
-        self.w("maka_char* __maka_rt_str_replace(const char* s, const char* from, const char* to) {\n");
+        self.w("char* __maka_rt_str_replace(const char* s, const char* from, const char* to) {\n");
         // Always return a freshly malloc'd string so callers that free() the
         // result don't crash on degenerate inputs.
-        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return (maka_char*)e; }\n");
+        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return (char*)e; }\n");
         self.w("    if (!from || !*from || !to) {\n");
         self.w("        size_t sl = strlen(s);\n");
         self.w("        char* o = (char*)malloc(sl + 1);\n");
-        self.w("        memcpy(o, s, sl + 1); return (maka_char*)o;\n");
+        self.w("        memcpy(o, s, sl + 1); return (char*)o;\n");
         self.w("    }\n");
         self.w("    size_t fl = strlen(from), tl = strlen(to);\n");
         // Count occurrences for sizing.
@@ -6423,7 +6430,7 @@ impl<'a> Cx<'a> {
         self.w("        memcpy(w, to, tl); w += tl;\n");
         self.w("        r = p + fl;\n");
         self.w("    }\n");
-        self.w("    *w = 0; return (maka_char*)o;\n");
+        self.w("    *w = 0; return (char*)o;\n");
         self.w("}\n");
         // Random — use a per-thread xorshift seeded from clock + addr.
         self.w("static __thread uint64_t __maka_rt_rng_state = 0;\n");
