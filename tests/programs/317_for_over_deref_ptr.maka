@@ -1,0 +1,12 @@
+// Iterating a pointer to a container must go through an explicit deref once the
+// pointer is proven non-null: for (x in p!) ..., not a bare for (x in p)
+// (rejected - see neg 65, which was a null-deref crash). Non-null sources (a
+// Vec value, &Vec, a temporary) are unchanged.
+unit main() {
+  mut Vec<int> v = [];
+  v.push(10); v.push(20); v.push(30);
+  *Vec<int> p = &mut v;       // known non-null
+  mut int s = 0;
+  for (int x in p!) { s = s + x; }
+  log(s);                     // 60
+}

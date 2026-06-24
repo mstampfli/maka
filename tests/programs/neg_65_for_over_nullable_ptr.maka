@@ -1,0 +1,6 @@
+// Iterating a bare nullable pointer to a Vec dereferences it without proof and
+// crashed on null. It must be rejected; the user dereferences first (p!).
+unit main() {
+  *Vec<int> p = null;
+  for (int x in p) { log(x); }
+}

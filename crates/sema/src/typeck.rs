@@ -4471,6 +4471,16 @@ impl<'a> TypeChecker<'a> {
         let declared = self.resolve_local_ty(var_ty);
         let src_probe = self.check_expr(src, None);
 
+        // Iterating dereferences the source, so a nullable pointer to a container
+        // (`*Vec` / `own *[N]T` / `raw *[]T`) must be proven non-null first
+        // (`for (x in p!) ...`) or passed as a non-null reference (`&v`).  A bare
+        // nullable pointer would crash on null - same rule as indexing/field access.
+        if let HType::Ptr { inner, .. } | HType::OwnPtr { inner, .. } | HType::RawPtr { inner, .. } = &src_probe.ty {
+            if matches!(inner.as_ref(), HType::Vec { .. } | HType::Array { .. } | HType::Slice { .. }) {
+                self.err("dereference a `*T` with `!` before iterating it (`for (x in p!) ...`)", sp);
+            }
+        }
+
         // User-iterator path: when `src` is a struct value with a `next` method
         // returning `Option<elem_ty>`, lower the for-each to an AST-level while
         // loop and re-typecheck:
