@@ -1,0 +1,12 @@
+// A non-escaping closure local in a function that returns before the block ends
+// must still have its capture env freed (the return bypasses block-end drops).
+// Previously this leaked the env on every call.  (Leak-freedom verified out of
+// band with LeakSanitizer.)
+int apply(int base, int arg) {
+    int(int) g = int(int n) [base] { return n + base; };
+    return g(arg);
+}
+unit main() {
+    log(apply(10, 5));    // 15
+    log(apply(100, 1));   // 101
+}

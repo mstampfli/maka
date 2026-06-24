@@ -1613,7 +1613,13 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
         let mut escaped: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
         mark_closure_escapes_block(&f.body, &cands, &mut escaped);
         let freeable: std::collections::HashSet<LocalId> = cands.difference(&escaped).copied().collect();
-        if !freeable.is_empty() { add_closure_drops_block(&mut f.body, &freeable); }
+        if !freeable.is_empty() {
+            add_closure_drops_block(&mut f.body, &freeable);
+            // A `return` exits before the declaring block's end, bypassing the
+            // block heap_to_free above, so also free in-scope freeable closures
+            // at each return (mirrors append_param_drops_to_returns for params).
+            add_closure_drops_to_returns(&mut f.body, &freeable, &mut Vec::new());
+        }
     }
 }
 
@@ -1721,6 +1727,48 @@ fn add_closure_drops_block(b: &mut HBlock, freeable: &std::collections::HashSet<
     for s in b.stmts.iter_mut() {
         for_each_child_block_mut(s, &mut |cb| add_closure_drops_block(cb, freeable));
     }
+}
+
+/// Add freeable closure locals to the `heap_drops` of every `return` that lies
+/// within their scope (after their declaration), so a function that returns
+/// before its block ends still frees the closure env.  `in_scope` is the stack
+/// of freeable closures declared by enclosing blocks, in declaration order.
+fn add_closure_drops_to_returns(
+    b: &mut HBlock,
+    freeable: &std::collections::HashSet<LocalId>,
+    in_scope: &mut Vec<LocalId>,
+) {
+    let mark = in_scope.len();
+    for s in b.stmts.iter_mut() {
+        match s {
+            HStmt::Let { local, .. } => {
+                if freeable.contains(local) { in_scope.push(*local); }
+            }
+            HStmt::Return { value, heap_drops, .. } => {
+                // A closure returned as the value escapes (and is excluded from
+                // `freeable`), but guard against dropping the returned local anyway.
+                let ret_local = match value {
+                    Some(v) => if let HExprKind::Local(id) = v.kind { Some(id) } else { None },
+                    None => None,
+                };
+                for &c in in_scope.iter() {
+                    if Some(c) != ret_local && !heap_drops.contains(&c) {
+                        heap_drops.push(c);
+                    }
+                }
+            }
+            HStmt::If { then_b, else_b, .. } => {
+                add_closure_drops_to_returns(then_b, freeable, in_scope);
+                if let Some(eb) = else_b { add_closure_drops_to_returns(eb, freeable, in_scope); }
+            }
+            HStmt::While { body, .. } | HStmt::Block(body) | HStmt::Unsafe(body, _)
+            | HStmt::ForC { body, .. } | HStmt::ForEach { body, .. } => {
+                add_closure_drops_to_returns(body, freeable, in_scope);
+            }
+            _ => {}
+        }
+    }
+    in_scope.truncate(mark);
 }
 
 /// Run `g` on each immediate child block of a statement (read-only).
