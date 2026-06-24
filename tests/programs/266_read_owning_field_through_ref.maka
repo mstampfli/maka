@@ -1,0 +1,11 @@
+// Reading an owning field through an immutable borrow (`&Struct`) is fine: the
+// field is borrowed (not moved), and the owner frees it exactly once.
+data Box { int v; }
+data Holder { own &Box b; int tag; }
+int peek(&Holder h) {
+    return h.b.v + h.tag;
+}
+unit main() {
+    Holder hh = Holder { b = alloc Box { v = 40 }, tag = 2 };
+    log(peek(&hh));   // 42
+}

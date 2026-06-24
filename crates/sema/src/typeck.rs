@@ -1781,10 +1781,26 @@ impl<'a> TypeChecker<'a> {
             }
         };
         // Keep bh.ty as-is so codegen can choose `.` vs `->`.
+        // Reading an owning field through an immutable borrow (`&Struct`) yields a
+        // borrow, not ownership: you cannot move an owning field out of a struct
+        // you only borrow (that would double-free against the real owner).  A
+        // `&mut`/owned/owning base keeps the field's owning type (writes and
+        // owned-value move-out are handled elsewhere).
+        let borrow_field = |ty: HType| -> HType {
+            if matches!(bh.ty, HType::Ref { mutable: false, .. }) {
+                match ty {
+                    HType::OwnPtr { mutable, inner } => HType::Ptr { mutable, inner },
+                    HType::Heap { inner } => HType::Ref { mutable: false, inner },
+                    other => other,
+                }
+            } else {
+                ty
+            }
+        };
         // Direct lookup first.
         let info = self.sym.struct_info(struct_id);
         if let Some((idx, f)) = info.fields.iter().enumerate().find(|(_, f)| f.name == name) {
-            let ty = f.ty.clone();
+            let ty = borrow_field(f.ty.clone());
             return HExpr { kind: HExprKind::Field { base: Box::new(bh), field: idx }, ty, span: sp };
         }
         // Promoted lookup: search any embedded field whose embedded type contains `name`.

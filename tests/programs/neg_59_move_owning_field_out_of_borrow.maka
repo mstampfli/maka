@@ -1,0 +1,13 @@
+// Moving an owning field out of a BORROWED struct is unsound (the real owner
+// still drops it -> double free).  Reading `h.b` through `&Holder` yields a
+// borrow, so returning it as `own *T` must be rejected.
+data Box { int v; }
+data Holder { own *Box b; }
+own *Box take(&Holder h) {
+    return h.b;
+}
+unit main() {
+    Holder hh = Holder { b = alloc Box { v = 9 } };
+    own *Box g = take(&hh);
+    log(0);
+}
