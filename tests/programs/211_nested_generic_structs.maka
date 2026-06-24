@@ -1,0 +1,23 @@
+// Nested generic *struct* instantiations: the inner instantiation must be built
+// and keyed before the outer, so `Box<Box<int>>` / `Pair<Pair<int,int>, int>`
+// resolve to real monomorphs (not the bare template).
+data Box<T> { T v; }
+data Pair<A, B> { A first; B second; }
+
+int unwrap2(Box<Box<int>> b) { return b.v.v; }
+
+unit main() {
+    Box<Box<int>> b = { v = { v = 42 } };
+    log(unwrap2(b));                       // 42
+
+    Pair<Pair<int, int>, int> p = {
+        first = { first = 1, second = 2 },
+        second = 3,
+    };
+    log(p.first.first);                    // 1
+    log(p.first.second);                   // 2
+    log(p.second);                         // 3
+
+    Box<Pair<int, int>> bp = { v = { first = 7, second = 8 } };
+    log(bp.v.first + bp.v.second);         // 15
+}

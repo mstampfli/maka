@@ -487,11 +487,25 @@ pub fn resolve_type_in(
                 }
                 // Fall through to the "unknown generic type" error path.
             }
-            // Template (used inside generic bodies — yields a TyVar-bearing pattern).
-            if let Some((id, _)) = sym.struct_by_name(name) {
-                HType::Struct(id)
-            } else if let Some((id, _)) = sym.enum_by_name(name) {
-                HType::Enum(id)
+            // Not registered yet.  If `name` is a generic *template*, keep the
+            // application as a GenericPattern carrying the concrete args, so the
+            // instantiation pass resolves it to the right monomorph id later.
+            // Returning the bare template here mis-keys nested instantiations:
+            // the inner `Box<int>` of `Box<Box<int>>`, resolved during the
+            // pre-registration scan, would collapse to the Box template and the
+            // outer instantiation would be built (and keyed) against it.
+            if let Some((id, info)) = sym.struct_by_name(name) {
+                if info.type_params.is_empty() {
+                    HType::Struct(id)
+                } else {
+                    HType::GenericPattern { template_name: name.clone(), args: resolved_args, is_enum: false }
+                }
+            } else if let Some((id, einfo)) = sym.enum_by_name(name) {
+                if einfo.type_params.is_empty() {
+                    HType::Enum(id)
+                } else {
+                    HType::GenericPattern { template_name: name.clone(), args: resolved_args, is_enum: true }
+                }
             } else {
                 errors.push(SemaError { msg: format!("unknown generic type `{}`", name), span: *span });
                 HType::Int
@@ -712,10 +726,37 @@ impl SymTab {
         struct_inst_requests.sort_by(|a, b| (a.0.clone(), a.1.iter().map(|t| t.key()).collect::<String>())
             .cmp(&(b.0.clone(), b.1.iter().map(|t| t.key()).collect::<String>())));
         struct_inst_requests.dedup_by(|a, b| a.0 == b.0 && a.1.iter().map(|t| t.key()).collect::<String>() == b.1.iter().map(|t| t.key()).collect::<String>());
+        // A type still carrying a GenericPattern after concretization names an
+        // instantiation that has not been built yet (e.g. the inner `Box<int>` of
+        // `Box<Box<int>>`); defer such a request until the inner one is built.
+        fn still_patterned(t: &HType) -> bool {
+            match t {
+                HType::GenericPattern { .. } => true,
+                HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::RawPtr { inner, .. }
+                | HType::OwnPtr { inner, .. } | HType::Heap { inner } => still_patterned(inner),
+                HType::Array { elem, .. } | HType::Slice { elem, .. } | HType::Vec { elem } => still_patterned(elem),
+                HType::FnPtr { ret, params } => still_patterned(ret) || params.iter().any(still_patterned),
+                _ => false,
+            }
+        }
         let mut wi = 0;
+        let mut deferrals = 0usize;
+        let defer_cap = struct_inst_requests.len() * 8 + 64;
         while wi < struct_inst_requests.len() {
-            let (name, args) = struct_inst_requests[wi].clone();
+            let (name, raw_args) = struct_inst_requests[wi].clone();
             wi += 1;
+            // Resolve nested generic args against instantiations built in earlier
+            // rounds, so the key + monomorph use canonical Struct/Enum ids.
+            let args: Vec<HType> = raw_args.iter()
+                .map(|a| crate::typeck::concretize_generic_patterns(a, &sym))
+                .collect();
+            if args.iter().any(still_patterned) {
+                if deferrals < defer_cap {
+                    deferrals += 1;
+                    struct_inst_requests.push((name, raw_args));
+                }
+                continue;
+            }
             let key = args.iter().map(|t| t.key()).collect::<Vec<_>>().join(",");
             // Clone the template out of `sym` first so the borrow ends before we
             // push the new instantiation into `sym.structs` / `sym.enums`.
