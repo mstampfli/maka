@@ -363,6 +363,13 @@ impl<'a> TypeChecker<'a> {
         if !lifted_in_unsafe {
             self.ban_unit_ptr_in_user_code(&self.cur_ret.clone(), "function return type", f.span);
         }
+        // A fixed-size array is not a value in C (it cannot be returned or assigned),
+        // so a by-value array return would emit invalid C.  Reject it with the same
+        // guidance as array-valued containers; callers that need to hand back an array
+        // wrap it in a data type, return a Vec, or fill an out-parameter (`&mut [N]T`).
+        if matches!(&self.cur_ret, HType::Array { .. }) {
+            self.err("a function cannot return a fixed-size array by value (a C array is not an assignable value); wrap it in a data type, return a Vec, or fill an out-parameter (&mut [N]T)", f.span);
+        }
 
         self.enter_scope();
         let mut param_ids = Vec::new();

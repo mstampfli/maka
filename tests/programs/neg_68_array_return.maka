@@ -1,0 +1,8 @@
+// A fixed-size array is not a value in C (cannot be returned or assigned by
+// value), so returning one by value must be rejected; use an out-parameter,
+// a data wrapper, or a Vec instead.
+[3]int make() {
+  [3]int a = [1, 2, 3];
+  return a;
+}
+unit main() { [3]int b = make(); log(b[0]); }
