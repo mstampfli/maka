@@ -1,0 +1,13 @@
+// A fixed array coerces to a slice parameter; the callee reads .len and indexes.
+int sum([]int xs) {
+    mut int t = 0;
+    mut int i = 0;
+    while (i < xs.len as int) { t = t + xs[i]; i = i + 1; }
+    return t;
+}
+unit main() {
+    [4]int a = [10, 20, 30, 40];
+    log(sum(a));          // 100
+    [2]int b = [7, 8];
+    log(sum(b));          // 15
+}

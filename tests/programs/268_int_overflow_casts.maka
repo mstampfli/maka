@@ -1,0 +1,10 @@
+// Narrowing integer casts truncate (wrap) on overflow, matching C unsigned
+// conversion: high bits are dropped and negatives wrap to the unsigned range.
+unit main() {
+    int big = 300;
+    log(big as u8 as int);        // 44   (300 & 0xFF)
+    log((0 - 1) as u8 as int);    // 255
+    int x = 70000;
+    log(x as u16 as int);         // 4464 (70000 & 0xFFFF)
+    log((0 - 5) as u16 as int);   // 65531
+}
