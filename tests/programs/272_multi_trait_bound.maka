@@ -1,0 +1,16 @@
+// Multiple trait bounds on a generic parameter: fn<T: A + B> requires T to
+// satisfy both A and B, and the body may call methods from either.  The bound
+// list is parsed as plus-separated attribute names.
+attr A { int fa(&_ self); }
+attr B { int fb(&_ self); }
+int has A { int fa(&int self) { return self + 1; } }
+int has B { int fb(&int self) { return self + 2; } }
+bool has A { int fa(&bool self) { if (self) { return 100; } return 0; } }
+bool has B { int fb(&bool self) { if (self) { return 200; } return 0; } }
+int both<T: A + B>(&T x) { return fa(x) + fb(x); }
+unit main() {
+    int i = 10;
+    log(both(&i));    // 11 + 12 = 23
+    bool b = true;
+    log(both(&b));    // 100 + 200 = 300
+}

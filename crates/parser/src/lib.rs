@@ -787,29 +787,34 @@ impl Parser {
             // `<T: Attr>` shorthand → equivalent to `where T has Attr`.
             // Extended: `<T: Attr<Slot = i64>>` adds an assoc-type binding.
             if self.eat(&TokKind::Colon) {
-                let (trait_name, _) = self.expect_ident("attribute name")?;
-                let mut args: Vec<Type> = Vec::new();
-                let mut bindings: Vec<(String, Type)> = Vec::new();
-                if self.eat(&TokKind::Lt) {
-                    loop {
-                        // Bound entries can be either `Type` (positional attr-arg)
-                        // or `Name = Type` (assoc-type binding).  Distinguish by
-                        // peeking for `Ident =`.
-                        if matches!((self.peek().clone(), self.peek_at(1).clone()), (TokKind::Ident(_), TokKind::Eq)) {
-                            let (bn, _) = self.expect_ident("assoc-type name")?;
-                            self.expect(&TokKind::Eq, "`=`")?;
-                            let bv = self.parse_type()?;
-                            bindings.push((bn, bv));
-                        } else {
-                            args.push(self.parse_type()?);
+                // One or more `+`-separated trait bounds, each becoming a
+                // `where T has Attr` clause: `<T: A + B>` is `T has A` and `T has B`.
+                loop {
+                    let (trait_name, _) = self.expect_ident("attribute name")?;
+                    let mut args: Vec<Type> = Vec::new();
+                    let mut bindings: Vec<(String, Type)> = Vec::new();
+                    if self.eat(&TokKind::Lt) {
+                        loop {
+                            // Bound entries can be either `Type` (positional attr-arg)
+                            // or `Name = Type` (assoc-type binding).  Distinguish by
+                            // peeking for `Ident =`.
+                            if matches!((self.peek().clone(), self.peek_at(1).clone()), (TokKind::Ident(_), TokKind::Eq)) {
+                                let (bn, _) = self.expect_ident("assoc-type name")?;
+                                self.expect(&TokKind::Eq, "`=`")?;
+                                let bv = self.parse_type()?;
+                                bindings.push((bn, bv));
+                            } else {
+                                args.push(self.parse_type()?);
+                            }
+                            if !self.eat(&TokKind::Comma) { break; }
                         }
-                        if !self.eat(&TokKind::Comma) { break; }
+                        self.expect(&TokKind::Gt, "`>`")?;
                     }
-                    self.expect(&TokKind::Gt, "`>`")?;
+                    let mut all_args = vec![Type::Named(n.clone(), start)];
+                    all_args.extend(args);
+                    bounds.push(WhereClause { trait_name, args: all_args, assoc_type_bindings: bindings, span: start });
+                    if !self.eat(&TokKind::Plus) { break; }
                 }
-                let mut all_args = vec![Type::Named(n.clone(), start)];
-                all_args.extend(args);
-                bounds.push(WhereClause { trait_name, args: all_args, assoc_type_bindings: bindings, span: start });
             }
             out.push(n);
             if !self.eat(&TokKind::Comma) { break; }
