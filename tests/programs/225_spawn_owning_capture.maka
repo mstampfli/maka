@@ -1,0 +1,10 @@
+import std.{Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy};
+data Box { int v; }
+unit main() {
+    own *Box b = alloc Box { v = 21 };
+    Atomic<int> a = atomic_new(0);
+    *Thread t = thread(unit() [b, a] { _ = atomic_add(a, b!.v); });
+    join(t);
+    log(atomic_get(a));   // 21
+    atomic_destroy(a);
+}

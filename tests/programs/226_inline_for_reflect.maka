@@ -1,0 +1,10 @@
+data Vec3 { int x; int y; int z; }
+int sum<T>(&T v) {
+    mut int total = 0;
+    inline for (f in fields(v)) { total = total + f.value; }
+    return total;
+}
+unit main() {
+    Vec3 p = { x = 7, y = 8, z = 9 };
+    log(sum(&p));   // 24
+}

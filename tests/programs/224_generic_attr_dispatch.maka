@@ -1,0 +1,8 @@
+attr Show { int score(&_ self) { return 0; } }
+data Point { int x; int y; }
+Point has Show { int score(&Point self) { return self.x + self.y; } }
+int total<T: Show>(&T v) { return v.score(); }
+unit main() {
+    Point p = { x = 3, y = 4 };
+    log(total(&p));   // 7
+}
