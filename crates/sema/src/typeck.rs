@@ -533,7 +533,13 @@ impl<'a> TypeChecker<'a> {
         let mut declared = self.resolve_local_ty(ty);
         let cur_module = self.cur_module.clone();
         let cur_imports = self.cur_imports.clone();
-        check_type_visibility(self.sym, &declared, &cur_module, &cur_imports, span, &mut self.errors);
+        // Skip the visibility check while monomorphizing a generic body: a local
+        // like `Vec<V>` becomes `Vec<own *Box>` where Box is the *caller's* type,
+        // legitimately visible at the call site.  The template was already checked
+        // with the type vars in place (subst empty), which catches real leaks.
+        if self.subst.is_empty() {
+            check_type_visibility(self.sym, &declared, &cur_module, &cur_imports, span, &mut self.errors);
+        }
         self.ban_unit_ptr_in_user_code(&declared, "let binding type", span);
         // If the user declared `string` but the initializer produces an owning
         // value (e.g. `string + string` → `own *char`, `read_line()` → `own *char`),
@@ -5686,7 +5692,12 @@ pub fn unify_with_sym(pat: &HType, actual: &HType, env: &mut std::collections::H
 fn unify_impl(pat: &HType, actual: &HType, env: &mut std::collections::HashMap<String, HType>, sym: Option<&SymTab>) {
     match (pat, actual) {
         (HType::TyVar(n), other) => {
-            env.entry(n.clone()).or_insert_with(|| other.clone());
+            // A bare `null` argument carries no type information: binding the type
+            // var to NullT would wrongly pin it (e.g. `hashmap(null)` -> V=NullT).
+            // Leave it unbound so return-position / other-argument inference wins.
+            if !matches!(other, HType::NullT) {
+                env.entry(n.clone()).or_insert_with(|| other.clone());
+            }
             return;
         }
         _ => {}

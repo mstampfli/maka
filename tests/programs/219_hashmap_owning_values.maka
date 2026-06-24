@@ -1,0 +1,16 @@
+// A HashMap whose values are owning pointers, created with hashmap(null): the
+// null default must not pin V to NullT (inference uses the annotation), and the
+// monomorphized stdlib body using the user type Box must not trip a visibility
+// check.  Dropping the map must free every owning value (LSan).
+import std.{HashMap, hashmap, hm_put, hm_has, hm_get};
+data Box { mut int v; }
+
+unit main() {
+    mut HashMap<own *Box> m = hashmap(null);
+    hm_put(&mut m, "a", alloc Box { v = 1 });
+    hm_put(&mut m, "b", alloc Box { v = 2 });
+    hm_put(&mut m, "a", alloc Box { v = 9 });   // overwrite frees the old value
+    log(m.count);                  // 2
+    log(hm_has(&m, "a"));          // true
+    log(hm_has(&m, "z"));          // false
+}
