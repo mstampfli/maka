@@ -803,14 +803,16 @@ pub String str_replace    (string s, string from, string to) { return __str_repl
 // =====================================================================
 extern "__maka_rt_process_id"    int    __process_id();
 extern "__maka_rt_env_remove"    int    __env_remove(string name);
-extern "__maka_rt_process_run"   int    __process_run(int argc, &string argv);
+extern "__maka_rt_process_run"   int    __process_run(int argc, **string argv);
 extern "__maka_rt_file_copy"     int    __file_copy   (string src, string dst);
 extern "__maka_rt_file_chmod"    int    __file_chmod  (string path, int mode);
 extern "__maka_rt_file_realpath" string __file_realpath(string path);
 extern "__maka_rt_udp_recv_from" int    __udp_recv_from(int fd, *mut unit buf, int cap, &mut int peer_v4, &mut int peer_port);
 pub int    process_id    ()                       { return __process_id(); }
 pub int    env_remove    (string name)            { return __env_remove(name); }
-pub int    process_run   (int argc, &string argv) { return __process_run(argc, argv); }
+// `argv` is a C `char**` (array of strings); spell it `**string` (a pointer to a
+// sequence of `string`s, each a `char*`) so it lowers to `const char**` for the ABI.
+pub int    process_run   (int argc, **string argv) { return __process_run(argc, argv); }
 pub int    file_copy     (string src, string dst) { return __file_copy(src, dst); }
 pub int    file_chmod    (string path, int mode)  { return __file_chmod(path, mode); }
 pub string file_realpath (string path)            { return __file_realpath(path); }

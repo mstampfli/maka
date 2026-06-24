@@ -5142,6 +5142,13 @@ impl<'a> TypeChecker<'a> {
             && matches!(&e.ty, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char)) {
             return HExpr { ty: HType::Str, ..e };
         }
+        // `own *char` → `*string` — the nullable sibling of the view above: a read-only
+        // view that preserves nullability so the buffer pointer can be `== null` checked
+        // (e.g. iterating a HashMap's keys, where empty slots hold a null key).
+        if matches!(target, HType::Ptr { inner, .. } if matches!(inner.as_ref(), HType::Str))
+            && matches!(&e.ty, HType::OwnPtr { inner, .. } if matches!(**inner, HType::Char)) {
+            return HExpr { ty: target.clone(), ..e };
+        }
         // null → raw *T (raw pointers are also nullable)
         if matches!(e.ty, HType::NullT) && matches!(target, HType::RawPtr { .. }) {
             return HExpr { ty: target.clone(), ..e };
@@ -5150,12 +5157,9 @@ impl<'a> TypeChecker<'a> {
         if matches!(e.ty, HType::NullT) && matches!(target, HType::OwnPtr { .. }) {
             return HExpr { ty: target.clone(), ..e };
         }
-        // null → string (a borrowed string is a `const char*`, which may be null -
-        // e.g. read_line on EOF, or empty HashMap key slots).  Lets `s == null`
-        // null-check a string.
-        if matches!(e.ty, HType::NullT) && matches!(target, HType::Str) {
-            return HExpr { ty: HType::Str, ..e };
-        }
+        // A `string` is non-null (it is an array of chars, and arrays are never null).
+        // A nullable string is a pointer: `*string` (borrowed) or `own *string` (owned).
+        // So `null` does NOT coerce to `string`; it coerces to those pointer types above.
         // alloc value (HType::Heap = strict owning) → own *T (nullable owning).
         // This lets `own *T x = alloc T{};` work just like `own &T x = alloc T{};`.
         if let (HType::Heap { inner: ai }, HType::OwnPtr { mutable: _, inner: bi }) = (&e.ty, target) {
@@ -5191,6 +5195,15 @@ impl<'a> TypeChecker<'a> {
         // depends on the borrow's source via the Q-D dep chain).
         if let (HType::Ref { mutable: am, inner: ai }, HType::Ptr { mutable: bm, inner: bi }) = (&e.ty, target) {
             if (*am || !*bm) && type_eq(ai, bi) {
+                return HExpr { ty: target.clone(), ..e };
+            }
+        }
+        // string → *string : a non-null string widens to a nullable borrowed string
+        // (same `char*` representation; the null obligation now rides the `*string`).
+        // The borrowed pointee stays a `const char*` in C (see c_type), so this never
+        // grants write access to the underlying buffer regardless of the `mut` flag.
+        if let (HType::Str, HType::Ptr { inner: bi, .. }) = (&e.ty, target) {
+            if matches!(bi.as_ref(), HType::Str) {
                 return HExpr { ty: target.clone(), ..e };
             }
         }

@@ -5371,6 +5371,17 @@ impl<'a> Cx<'a> {
         }
     }
 
+    // A Maka pointer whose pointee is a fixed array or a string is represented in C
+    // as a single element pointer (the array data / a `char*`).  Unwrap (`p!`) and
+    // explicit deref (`*p`) of such a pointer are therefore no-ops at the C level.
+    // Shared by every (inline and regular) emission site so the two cannot drift.
+    fn ptr_pointee_decays(ptr_ty: &HType) -> bool {
+        matches!(ptr_ty,
+            HType::Ptr { inner, .. } | HType::OwnPtr { inner, .. } | HType::RawPtr { inner, .. }
+            | HType::Ref { inner, .. } | HType::Heap { inner }
+            if matches!(inner.as_ref(), HType::Array { .. } | HType::Str))
+    }
+
     fn c_type(&self, t: &HType) -> String {
         match t {
             HType::Int => "maka_int".into(),
@@ -5393,6 +5404,12 @@ impl<'a> Cx<'a> {
                 if matches!(inner.as_ref(), HType::Dyn { .. }) {
                     return self.c_type(inner);
                 }
+                // A string is an array of chars, so a pointer to one decays to a single
+                // `char*` (a nullable string) - never a `char**`.  `own *string` owns its
+                // buffer (mutable/freeable); a borrowed `*string`/`&string` is read-only.
+                if matches!(inner.as_ref(), HType::Str) {
+                    return if matches!(t, HType::OwnPtr { .. }) { "char*".into() } else { "const char*".into() };
+                }
                 // A pointer to a fixed array (`own *[N]T`, `&[N]T`, ...) decays to a
                 // pointer-to-element in C.  C cannot spell `int (*)[N]` in our prefix
                 // type model, and every observation (`p![i]`, `p!.len`) wants the
@@ -5406,6 +5423,8 @@ impl<'a> Cx<'a> {
                 // heap [*]T is just the Vec struct (no extra indirection)
                 HType::Vec { .. } => self.c_type(inner),
                 HType::Array { elem, .. } => format!("{}*", self.c_type(elem)),
+                // `own &string` is a single owned `char*` (a string is an array of chars).
+                HType::Str => "char*".into(),
                 _ => format!("{}*", self.c_type(inner)),
             },
             HType::Array { len, elem } => {
@@ -7791,6 +7810,7 @@ impl<'a> Cx<'a> {
             }
             HExprKind::Unwrap { expr, skip_check: _ } => {
                 let s = self.emit_inline_expr(inline_f, expr, tag);
+                if Self::ptr_pointee_decays(&expr.ty) { return s; }
                 format!("(*({}))", s)
             }
             HExprKind::AddrOfRef { place, .. } => {
@@ -7798,6 +7818,7 @@ impl<'a> Cx<'a> {
                     return self.emit_inline_place(inline_f, place, tag);
                 }
                 let p = self.emit_inline_place(inline_f, place, tag);
+                if matches!(&place.ty, HType::Array { .. } | HType::Str) { return format!("({})", p); }
                 format!("(&({}))", p)
             }
             HExprKind::Field { base, field } => {
@@ -7812,6 +7833,7 @@ impl<'a> Cx<'a> {
             }
             HExprKind::DerefRef(inner) => {
                 let s = self.emit_inline_expr(inline_f, inner, tag);
+                if Self::ptr_pointee_decays(&inner.ty) { return s; }
                 format!("(*({}))", s)
             }
             HExprKind::HeapAlloc(inner) => {
@@ -8505,11 +8527,9 @@ impl<'a> Cx<'a> {
             }
             HExprKind::Unwrap { expr, skip_check: _ } => {
                 let s = self.emit_expr(f, expr);
-                // `p!` on a pointer-to-fixed-array yields the array base, which the
-                // element-pointer representation already holds - no deref.
-                if matches!(&expr.ty,
-                    HType::Ptr { inner, .. } | HType::OwnPtr { inner, .. } | HType::RawPtr { inner, .. } | HType::Ref { inner, .. } | HType::Heap { inner }
-                    if matches!(inner.as_ref(), HType::Array { .. })) {
+                // `p!` on a pointer-to-fixed-array or pointer-to-string yields the base,
+                // which the element-pointer / char* representation already holds - no deref.
+                if Self::ptr_pointee_decays(&expr.ty) {
                     return s;
                 }
                 format!("(*({}))", s)
@@ -8520,9 +8540,9 @@ impl<'a> Cx<'a> {
                     return self.emit_place(f, place);
                 }
                 let p = self.emit_place(f, place);
-                // Address of a fixed array decays to an element pointer in C - the
-                // pointer-to-array type (`&[N]T`) is represented as `T*`.
-                if matches!(&place.ty, HType::Array { .. }) {
+                // Address of a fixed array or a string decays to an element pointer in C -
+                // `&[N]T` and `&string` are both represented as a single element pointer.
+                if matches!(&place.ty, HType::Array { .. } | HType::Str) {
                     return format!("({})", p);
                 }
                 format!("(&({}))", p)
@@ -9244,6 +9264,11 @@ impl<'a> Cx<'a> {
             HExprKind::DropWrite(inner) => self.emit_expr(f, inner),
             HExprKind::DerefRef(inner) => {
                 let s = self.emit_expr(f, inner);
+                // A pointer-to-array / pointer-to-string is already the element pointer
+                // (char* for strings); dereferencing it is a no-op at the C level.
+                if Self::ptr_pointee_decays(&inner.ty) {
+                    return s;
+                }
                 format!("(*({}))", s)
             }
             HExprKind::HeapAlloc(inner) => {

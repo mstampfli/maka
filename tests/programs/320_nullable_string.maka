@@ -1,0 +1,21 @@
+// A string is non-null; a nullable string is a `*string` - a single nullable
+// char* (never a char**). A non-null string widens into a *string, `== null`
+// checks it, and `!` unwraps it back to a string. Part of the string-is-an-
+// array rework.
+import std.{str_len};
+
+*string first_word(bool present, string w) {
+  if (present) { return w; }
+  return null;
+}
+
+unit main() {
+  *string a = null;
+  if (a == null) { log(1); } else { log(0); }                    // 1
+
+  *string b = first_word(true, "hello");
+  if (b == null) { log(-1); } else { log(str_len(b!) as int); }  // 5
+
+  *string c = first_word(false, "x");
+  if (c == null) { log(-1); } else { log(0); }                   // -1
+}

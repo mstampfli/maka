@@ -1,5 +1,6 @@
 // Iterate a HashMap by walking its internal keys vector, skipping empty/tombstone
-// slots (null keys).  Requires comparing a borrowed string with null.
+// slots (null keys).  A stored key is a nullable `*string`; null-check it, then
+// unwrap with `!` to pass the non-null string on.
 import std.{HashMap, hashmap, hm_put, hm_get};
 unit main() {
     mut HashMap<int> m = hashmap(0);
@@ -9,8 +10,8 @@ unit main() {
     mut int sum = 0;
     mut int i = 0;
     while (i < m.keys.len as int) {
-        string k = m.keys[i];
-        if (k != null) { sum = sum + hm_get(&m, k); }
+        *string k = m.keys[i];
+        if (k != null) { sum = sum + hm_get(&m, k!); }
         i = i + 1;
     }
     log(sum);       // 6

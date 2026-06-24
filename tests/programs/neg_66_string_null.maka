@@ -1,0 +1,6 @@
+// `string` is non-null (it is an array of chars); assigning null requires a
+// nullable pointer type such as `*string`. This must be rejected.
+unit main() {
+  string s = null;
+  log(1);
+}
