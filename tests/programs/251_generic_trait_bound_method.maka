@@ -1,0 +1,18 @@
+attr Doubler {
+    int twice(&_ self);
+}
+int has Doubler {
+    int twice(&int self) { return self * 2; }
+}
+bool has Doubler {
+    int twice(&bool self) { if (self) { return 2; } else { return 0; } }
+}
+int apply<T: Doubler>(&T x) {
+    return twice(x) + 1;
+}
+unit main() {
+    int a = 21;
+    bool b = true;
+    log(apply(&a));    // 43
+    log(apply(&b));    // 3
+}

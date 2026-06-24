@@ -1,0 +1,14 @@
+data Cat { int n; }
+data Dog { int n; }
+logic Speak {
+    int sound(&Cat c) { return c.n + 1; }
+    int sound(&Dog d) { return d.n + 2; }
+}
+unit main() {
+    Cat c = { n = 10 };
+    Dog d = { n = 20 };
+    &dyn Speak a = &c as dyn Speak;
+    &dyn Speak b = &d as dyn Speak;
+    log(Speak.sound(&a));   // 11
+    log(Speak.sound(&b));   // 22
+}

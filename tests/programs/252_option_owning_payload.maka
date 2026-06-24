@@ -1,0 +1,14 @@
+import std.Option;
+data Box { int v; }
+int take_or(Option<own &Box> o, int dflt) {
+    return match (o) {
+        Some{value} value.v,
+        None dflt,
+    };
+}
+unit main() {
+    Option<own &Box> a = Option.Some{ value = alloc Box { v = 77 } };
+    Option<own &Box> b = Option.None;
+    log(take_or(a, 0));    // 77
+    log(take_or(b, 5));    // 5
+}
