@@ -1,0 +1,14 @@
+enum Opt<T> { Some { T val }, None }
+attr HasVal { int getval(&_ self); }
+Opt<int> has HasVal {
+    int getval(&Opt<int> self) {
+        return match (self) { Some { val } val, None 0, };
+    }
+}
+int use_it<T: HasVal>(&T x) { return getval(x); }
+unit main() {
+    Opt<int> o = Opt.Some { val = 42 };
+    log(use_it(&o));   // 42
+    Opt<int> n = Opt.None;
+    log(use_it(&n));   // 0
+}
