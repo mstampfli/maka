@@ -1,0 +1,20 @@
+// Calling a fn-ptr/closure stored in a struct field through a non-local base:
+// an index into a vector of structs, and a nested field chain.  Previously only
+// a bare-local base (a.f(x)) was recognized; ops[i].f(x) and a.b.f(x) were
+// misread as method calls (unknown function).
+import std.{Vec, push};
+data Op { int(int) f; int tag; }
+data Inner { int(int) g; }
+data Outer { Inner inner; }
+int call_at(&Vec<Op> ops, int i, int x) {
+    return ops[i].f(x);                 // closure field call via index base
+}
+unit main() {
+    Vec<Op> ops = [];
+    push(ops, Op { f = int(int x) [] { return x + 1; }, tag = 1 });
+    push(ops, Op { f = int(int x) [] { return x * 10; }, tag = 2 });
+    log(call_at(&ops, 0, 5));           // 6
+    log(call_at(&ops, 1, 5));           // 50
+    Outer o = Outer { inner = Inner { g = int(int x) [] { return x + 100; } } };
+    log(o.inner.g(5));                  // 105  (field-chain base)
+}

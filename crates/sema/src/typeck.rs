@@ -2099,11 +2099,20 @@ impl<'a> TypeChecker<'a> {
         // FnPtr type.  Without this, `recv.field(...)` is misread as a postfix
         // method call `field(recv, ...)` ("unknown function field").
         if let ast::Expr::Field { base, name: fname, span: fsp } = callee {
-            let base_ty = match base.as_ref() {
-                ast::Expr::Ident(bn, _) => self.lookup(bn).map(|id| self.local(id).ty.clone()),
-                _ => None,
-            };
-            if let Some(bty) = base_ty {
+            // Probe the base's type to detect a fn-ptr/closure field call, but
+            // ONLY when the base is a value projection rooted in a real local
+            // (ident / index / field chain bottoming out at a local variable).
+            // This lets `ops[i].cb(x)` and `a.b.cb(x)` work, not just a bare-local
+            // base, while NOT probing namespace bases like `Logic.fn(args)` or
+            // `module.Type.method(...)` (whose root ident is not a local) - those
+            // must fall through to the qualified-call path, and probing them would
+            // raise a spurious unknown-identifier error.
+            let mut root = base.as_ref();
+            while let ast::Expr::Index { base: b, .. } | ast::Expr::Field { base: b, .. } = root {
+                root = b.as_ref();
+            }
+            let probe = matches!(root, ast::Expr::Ident(n, _) if self.lookup(n).is_some());
+            if probe {
                 fn peel_struct(t: &HType) -> Option<StructId> {
                     match t {
                         HType::Struct(id) => Some(*id),
@@ -2112,27 +2121,26 @@ impl<'a> TypeChecker<'a> {
                         _ => None,
                     }
                 }
-                if let Some(sid) = peel_struct(&bty) {
-                    let field = self.sym.struct_info(sid).fields.iter().enumerate()
+                let base_h = self.check_expr(base, None);
+                let field = peel_struct(&base_h.ty).and_then(|sid|
+                    self.sym.struct_info(sid).fields.iter().enumerate()
                         .find(|(_, f)| &f.name == fname)
-                        .map(|(i, f)| (i, f.ty.clone()));
-                    if let Some((fidx, HType::FnPtr { ret, params })) = field {
-                        let base_h = self.check_expr(base, None);
-                        let ret_ty = (*ret).clone();
-                        let hargs: Vec<HExpr> = args.iter().enumerate().map(|(i, a)| {
-                            let want = params.get(i).cloned().unwrap_or(HType::Int);
-                            self.check_expr_coerce(a, &want)
-                        }).collect();
-                        let field_ty = HType::FnPtr { ret: Box::new(ret_ty.clone()), params };
-                        let callee_h = HExpr {
-                            kind: HExprKind::Field { base: Box::new(base_h), field: fidx },
-                            ty: field_ty, span: *fsp,
-                        };
-                        return HExpr {
-                            kind: HExprKind::CallIndirect { callee: Box::new(callee_h), args: hargs },
-                            ty: ret_ty, span: sp,
-                        };
-                    }
+                        .map(|(i, f)| (i, f.ty.clone())));
+                if let Some((fidx, HType::FnPtr { ret, params })) = field {
+                    let ret_ty = (*ret).clone();
+                    let hargs: Vec<HExpr> = args.iter().enumerate().map(|(i, a)| {
+                        let want = params.get(i).cloned().unwrap_or(HType::Int);
+                        self.check_expr_coerce(a, &want)
+                    }).collect();
+                    let field_ty = HType::FnPtr { ret: Box::new(ret_ty.clone()), params };
+                    let callee_h = HExpr {
+                        kind: HExprKind::Field { base: Box::new(base_h), field: fidx },
+                        ty: field_ty, span: *fsp,
+                    };
+                    return HExpr {
+                        kind: HExprKind::CallIndirect { callee: Box::new(callee_h), args: hargs },
+                        ty: ret_ty, span: sp,
+                    };
                 }
             }
         }
