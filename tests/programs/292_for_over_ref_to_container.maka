@@ -1,0 +1,41 @@
+// Iterating a reference to a container: `for (T x in &vec)`, `&array`, `&slice`.
+// Regression: the for-loop codegen had no case for a reference/pointer to a
+// container, so it fell through to the scalar path and emitted a loop bound of
+// 0 (the loop never ran) while mis-indexing the pointer itself, producing
+// invalid C like "incompatible types ... from type Vec_Box".
+data Inner { int val; }
+data Box { own &Inner p; }
+Box mk(int v) { return Box { p = alloc Inner { val = v } }; }
+
+int sum_slice(&[]int s) {
+  mut int t = 0;
+  for (int x in s) { t = t + x; }
+  return t;
+}
+
+unit main() {
+  // Reference to a Vec of owning structs (non-consuming view; dropped once).
+  Vec<Box> boxes = [];
+  boxes.push(mk(1));
+  boxes.push(mk(2));
+  boxes.push(mk(3));
+  mut int btotal = 0;
+  for (Box b in &boxes) { btotal = btotal + b.p.val; }
+  log(btotal);
+
+  // Reference to a Vec of scalars.
+  Vec<int> v = [4, 5, 6];
+  mut int vtotal = 0;
+  for (int x in &v) { vtotal = vtotal + x; }
+  log(vtotal);
+
+  // Reference to a fixed array.
+  [3]int a = [10, 20, 30];
+  mut int atotal = 0;
+  for (int x in &a) { atotal = atotal + x; }
+  log(atotal);
+
+  // Reference to a slice (through a parameter).
+  []int sl = a;
+  log(sum_slice(&sl));
+}

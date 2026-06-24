@@ -7370,6 +7370,32 @@ impl<'a> Cx<'a> {
                         self.wl(&format!("{} __src = {};", src_c_ty, src_c));
                         ("__src.len".to_string(), "__src.data".to_string())
                     }
+                    // Iterating a reference/pointer to a container (`for (T x in &vec)`):
+                    // deref once to the container, then index its backing buffer.
+                    // Without this the loop falls through to the scalar path, which
+                    // emits a length of 0 and mis-indexes the pointer itself.
+                    HType::Ref { inner, .. } | HType::Ptr { inner, .. }
+                    | HType::OwnPtr { inner, .. } | HType::RawPtr { inner, .. }
+                        if matches!(inner.as_ref(), HType::Vec { .. } | HType::Slice { .. }) =>
+                    {
+                        let inner_c_ty = self.c_type(inner);
+                        self.wl(&format!("{} __src = *({});", inner_c_ty, src_c));
+                        if matches!(inner.as_ref(), HType::Slice { .. }) {
+                            ("__src.len".to_string(), "__src.ptr".to_string())
+                        } else {
+                            ("__src.len".to_string(), "__src.data".to_string())
+                        }
+                    }
+                    HType::Ref { inner, .. } | HType::Ptr { inner, .. }
+                    | HType::OwnPtr { inner, .. } | HType::RawPtr { inner, .. }
+                        if matches!(inner.as_ref(), HType::Array { .. }) =>
+                    {
+                        // A reference to a fixed array emits the bare array name,
+                        // which decays to a pointer; index it directly.
+                        if let HType::Array { len, .. } = inner.as_ref() {
+                            (format!("(maka_int){}", len), src_c.clone())
+                        } else { unreachable!() }
+                    }
                     _ => {
                         ("0".to_string(), src_c.clone())
                     }
