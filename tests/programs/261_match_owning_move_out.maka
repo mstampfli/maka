@@ -1,0 +1,34 @@
+// Moving an owning payload OUT of a by-value owning match scrutinee (returning
+// the bound payload, or binding it to an owning local) must transfer ownership
+// to the result and NOT also free it via the scrutinee's drop.  Previously this
+// double-freed (use-after-free).  Non-escaping reads still free exactly once via
+// the scrutinee drop.  (Leak/UAF-freedom verified out of band with ASan/LSan.)
+data Box { int v; }
+enum Holder { Full { own &Box b }, Empty }
+
+own *Box take(Holder h) {
+    return match (h) {
+        Full{b} b,        // moves the owning payload out -> caller owns it
+        Empty null,
+    };
+}
+
+int peek(Holder h) {
+    return match (h) {
+        Full{b} b.v,      // reads only -> scrutinee drop frees it
+        Empty 0,
+    };
+}
+
+unit main() {
+    Holder h1 = Holder.Full{ b = alloc Box { v = 42 } };
+    own *Box g = take(h1);
+    if (g != null) { log(g!.v); }     // 42  (g drops here, freed once)
+
+    Holder h2 = Holder.Full{ b = alloc Box { v = 7 } };
+    log(peek(h2));                     // 7   (freed once via scrutinee drop)
+
+    Holder e = Holder.Empty;
+    own *Box none = take(e);
+    if (none == null) { log(0); }     // 0
+}

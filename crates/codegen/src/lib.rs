@@ -9184,6 +9184,9 @@ impl<'a> Cx<'a> {
                 body.push_str(&emitted);
             }
             if let Some(v) = &a.value {
+                // Null any owning payload field this arm moves out, so the
+                // scrutinee's drop does not double-free the escaped box.
+                body.push_str(&self.match_scrut_field_nulls(f, scrutinee, a));
                 let vs = self.emit_expr(f, v);
                 if needs_value { body.push_str(&format!("__r = ({}); ", vs)); }
                 else { body.push_str(&format!("(void)({}); ", vs)); }
@@ -9275,6 +9278,10 @@ impl<'a> Cx<'a> {
                 body.push_str(&emitted);
             }
             if let Some(v) = &a.value {
+                // Null any owning payload field this arm moves out (only once the
+                // arm and its guard have committed), so the scrutinee's drop does
+                // not double-free the escaped box.
+                body.push_str(&self.match_scrut_field_nulls(f, scrutinee, a));
                 let vs = self.emit_expr(f, v);
                 if needs_value { body.push_str(&format!("__r = ({}); ", vs)); }
                 else { body.push_str(&format!("(void)({}); ", vs)); }
@@ -9380,6 +9387,59 @@ impl<'a> Cx<'a> {
             }
             _ => String::new(),
         }
+    }
+
+    /// True if evaluating `value` yields (moves out) the owning local `target`
+    /// as part of its result value - i.e. the binding's ownership transfers into
+    /// the match result (returned, stored, moved into an aggregate, or passed to
+    /// a consuming call).  A bare read through the binding (`b!.field`) is NOT a
+    /// move.  Used to decide whether a matched owning payload escapes.
+    fn value_moves_binding(&self, value: &HExpr, target: LocalId) -> bool {
+        match &value.kind {
+            HExprKind::Local(id) => *id == target,
+            HExprKind::Transfer(inner)
+            | HExprKind::Cast { expr: inner, .. }
+            | HExprKind::CheckedCast { expr: inner, .. }
+            | HExprKind::DropWrite(inner)
+            | HExprKind::HeapAlloc(inner) => self.value_moves_binding(inner, target),
+            HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } =>
+                fields.iter().any(|(_, fe)| self.value_moves_binding(fe, target)),
+            HExprKind::ArrayLit(es) => es.iter().any(|e| self.value_moves_binding(e, target)),
+            HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } =>
+                args.iter().any(|a| self.value_moves_binding(a, target)),
+            HExprKind::Match { arms, .. } =>
+                arms.iter().any(|a| a.value.as_ref().is_some_and(|v| self.value_moves_binding(v, target))),
+            _ => false,
+        }
+    }
+
+    /// When matching an owning enum VALUE held in a place (a Local), an arm that
+    /// moves an owning *pointer* payload out of the scrutinee (yields it as the
+    /// result) must null that field in the scrutinee place, so the scrutinee's
+    /// later drop glue does not double-free the now-escaped box.  Returns the C
+    /// statements to splice after the arm's bindings (empty when none apply).
+    fn match_scrut_field_nulls(&self, f: &HFunc, scrutinee: &HExpr, arm: &HMatchArm) -> String {
+        let place = match &scrutinee.kind {
+            HExprKind::Local(id) if matches!(scrutinee.ty, HType::Enum(_)) => {
+                let li = &f.locals[id.0 as usize];
+                local_name(*id, &li.name)
+            }
+            _ => return String::new(),
+        };
+        let HArmKind::Variant { enum_id, variant, bindings, .. } = &arm.kind else { return String::new(); };
+        let info = self.sym.enum_info(*enum_id);
+        let v = &info.variants[*variant];
+        let mut out = String::new();
+        for (i, b) in bindings.iter().enumerate() {
+            let Some(local) = b else { continue; };
+            let li = &f.locals[local.0 as usize];
+            if !matches!(li.ty, HType::OwnPtr { .. } | HType::Heap { .. }) { continue; }
+            let moved = arm.value.as_ref().is_some_and(|val| self.value_moves_binding(val, *local));
+            if moved {
+                out.push_str(&format!("{}.payload.{}.{} = NULL; ", place, c_ident(&v.name), c_ident(&v.fields[i].name)));
+            }
+        }
+        out
     }
 
     fn emit_to_dyn(&mut self, f: &HFunc, expr: &HExpr, trait_name: &str, struct_id: StructId) -> String {
