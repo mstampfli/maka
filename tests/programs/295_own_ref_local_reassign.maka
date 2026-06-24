@@ -1,0 +1,29 @@
+// Reassigning an `own &T` (non-null owning heap) local rebinds the owning
+// pointer: the old box must be freed and the new one taken over. Regression:
+// codegen treated any assignment to a Heap-typed local as an in-place pointee
+// write (`*n = rhs`), which both produced invalid C (assigning a `T*` value
+// into a `T` slot) and leaked the previous allocation. It must free the old
+// box, assign the new pointer, and null a moved-from source.
+data Node { int v; }
+
+int rebind_fresh() {
+  // Reassign to a fresh allocation each iteration; the old box must be freed.
+  mut own &Node n = alloc Node { v = 0 };
+  for (int i in 0..100) {
+    n = alloc Node { v = i };
+  }
+  return n.v;
+}
+
+int rebind_move() {
+  // Reassign from another owning local: old `a` freed, `b` moved into `a`.
+  mut own &Node a = alloc Node { v = 1 };
+  own &Node b = alloc Node { v = 2 };
+  a = b;
+  return a.v;
+}
+
+unit main() {
+  log(rebind_fresh());   // 99
+  log(rebind_move());    // 2
+}

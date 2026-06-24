@@ -8090,14 +8090,15 @@ impl<'a> Cx<'a> {
         let lhs = self.emit_place(f, place);
         let rhs = self.emit_expr(f, value);
 
-        // Heap reassignment: replace value in slot (§6.6).
+        // Reassigning an `own &T` (Heap) local rebinds the owning pointer: the
+        // RHS is itself an owning pointer (the place type is `Heap{T}`, so the
+        // value coerces to it), so this falls through to the general
+        // drop-on-reassign path below (free the old box, assign the new pointer,
+        // null the moved-from source).  Treating it as an in-place pointee write
+        // (`*n = rhs`) both mismatches types (`T` slot vs `T*` value) and leaks
+        // the previous allocation.
         if let HExprKind::Local(id) = place.kind {
             let lty = &f.locals[id.0 as usize].ty;
-            if matches!(lty, HType::Heap { .. }) {
-                // *p = newval;
-                self.wl(&format!("*{} = {};", lhs, rhs));
-                return;
-            }
             // Write through a `&mut T` local (e.g. a by-mut-ref captured binding inside a closure).
             if matches!(lty, HType::Ref { mutable: true, .. }) {
                 self.wl(&format!("*{} {} {};", lhs, assign_op_c(op), rhs));
