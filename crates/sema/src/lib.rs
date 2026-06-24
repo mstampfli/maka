@@ -592,7 +592,7 @@ fn check_inline_propagate_compat(sym: &SymTab, funcs: &[HFunc], errors: &mut Vec
                 walk_expr(sym, src, ret, funcs, errors);
                 walk_block(sym, body, ret, funcs, errors);
             }
-            HStmt::Break(_) | HStmt::Continue(_) => {}
+            HStmt::Break { .. } | HStmt::Continue { .. } => {}
         }
     }
     fn walk_expr(sym: &SymTab, e: &HExpr, ret: &HType, funcs: &[HFunc], errors: &mut Vec<SemaError>) {
@@ -812,7 +812,7 @@ fn collect_inline_callees_stmt(sym: &SymTab, s: &HStmt, out: &mut Vec<u32>) {
             collect_inline_callees_expr(sym, src, out);
             collect_inline_callees(sym, body, out);
         }
-        HStmt::Break(_) | HStmt::Continue(_) => {}
+        HStmt::Break { .. } | HStmt::Continue { .. } => {}
     }
 }
 fn collect_inline_callees_expr(sym: &SymTab, e: &HExpr, out: &mut Vec<u32>) {
@@ -877,7 +877,7 @@ fn rewrite_placeholders(f: &mut HFunc, mapping: &[u32]) {
             }
             HStmt::While { cond, body, .. } => { rw_expr(cond, mapping); rw_block(body, mapping); }
             HStmt::Block(b) | HStmt::Unsafe(b, _) => rw_block(b, mapping),
-            HStmt::Break(_) | HStmt::Continue(_) => {}
+            HStmt::Break { .. } | HStmt::Continue { .. } => {}
             HStmt::ForC { init, cond, step, body, .. } => {
                 rw_stmt(init, mapping);
                 rw_expr(cond, mapping);
