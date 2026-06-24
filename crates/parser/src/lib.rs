@@ -1447,7 +1447,18 @@ impl Parser {
                         if depth <= 0 { break; }
                     }
                     if depth == 0 {
-                        return Some(q);
+                        p = q;
+                    }
+                }
+                // Associated-type path suffix: `Base::Assoc` (possibly chained,
+                // e.g. `T::A::Slot`).  Needed so a local declared with an
+                // associated type (`T::Out v = ...;`) is recognised as a decl
+                // and not mis-skimmed as an expression statement.
+                while matches!(kinds.get(p), Some(TokKind::ColonColon)) {
+                    if let Some(TokKind::Ident(_)) = kinds.get(p + 1) {
+                        p += 2;
+                    } else {
+                        break;
                     }
                 }
                 Some(p)

@@ -1,0 +1,32 @@
+// Associated types in more positions: a local declared with `T::Assoc`, and a
+// single generic instantiated against two different impls so each resolves its
+// own associated type. Regression: `T::Out v = ...` failed to parse (the decl
+// was mis-skimmed as an expression statement), and even once parsed the local's
+// declared type stayed an unresolved `int::Out` placeholder at instantiation.
+attr Producer { type Out; Out produce(&_ self); }
+int has Producer { type Out = int; int produce(&int self) { return self * 3; } }
+
+// Local binding whose declared type is an associated type.
+T::Out run<T: Producer>(&T x) {
+  T::Out v = produce(x);
+  return v + 1;
+}
+
+data Pair { int a; int b; }
+attr Maker { type Item; Item make(&_ self); }
+int has Maker { type Item = int; int make(&int self) { return self + 1; } }
+bool has Maker { type Item = Pair; Pair make(&bool self) { return Pair { a = 7, b = 8 }; } }
+
+// One generic, two impls -> two distinct associated types resolved per call.
+T::Item build<T: Maker>(&T x) { return make(x); }
+
+unit main() {
+  int s = 10;
+  log(run(&s));
+  int n = 41;
+  log(build(&n));
+  bool b = true;
+  Pair p = build(&b);
+  log(p.a);
+  log(p.b);
+}

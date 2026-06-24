@@ -308,7 +308,9 @@ impl<'a> TypeChecker<'a> {
     fn resolve_local_ty(&mut self, t: &ast::Type) -> HType {
         let tps = self.cur_type_params.clone();
         let raw = resolve_type_in(self.sym, t, &tps, &mut self.errors);
-        concretize_generic_patterns(&raw.subst(&self.subst), self.sym)
+        // Resolve `T::Assoc` after substitution so a local declared with an
+        // associated type binds the impl's concrete type at instantiation.
+        crate::resolve::resolve_assoc_types_in(self.sym, &concretize_generic_patterns(&raw.subst(&self.subst), self.sym))
     }
 
     pub fn with_subst(mut self, subst: std::collections::HashMap<String, HType>) -> Self {
