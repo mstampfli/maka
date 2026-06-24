@@ -1979,8 +1979,15 @@ impl<'a> TypeChecker<'a> {
                 },
                 _ => return self.try_index_overload_or_err(bh, ih_probe, sp),
             },
+            // Indexing a nullable `*T` would dereference it; like field access,
+            // require an explicit `!` first (`p![i]`), which proves it non-null.
+            // A `*T` is always nullable in the type system, so a bare `p[i]` can
+            // never be proven safe here.
             HType::Ptr { inner, .. } => match inner.as_ref() {
-                HType::Vec { elem } | HType::Array { elem, .. } | HType::Slice { elem, .. } => (**elem).clone(),
+                HType::Vec { elem } | HType::Array { elem, .. } | HType::Slice { elem, .. } => {
+                    self.err("dereference a `*T` with `!` before indexing (`p![i]`)", sp);
+                    (**elem).clone()
+                }
                 _ => return self.try_index_overload_or_err(bh, ih_probe, sp),
             },
             // A borrow of an array/vector/slice (`&[N]T`, `&[*]T`, `&[]T`) indexes

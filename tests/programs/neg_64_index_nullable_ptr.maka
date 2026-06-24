@@ -1,0 +1,6 @@
+// Indexing a bare nullable pointer to a Vec/array dereferences it without proof
+// and crashed on null. It must be rejected; the user dereferences first (p![i]).
+unit main() {
+  *Vec<int> p = null;
+  log(p[0]);
+}

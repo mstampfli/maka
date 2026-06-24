@@ -1,0 +1,14 @@
+// Indexing must go through an explicit deref for a nullable pointer: p![i]
+// (the ! proves non-null), not a bare p[i] (rejected - see neg test 64, which
+// was a null-deref crash). A &Vec / array / Vec place index is unchanged.
+unit main() {
+  mut Vec<int> v = [];
+  v.push(10); v.push(20); v.push(30);
+  *Vec<int> p = &mut v;        // known non-null
+  log(p![0]);                  // 10
+  log(p![2]);                  // 30
+
+  mut [3]int a = [1, 2, 3];
+  *[3]int ap = &mut a;
+  log(ap![1]);                 // 2
+}
