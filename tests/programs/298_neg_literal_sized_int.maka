@@ -1,0 +1,28 @@
+// A negated integer literal must adapt to a sized-int / float target the same
+// way a bare literal does. Regression: `i32 x = -30;` was rejected ("expected
+// i32, got int") because unary negation did not propagate the expected type to
+// the inner literal, so `-30` stayed `int` and failed to coerce, while the
+// plain literal `i32 x = 30;` worked.
+i32 negate(i32 v) { return -v; }
+
+unit main() {
+  // let-binding init across widths.
+  i32 a = -30;
+  i64 b = -5000000000;
+  i16 c = -1000;
+  log(a as int);       // -30
+  log(b as int);       // -5000000000
+  log(c as int);       // -1000
+
+  // negated literal as a function argument.
+  log(negate(-7) as int);   // 7
+
+  // reassignment of a sized-int local with a negated literal.
+  mut i32 d = 0;
+  d = -42;
+  log(d as int);       // -42
+
+  // negated float literal to a sized float.
+  f32 f = -2.5;
+  log((f * 2.0) as int);    // -5
+}

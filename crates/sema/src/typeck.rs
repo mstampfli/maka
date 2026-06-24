@@ -868,7 +868,7 @@ impl<'a> TypeChecker<'a> {
             ast::Expr::Lit(l, sp) => self.check_lit(l, expected, *sp),
             ast::Expr::Ident(n, sp) => self.check_ident(n, *sp),
             ast::Expr::Bin { op, lhs, rhs, span } => self.check_bin(*op, lhs, rhs, *span),
-            ast::Expr::Un { op, expr, span } => self.check_un(*op, expr, *span),
+            ast::Expr::Un { op, expr, span } => self.check_un(*op, expr, *span, expected),
             ast::Expr::Unwrap { expr, span } => self.check_unwrap(expr, *span),
             ast::Expr::Ref { mutness, expr, span } => self.check_ref(matches!(mutness, Mutness::Mut), expr, *span, expected),
             ast::Expr::Field { base, name, span } => self.check_field(base, name, expected, *span),
@@ -1565,10 +1565,14 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn check_un(&mut self, op: ast::UnOp, e: &ast::Expr, sp: Span) -> HExpr {
+    fn check_un(&mut self, op: ast::UnOp, e: &ast::Expr, sp: Span, expected: Option<&HType>) -> HExpr {
         match op {
             ast::UnOp::Neg => {
-                let h = self.check_expr(e, None);
+                // Propagate a numeric expected type so a negated literal (`-30`)
+                // adapts to a sized-int / float target the same way a bare
+                // literal does; otherwise it would stay `int` and fail to coerce.
+                let inner_expected = expected.filter(|&t| self.is_numeric(t));
+                let h = self.check_expr(e, inner_expected);
                 if !self.is_numeric(&h.ty) {
                     // Try Neg overload.
                     if let Some(hir) = self.try_unary_overload("Neg", "neg", &h, sp) {
