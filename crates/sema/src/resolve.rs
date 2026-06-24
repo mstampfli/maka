@@ -197,6 +197,28 @@ pub fn underlying_struct_key(sym: &SymTab, ty: &HType) -> Option<String> {
 /// to cross-module function calls.
 ///
 /// `from_imports` is the current file's `(module_path, name)` import list.
+/// A top-level user function whose name collides with a C standard-library
+/// symbol would produce a conflicting C declaration (the generated code links
+/// libc/libm).  Rename the emitted C symbol (not the Maka name) for the common
+/// clashes so e.g. `unit div(...)` compiles.  Calls go through the same c_name,
+/// so dispatch stays consistent.
+pub fn mangle_c_stdlib_clash(name: &str) -> String {
+    const CLASH: &[&str] = &[
+        "div", "ldiv", "lldiv", "abs", "labs", "llabs", "exit", "_exit", "abort",
+        "atexit", "system", "getenv", "setenv", "atoi", "atol", "atoll", "atof",
+        "strtol", "strtoul", "strtod", "rand", "srand", "qsort", "bsearch",
+        "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset",
+        "memcmp", "strcmp", "strncmp", "strcpy", "strncpy", "strcat", "strlen",
+        "strchr", "strstr", "printf", "fprintf", "sprintf", "snprintf", "scanf",
+        "sscanf", "puts", "putchar", "getchar", "fopen", "fclose", "fread",
+        "fwrite", "open", "close", "read", "write", "time", "clock", "sleep",
+        "pow", "sqrt", "cbrt", "sin", "cos", "tan", "exp", "floor", "ceil",
+        "round", "trunc", "fabs", "fmod", "remainder", "hypot", "gamma", "y0",
+        "y1", "j0", "j1", "index", "rindex", "random", "drand48",
+    ];
+    if CLASH.contains(&name) { format!("{}__mkfn", name) } else { name.to_string() }
+}
+
 /// For an imported name to satisfy a type reference, both the path and the
 /// name (the type's name) must match.  The instantiation-mangled name of a
 /// generic enum (e.g. `Option__int`) is unwrapped to its template name
@@ -851,7 +873,7 @@ impl SymTab {
                         name: f.name.clone(),
                         param_tys, param_names, ret,
                         is_extern: false,
-                        c_name: f.name.clone(),
+                        c_name: mangle_c_stdlib_clash(&f.name),
                         logic: None,
                         type_params: f.type_params.clone(),
                         is_inline: f.is_inline,
