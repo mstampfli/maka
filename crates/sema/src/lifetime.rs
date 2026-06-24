@@ -1220,14 +1220,18 @@ fn hoist_block_temps(sym: &SymTab, b: &mut HBlock, locals: &mut Vec<LocalInfo>) 
             _ => {}
         }
         // Hoist owning temporaries out of this statement's once-evaluated
-        // expression positions.  (Loop/if conditions are re-evaluated, so they
-        // are left alone.)
+        // expression positions.  A LOOP condition (while/for) is re-evaluated, so
+        // hoisting it before the loop would be wrong - left alone.  An IF condition
+        // is evaluated exactly once, so its temporaries ARE safe to hoist before the
+        // if (needed for, e.g., `if (a == make_temp())`, where the auto-borrowed
+        // operand temp must become a real lvalue).
         let mut pre: Vec<HStmt> = Vec::new();
         match &mut s {
             HStmt::ExprStmt(e) => {
                 hoist_in_expr(sym, e, locals, &mut pre);
                 if is_owning_temp(sym, e) { hoist_one(e, locals, &mut pre); }
             }
+            HStmt::If { cond, .. } => hoist_in_expr(sym, cond, locals, &mut pre),
             HStmt::Let { init, .. } => hoist_in_expr(sym, init, locals, &mut pre),
             HStmt::Assign { place, value, .. } => {
                 hoist_in_expr(sym, place, locals, &mut pre);

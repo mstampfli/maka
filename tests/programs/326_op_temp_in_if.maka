@@ -1,0 +1,14 @@
+// An operator whose operand is a temporary, used in an if-condition: the
+// auto-borrowed operand temp must be hoisted to a real lvalue (an if-condition
+// is evaluated once, so hoisting it before the if is sound). Was emitting
+// invalid C (`&<rvalue>`). Must compile and be leak-clean.
+import std.{String, StringOps, Add, Eq, string_from};
+unit main() {
+  mut int hits = 0;
+  for (int i in 0..500) {
+    String s = string_from("ab");
+    if (s == string_from("ab")) { hits = hits + 1; }            // temp operand in if-cond
+    if (string_from("x") == string_from("y")) { hits = hits + 1; }  // both temps
+  }
+  log(hits);                                                     // 500
+}
