@@ -357,6 +357,29 @@ pub fn resolve_signature(
 }
 
 /// Like resolve_type but treats identifiers in `type_params` as TyVars.
+/// Reject a fixed-size array as the direct element type of a growable/sliced
+/// container.  A C array is not an assignable value, so `Vec`/slice storage
+/// cannot copy elements into its buffer (push, index-write) without array-value
+/// support the backend does not have; admitting it silently produced invalid C
+/// (an undefined element typedef and `data[i] = ({...})`).  Wrapping the array
+/// in a `data` type, or using a nested `Vec`, both work.
+fn reject_array_container_elem(
+    elem: &HType,
+    container: &str,
+    span: maka_lexer::Span,
+    errors: &mut Vec<SemaError>,
+) {
+    if matches!(elem, HType::Array { .. }) {
+        errors.push(SemaError {
+            msg: format!(
+                "{} elements cannot be fixed-size arrays (a C array is not an assignable value); wrap the array in a data type or use a nested Vec",
+                container
+            ),
+            span,
+        });
+    }
+}
+
 pub fn resolve_type_in(
     sym: &SymTab,
     t: &ast::Type,
@@ -447,13 +470,15 @@ pub fn resolve_type_in(
             let elem = resolve_type_in(sym, elem, type_params, errors);
             HType::Array { len: *len, elem: Box::new(elem) }
         }
-        ast::Type::Slice { mutness, elem, .. } => {
+        ast::Type::Slice { mutness, elem, span } => {
             let mutable = matches!(mutness, Mutness::Mut);
             let elem = resolve_type_in(sym, elem, type_params, errors);
+            reject_array_container_elem(&elem, "slice", *span, errors);
             HType::Slice { mutable, elem: Box::new(elem) }
         }
-        ast::Type::Vec { elem, .. } => {
+        ast::Type::Vec { elem, span } => {
             let elem = resolve_type_in(sym, elem, type_params, errors);
+            reject_array_container_elem(&elem, "Vec", *span, errors);
             HType::Vec { elem: Box::new(elem) }
         }
         ast::Type::Dyn { traits, .. } => {
@@ -494,7 +519,9 @@ pub fn resolve_type_in(
             // Built-in growable array `Vec<T>` - the heap `{data,len,cap}` buffer,
             // owned by value and auto-freed (same representation as `[*]T`).
             if name == "Vec" && args.len() == 1 {
-                return HType::Vec { elem: Box::new(resolve_type_in(sym, &args[0], type_params, errors)) };
+                let elem = resolve_type_in(sym, &args[0], type_params, errors);
+                reject_array_container_elem(&elem, "Vec", *span, errors);
+                return HType::Vec { elem: Box::new(elem) };
             }
             let resolved_args: Vec<HType> = args.iter().map(|a| resolve_type_in(sym, a, type_params, errors)).collect();
             let key = resolved_args.iter().map(|t| t.key()).collect::<Vec<_>>().join(",");

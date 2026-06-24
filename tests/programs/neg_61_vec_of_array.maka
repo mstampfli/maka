@@ -1,0 +1,10 @@
+// A fixed-size array cannot be the direct element of a Vec: a C array is not an
+// assignable value, so the container could never copy elements into its buffer.
+// This must be rejected at sema with a clear diagnostic rather than silently
+// emitting invalid C (an undefined element typedef and an array assignment).
+// The fix is to wrap the array in a data type, or use a nested Vec.
+unit main() {
+  Vec<[3]int> rows = [];
+  rows.push([1, 2, 3]);
+  log(rows.len as int);
+}
