@@ -682,7 +682,6 @@ impl<'a> TypeChecker<'a> {
         }
         let value_h = self.check_expr_coerce(value, &pty);
 
-        // For compound assignment, the place type must be numeric (basic check).
         let hop = match op {
             ast::AssignOp::Assign => HAssignOp::Assign,
             ast::AssignOp::AddAssign => HAssignOp::Add,
@@ -691,6 +690,24 @@ impl<'a> TypeChecker<'a> {
             ast::AssignOp::DivAssign => HAssignOp::Div,
             ast::AssignOp::ModAssign => HAssignOp::Mod,
         };
+        // Compound assignment on a non-numeric place (e.g. `s += other` where s is
+        // a String): a raw `place += value` would emit invalid C (`struct + struct`),
+        // so desugar `p op= v` to `p = p op v`, routing through the operator overload
+        // (Add/Sub/...).  Numeric places keep the direct compound op.
+        if !matches!(hop, HAssignOp::Assign) && !self.is_numeric(&pty) {
+            let bin_op = match op {
+                ast::AssignOp::AddAssign => ast::BinOp::Add,
+                ast::AssignOp::SubAssign => ast::BinOp::Sub,
+                ast::AssignOp::MulAssign => ast::BinOp::Mul,
+                ast::AssignOp::DivAssign => ast::BinOp::Div,
+                ast::AssignOp::ModAssign => ast::BinOp::Mod,
+                ast::AssignOp::Assign => unreachable!(),
+            };
+            if let Some(combined) = self.try_op_overload(bin_op, &place_h, &value_h, span) {
+                return HStmt::Assign { op: HAssignOp::Assign, place: place_h, value: combined, span };
+            }
+            self.err("compound assignment on a non-numeric type needs the matching operator overload (e.g. an `Add` impl)", span);
+        }
         HStmt::Assign { op: hop, place: place_h, value: value_h, span }
     }
 

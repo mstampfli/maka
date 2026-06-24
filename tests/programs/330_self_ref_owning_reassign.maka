@@ -1,0 +1,17 @@
+// Reassigning an owning value from an expression that BORROWS the old value
+// (e.g. `s = s + x`, or `s += x`, where `+` takes `&self`) must free the old
+// value exactly once: the new value is computed into a temp (reading the old
+// value), then the old value is dropped, then the slot is assigned. Dropping
+// before the temp would be use-after-free; not dropping at all leaks. Move-out
+// reassigns (the RHS consumes the old value) still must NOT drop. Leak-clean.
+import std.{String, StringOps, Add, string_from};
+unit main() {
+  mut int t = 0;
+  for (int i in 0..1000) {
+    mut String s = string_from("a");
+    s = s + string_from("bc");     // self-ref reassign, borrowing +
+    s += string_from("de");        // compound assign, borrowing +
+    t = t + s.length();            // 1 + 2 + 2 = 5
+  }
+  log(t);                          // 5000
+}

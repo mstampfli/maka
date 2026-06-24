@@ -8211,12 +8211,25 @@ impl<'a> Cx<'a> {
             return;
         }
         // Drop-on-reassign: free the previous owning value before overwriting it.
-        // Skipped (to avoid a double free) when the RHS reads the same root - it
-        // may be moving out of, or deriving the new value from, the old one.
+        // Three cases for a self-referential RHS (it mentions the place's root):
+        //   - RHS is independent of the place        -> drop old, then assign.
+        //   - RHS uses the place only via a borrow    -> the old value is still live
+        //     (`s = s + x`, `+` takes `&self`): compute the new value into a temp,
+        //     then drop the old value, then assign (free it exactly once).
+        //   - RHS reads/moves the place by value      -> it derives the new value FROM
+        //     the old one (`node = node.next`, `p.a = p.b`): leave the old value alone
+        //     (dropping it would double-free the moved-out part).
         if matches!(op, HAssignOp::Assign) && self.drop_ty_owns(&place.ty) {
             if let Some(root) = place_root_local(place) {
                 if !expr_contains_local(value, root) {
                     self.emit_field_drop(&lhs, &place.ty, 0);
+                } else if !local_used_by_value(value, root) {
+                    let ty = self.c_type(&place.ty);
+                    self.wl(&format!("{{ {} __reassign = {};", ty, rhs));
+                    self.emit_field_drop(&lhs, &place.ty, 0);
+                    self.wl(&format!("{} = __reassign; }}", lhs));
+                    self.emit_move_out_null(f, value);
+                    return;
                 }
             }
         }
@@ -9864,6 +9877,50 @@ fn place_root_local(e: &HExpr) -> Option<u32> {
 /// Does `e` reference local `id` anywhere?  Used as the drop-on-reassign guard:
 /// if the RHS reads the slot being overwritten, dropping the old value first
 /// could free something the RHS still needs (or already moved).
+/// True if `id` is used by VALUE (read or moved) anywhere in `e` - i.e. in any
+/// position OTHER than purely as the target of a borrow (`&id`, `&id.f`, `&id[k]`).
+/// Drop-on-reassign uses this: if an assignment's RHS uses the place's local only
+/// via a borrow, the old value is still live and must be dropped after the new
+/// value is computed; if it reads/moves the local by value, the new value is
+/// derived from the old one and the old must NOT be dropped.
+fn local_used_by_value(e: &HExpr, id: u32) -> bool {
+    match &e.kind {
+        HExprKind::Local(l) => l.0 == id,
+        HExprKind::AddrOfRef { place, .. } => addrof_place_value_use(place, id),
+        HExprKind::Field { base, .. } => local_used_by_value(base, id),
+        HExprKind::Index { base, idx } => local_used_by_value(base, id) || local_used_by_value(idx, id),
+        HExprKind::Unwrap { expr, .. } | HExprKind::Un { expr, .. }
+        | HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. }
+        | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
+        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr)
+        | HExprKind::SliceLen(expr) | HExprKind::EnumTag(expr)
+        | HExprKind::ArrayToSlice { base: expr, .. } => local_used_by_value(expr, id),
+        HExprKind::Bin { lhs, rhs, .. } => local_used_by_value(lhs, id) || local_used_by_value(rhs, id),
+        HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } => args.iter().any(|a| local_used_by_value(a, id)),
+        HExprKind::CallIndirect { callee, args } => local_used_by_value(callee, id) || args.iter().any(|a| local_used_by_value(a, id)),
+        HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => fields.iter().any(|(_, fe)| local_used_by_value(fe, id)),
+        HExprKind::ArrayLit(es) => es.iter().any(|e| local_used_by_value(e, id)),
+        HExprKind::Closure { env_values, .. } => env_values.iter().any(|v| local_used_by_value(v, id)),
+        HExprKind::Transfer(inner) => local_used_by_value(inner, id),
+        HExprKind::Match { scrutinee, arms, .. } => local_used_by_value(scrutinee, id)
+            || arms.iter().any(|a| a.guard.as_ref().map_or(false, |g| local_used_by_value(g, id))
+                || a.value.as_ref().map_or(false, |v| local_used_by_value(v, id))),
+        _ => false,
+    }
+}
+
+/// AddrOfRef arm of `local_used_by_value`: a place-chain rooted at a Local is
+/// borrowed (not a value use), but index expressions inside it are value uses.
+fn addrof_place_value_use(place: &HExpr, id: u32) -> bool {
+    match &place.kind {
+        HExprKind::Local(_) => false,
+        HExprKind::Field { base, .. } => addrof_place_value_use(base, id),
+        HExprKind::Index { base, idx } => addrof_place_value_use(base, id) || local_used_by_value(idx, id),
+        HExprKind::Unwrap { expr, .. } | HExprKind::DerefRef(expr) => addrof_place_value_use(expr, id),
+        _ => local_used_by_value(place, id),
+    }
+}
+
 fn expr_contains_local(e: &HExpr, id: u32) -> bool {
     match &e.kind {
         HExprKind::Local(l) => l.0 == id,
