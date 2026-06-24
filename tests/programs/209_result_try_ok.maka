@@ -1,0 +1,26 @@
+import std.{Result, try_ok};
+
+Result<int, string> safe_div(int a, int b) {
+    if (b == 0) { return Result.Err { err = "div by zero" }; }
+    return Result.Ok { value = a / b };
+}
+
+// Chain fallible ops; try_ok early-returns the Err into compute's frame.
+Result<int, string> compute(int a, int b, int c) {
+    int x = try_ok(safe_div(a, b));
+    int y = try_ok(safe_div(x, c));
+    return Result.Ok { value = y + 1 };
+}
+
+unit show(Result<int, string> r) {
+    match (r) {
+        Result.Ok { value } { log(value); }
+        Result.Err { err }  { log(err); }
+    }
+}
+
+unit main() {
+    show(compute(100, 5, 2));   // 20, then 10, +1 = 11
+    show(compute(100, 0, 2));   // div by zero (first)
+    show(compute(100, 5, 0));   // div by zero (second)
+}

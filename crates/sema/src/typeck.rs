@@ -3720,7 +3720,10 @@ impl<'a> TypeChecker<'a> {
             }
         }
         // Inline function: emit an InlineCall so codegen splices the body at this call site.
-        let is_inline = self.sym.sigs.get(final_fid.0 as usize)
+        // Read inline-ness from the *template* fid - for a generic call `final_fid`
+        // is a placeholder with no sig yet, so it would otherwise look non-inline
+        // and be lowered to a (never-emitted) direct call.
+        let is_inline = self.sym.sigs.get(fid.0 as usize)
             .map(|s| s.is_inline).unwrap_or(false);
         let kind = if is_inline && final_fid.0 < u32::MAX - 1024 {
             // The propagate-vs-caller-return check happens as a post-pass in `analyze()`
@@ -4584,7 +4587,7 @@ impl<'a> TypeChecker<'a> {
         // If the context wants a specific monomorphized enum (e.g. `Option<int>`),
         // prefer that EnumId — the template's fields contain `TyVar`s and would
         // fail to coerce against concrete arg expressions.
-        let (eid, info) = if let Some(HType::Enum(want_eid)) = expected {
+        let (mut eid, mut info) = if let Some(HType::Enum(want_eid)) = expected {
             let want_info = self.sym.enum_info(*want_eid).clone();
             let template_name = want_info.name.split("__").next().unwrap_or(&want_info.name);
             if template_name == enum_name {
@@ -4605,6 +4608,49 @@ impl<'a> TypeChecker<'a> {
             self.err(format!("enum `{}` has no variant `{}`", enum_name, variant), sp);
             return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
         };
+        // When the resolved enum is still a generic *template* (expected did not
+        // pin a concrete instantiation), infer the instantiation from the field
+        // values plus the enclosing function's type-param substitution.  This is
+        // what makes `propagate Result.Err { err = err }` work inside an inline
+        // generic: `err` fixes E, and the surrounding monomorphization fixes the
+        // remaining params (e.g. T) by name.
+        if !info.type_params.is_empty() {
+            fn is_concrete(t: &HType) -> bool {
+                match t {
+                    HType::TyVar(_) => false,
+                    HType::GenericPattern { args, .. } => args.iter().all(is_concrete),
+                    HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::RawPtr { inner, .. }
+                    | HType::OwnPtr { inner, .. } | HType::Heap { inner } => is_concrete(inner),
+                    HType::Array { elem, .. } | HType::Slice { elem, .. } | HType::Vec { elem } => is_concrete(elem),
+                    HType::FnPtr { ret, params } => is_concrete(ret) && params.iter().all(is_concrete),
+                    _ => true,
+                }
+            }
+            let tmpl_v = info.variants[vi].clone();
+            let mut env: std::collections::HashMap<String, HType> = std::collections::HashMap::new();
+            for (fname, fv) in fields {
+                if let Some((_, finfo)) = tmpl_v.fields.iter().enumerate().find(|(_, f)| f.name == *fname) {
+                    let h = self.check_expr(fv, None);
+                    unify_with_sym(&finfo.ty, &h.ty, &mut env, self.sym);
+                }
+            }
+            for tp in &info.type_params {
+                if !env.contains_key(tp) {
+                    if let Some(t) = self.subst.get(tp) { env.insert(tp.clone(), t.clone()); }
+                }
+            }
+            let args: Vec<HType> = info.type_params.iter()
+                .map(|tp| concretize_generic_patterns(&env.get(tp).cloned().unwrap_or(HType::TyVar(tp.clone())), self.sym))
+                .collect();
+            if args.iter().all(is_concrete) {
+                let pat = HType::GenericPattern { template_name: enum_name.to_string(), args, is_enum: true };
+                if let HType::Enum(mono) = concretize_generic_patterns(&pat, self.sym) {
+                    eid = mono;
+                    info = self.sym.enum_info(mono).clone();
+                }
+            }
+        }
+        let vi = info.variant_index(variant).unwrap_or(vi);
         let v = &info.variants[vi];
         let mut provided: Vec<Option<HExpr>> = (0..v.fields.len()).map(|_| None).collect();
         for (fname, fv) in fields {

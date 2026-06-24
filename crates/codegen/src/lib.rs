@@ -73,6 +73,10 @@ struct Cx<'a> {
     /// a unique tag so labels and locals never collide across multiple call sites
     /// of the same inline within the same C function.
     inline_call_seq: u32,
+    /// Stack of result types for the inline expansions currently being spliced,
+    /// so a `match` nested in an inline body can lower a `return` in an arm to the
+    /// right `__r_<tag>` assignment.  Innermost expansion is last.
+    inline_ret_stack: Vec<HType>,
     /// Freestanding mode — emit a minimal libc-free prologue and route the
     /// allocator / panic / log / atomic-runtime hooks to user-provided
     /// extern symbols (`__maka_alloc`, `__maka_free`, `__maka_panic`,
@@ -96,6 +100,7 @@ impl<'a> Cx<'a> {
             aliased_locals: Default::default(),
             bounded_vars: Vec::new(),
             inline_call_seq: 0,
+            inline_ret_stack: Vec::new(),
             freestanding: false,
         }
     }
@@ -7339,6 +7344,74 @@ impl<'a> Cx<'a> {
     /// Expand an `inline` call as a GCC statement-expression. The body's `return X` becomes
     /// `__result = X; break;` (exiting a do-while), and `propagate X` becomes a real C `return X;`
     /// from the *outer* function (the C function that contains this expansion).
+    /// Emit a `match` that appears inside an inline body, renaming locals with the
+    /// expansion `tag` and routing arm bodies through `emit_inline_stmt` (so an
+    /// arm `return` / `propagate` lowers against the enclosing expansion).  Only
+    /// the enum-tag switch shape is handled; that covers the stdlib `Try`/`Result`
+    /// helpers that motivate generic inlines.
+    fn emit_inline_match(&mut self, inline_f: &HFunc, scrutinee: &HExpr, arms: &[HMatchArm], match_result_ty: &HType, tag: &str) -> String {
+        self.inline_call_seq += 1;
+        let mt = format!("{}_{}", tag, self.inline_call_seq);
+        let s = self.emit_inline_expr(inline_f, scrutinee, tag);
+        let scrut_c = self.c_type(&scrutinee.ty);
+        let needs_value = !matches!(match_result_ty, HType::Unit);
+        let res_c = self.c_type(match_result_ty);
+        // The arm-body result type for `return` is the enclosing inline expansion's.
+        let fn_ret = self.inline_ret_stack.last().cloned().unwrap_or(HType::Unit);
+        let mut body = String::new();
+        body.push_str("__extension__ ({ ");
+        body.push_str(&format!("{} __s_{} = {}; ", scrut_c, mt, s));
+        if needs_value { body.push_str(&format!("{} __rm_{} = {{0}}; ", res_c, mt)); }
+        let eid = self.match_as_switch(&scrutinee.ty, arms);
+        if let Some(eid) = eid {
+            let tag_expr = if self.sym.enum_info(eid).is_simple() {
+                format!("__s_{}", mt)
+            } else {
+                format!("__s_{}.tag", mt)
+            };
+            body.push_str(&format!("switch ({}) {{ ", tag_expr));
+            for a in arms {
+                match &a.kind {
+                    HArmKind::Variant { variant, enum_id, .. } => {
+                        let t = self.sym.enum_info(*enum_id).variants[*variant].tag;
+                        body.push_str(&format!("case {}: {{ ", t));
+                    }
+                    _ => body.push_str("default: { "),
+                }
+                // Variant field bindings, read from the tagged scrutinee temp.
+                if let HArmKind::Variant { enum_id, variant, bindings, .. } = &a.kind {
+                    let vinfo = self.sym.enum_info(*enum_id).variants[*variant].clone();
+                    for (i, b) in bindings.iter().enumerate() {
+                        if let Some(local) = b {
+                            let li = &inline_f.locals[local.0 as usize];
+                            let nm = inline_local_name(inline_f, *local, tag);
+                            body.push_str(&format!("{} {} = __s_{}.payload.{}.{}; ",
+                                self.c_type(&li.ty), nm, mt, c_ident(&vinfo.name), c_ident(&vinfo.fields[i].name)));
+                        }
+                    }
+                }
+                if let Some(local) = a.scrut_binding {
+                    let li = &inline_f.locals[local.0 as usize];
+                    body.push_str(&format!("{} {} = __s_{}; ", self.c_type(&li.ty), inline_local_name(inline_f, local, tag), mt));
+                }
+                for st in &a.body.stmts {
+                    body.push_str(&self.emit_inline_stmt(inline_f, st, tag, &fn_ret));
+                }
+                if let Some(v) = &a.value {
+                    let vs = self.emit_inline_expr(inline_f, v, tag);
+                    if needs_value { body.push_str(&format!("__rm_{} = ({}); ", mt, vs)); }
+                    else { body.push_str(&format!("(void)({}); ", vs)); }
+                }
+                body.push_str("} break; ");
+            }
+            body.push_str("} ");
+        }
+        if needs_value { body.push_str(&format!("__rm_{}; ", mt)); }
+        else { body.push_str("MAKA_UNIT; "); }
+        body.push_str("})");
+        body
+    }
+
     fn emit_inline_expansion(&mut self, caller_f: &HFunc, callee: FuncId, args: &[HExpr], result_ty: &HType) -> String {
         // Find the inline HFunc by id.
         let inline_f = match self.sym.funcs.iter().find(|hf| hf.id == callee).cloned() {
@@ -7390,9 +7463,11 @@ impl<'a> Cx<'a> {
         // `return` fires from inside a `while`/`for`.  Use a labeled goto so the
         // semantics of `return` are independent of any surrounding loops.
         out.push_str("do { ");
+        self.inline_ret_stack.push(result_ty.clone());
         for stmt in &inline_f.body.stmts {
             out.push_str(&self.emit_inline_stmt(&inline_f, stmt, &tag, result_ty));
         }
+        self.inline_ret_stack.pop();
         out.push_str("} while (0); ");
         out.push_str(&format!("end_{}: ; ", tag));
 
@@ -7566,6 +7641,9 @@ impl<'a> Cx<'a> {
             HExprKind::Free(inner) => {
                 let s = self.emit_inline_expr(inline_f, inner, tag);
                 format!("(free((void*)({})), MAKA_UNIT)", s)
+            }
+            HExprKind::Match { scrutinee, arms, result_ty } => {
+                self.emit_inline_match(inline_f, scrutinee, arms, result_ty, tag)
             }
             // Everything else: fall back to ordinary emit_expr but with a dummy HFunc that holds
             // the inline locals so name lookups resolve. For simplicity, use the inline_f directly.
