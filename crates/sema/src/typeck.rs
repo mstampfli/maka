@@ -513,8 +513,8 @@ impl<'a> TypeChecker<'a> {
             ast::Stmt::InlineFor { var_name, iter, body, span } => {
                 self.check_inline_for(var_name, iter, body, *span)
             }
-            ast::Stmt::Break(span) => HStmt::Break(*span),
-            ast::Stmt::Continue(span) => HStmt::Continue(*span),
+            ast::Stmt::Break(span) => HStmt::Break { heap_drops: Vec::new(), span: *span },
+            ast::Stmt::Continue(span) => HStmt::Continue { heap_drops: Vec::new(), span: *span },
             ast::Stmt::Unsafe(b, span) => {
                 self.in_unsafe += 1;
                 let bb = self.check_block(b);
@@ -1519,7 +1519,10 @@ impl<'a> TypeChecker<'a> {
 
     fn is_numeric(&self, t: &HType) -> bool {
         match t {
-            HType::Int | HType::SizedInt { .. } | HType::Float => true,
+            // `char` and `u8` are the same byte type (see resolve.rs), so byte
+            // arithmetic / ordering (`'A' + 25`, `a < 'B'`, u8 math) is allowed.
+            HType::Int | HType::SizedInt { .. } | HType::SizedFloat { .. }
+            | HType::Float | HType::Char => true,
             HType::Ref { inner, .. } => self.is_numeric(inner),
             _ => false,
         }

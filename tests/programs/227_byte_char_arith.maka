@@ -1,0 +1,18 @@
+// char and u8 are the same byte type, so byte arithmetic and ordering are
+// allowed (previously rejected as "arithmetic/ordering on non-numeric types").
+unit main() {
+    u8 a = 250;
+    u8 b = 10;
+    u8 c = a + b;               // store back into u8: wraps mod 256
+    log(c as int);             // 4
+
+    char p = 'A';
+    char q = 'B';
+    if (p < q) { log(1); } else { log(0); }   // 1
+
+    u8 m = 7;
+    u8 n = 3;
+    log((m * n) as int);        // 21 (promoted to int, no truncation)
+    log((m % n) as int);        // 1
+    if (m > n) { log(100); }    // 100
+}
