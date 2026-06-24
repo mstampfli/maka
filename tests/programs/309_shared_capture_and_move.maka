@@ -1,0 +1,32 @@
+// Two non-escaping closures that each capture the SAME owning value must not
+// double-free it: the captured heap value is owned once and freed once when the
+// owning scope ends, with each closure borrowing the pointer. Also covers
+// passing an owning struct that contains a Vec by value (a move, not a shallow
+// copy that would double-free the buffer).
+data Node { int v; }
+data Bag { Vec<int> items; }
+
+// Shared capture of one owning value by two closures.
+int shared() {
+  own &Node n = alloc Node { v = 21 };
+  int() f = int() [n] { return n.v; };
+  int() g = int() [n] { return n.v * 2; };
+  return f() + g();          // 21 + 42 = 63
+}
+
+// Owning struct passed by value (moved) into a consumer.
+int consume(Bag b) {
+  mut int s = 0;
+  for (int x in &b.items) { s = s + x; }
+  return s;
+}
+int moved() {
+  mut Bag b = Bag { items = [] };
+  b.items.push(1); b.items.push(2); b.items.push(3);
+  return consume(b);          // 6
+}
+
+unit main() {
+  log(shared());   // 63
+  log(moved());    // 6
+}
