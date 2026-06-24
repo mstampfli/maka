@@ -1,0 +1,14 @@
+// A NUL-terminated char buffer can be reinterpreted as a `string` with an
+// explicit cast (the cast asserts NUL-termination). This is the bridge a
+// growable string built from a Vec<char> uses to expose its buffer as a
+// borrowed `string` for the str_* ops / log / IO.
+import std.{str_len, str_eq};
+unit main() {
+  mut Vec<char> v = [];
+  v.push('h'); v.push('i'); v.push('!'); v.push(0 as char);   // "hi!\0"
+  string s = &v[0] as string;
+  log(str_len(s) as int);        // 3
+  log(str_eq(s, "hi!"));         // true
+  v[0] = 'H';                    // mutate the backing buffer; the view reflects it
+  log(s[0] as int);              // 72
+}

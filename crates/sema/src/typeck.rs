@@ -4204,6 +4204,14 @@ impl<'a> TypeChecker<'a> {
                     }
                     CastKind::Reinterpret
                 }
+                // A pointer to chars reinterpreted as a `string`: the cast asserts the
+                // buffer is NUL-terminated.  This is the one bridge a growable `String`
+                // (a `Vec<char>` it keeps NUL-terminated) uses to hand its buffer back
+                // as a borrowed `string` for the str_* ops / log / IO.  Explicit on
+                // purpose - an implicit `&char -> string` would be unsound.
+                (Ref { inner, .. }, Str) | (Ptr { inner, .. }, Str)
+                | (RawPtr { inner, .. }, Str) | (OwnPtr { inner, .. }, Str)
+                    if matches!(inner.as_ref(), Char) => CastKind::Reinterpret,
                 (Heap { .. }, RawPtr { .. }) => {
                     if let (Heap { inner: ai }, RawPtr { mutable: _, inner: bi }) = (from, to) {
                         if !type_eq(ai, bi) {
