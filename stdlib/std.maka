@@ -606,6 +606,13 @@ pub data HashMap<V> {
 
 // Create an empty map.  `dflt` is the value returned by `hm_get` on a miss
 // (and is what V infers from): e.g. `hashmap(0)` for a string->int map.
+//
+// When V owns heap (e.g. V = String = `own *string`, or a Box), pass `null` as
+// the default: empty/tombstone slots hold a copy of `dflt`, so a `null` default
+// makes them safely droppable (free(null) is a no-op) - this is the "null =
+// empty" slot convention.  An owning, non-null default would be aliased into
+// every empty slot and double-freed at drop.  Read owning values back through
+// `hm_get_ref` (a borrow); the by-value `hm_get` would alias the owned buffer.
 pub HashMap<V> hashmap<V>(V dflt) {
     HashMap<V> m = { keys = [], vals = [], states = [], dflt = dflt, count = 0, cap = 0 };
     return m;

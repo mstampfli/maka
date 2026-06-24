@@ -1,0 +1,18 @@
+// A HashMap whose values own heap (here String = own *string).  The empty/
+// tombstone slots hold the map's default, so for an owning value type the
+// default must be `null` (free(null) is a no-op) - that is the "null = empty"
+// slot convention.  Access owning values through hm_get_ref (a borrow); a
+// by-value hm_get would alias the owned buffer.  Must be leak-clean.
+import std.{HashMap, hashmap, hm_put, hm_get_ref, str_len, str_eq};
+unit main() {
+  mut HashMap<String> m = hashmap(null);
+  hm_put(&mut m, "a", "alpha" + "");
+  hm_put(&mut m, "b", "beta" + "");
+  hm_put(&mut m, "a", "again" + "");      // overwrite frees the old value
+  *String a = hm_get_ref(&mut m, "a");
+  if (a != null) { log(str_len(a!) as int); }   // 5  (again)
+  *String b = hm_get_ref(&mut m, "b");
+  if (b != null) { if (str_eq(b!, "beta")) { log(1); } else { log(0); } }   // 1
+  *String miss = hm_get_ref(&mut m, "nope");
+  if (miss == null) { log(-1); }                // -1
+}
