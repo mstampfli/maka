@@ -4671,6 +4671,13 @@ impl<'a> TypeChecker<'a> {
                     return (HArmKind::Else, None);
                 };
                 let vinfo = info.variants[vi].clone();
+                // Matching through a borrow (`&Enum` / `*Enum` / `raw *Enum`) does
+                // not own the scrutinee, so an owning payload binding must be a
+                // borrow - otherwise it could be moved out (returned/stored) while
+                // the real owner still drops it (double free).  Downgrade owning
+                // pointer payloads to non-owning pointers/refs for by-reference
+                // matches.  An owned-value scrutinee keeps the owning binding.
+                let by_ref = matches!(scrut_ty, HType::Ref { .. } | HType::Ptr { .. } | HType::RawPtr { .. });
                 let mut bindings: Vec<Option<LocalId>> = vec![None; vinfo.fields.len()];
                 let mut lit_checks: Vec<Option<HExpr>> = (0..vinfo.fields.len()).map(|_| None).collect();
                 for pf in fields {
@@ -4683,7 +4690,16 @@ impl<'a> TypeChecker<'a> {
                         lit_checks[fi] = Some(h);
                     } else {
                         let binding_name = pf.binding.clone().unwrap_or_else(|| pf.field.clone());
-                        let local = self.fresh_local(binding_name.clone(), finfo.ty.clone(), StorageClass::Stack, true, false, pf.span);
+                        let bty = if by_ref {
+                            match finfo.ty.clone() {
+                                HType::OwnPtr { mutable, inner } => HType::Ptr { mutable, inner },
+                                HType::Heap { inner } => HType::Ref { mutable: false, inner },
+                                other => other,
+                            }
+                        } else {
+                            finfo.ty.clone()
+                        };
+                        let local = self.fresh_local(binding_name.clone(), bty, StorageClass::Stack, true, false, pf.span);
                         self.bind_name(&binding_name, local);
                         bindings[fi] = Some(local);
                     }

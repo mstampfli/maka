@@ -1,0 +1,16 @@
+// Moving an owning payload out of a BORROWED enum is unsound (the real owner
+// still drops it -> double free).  Matching through `&Enum` downgrades the
+// owning binding to a borrow, so returning it as `own *T` must be rejected.
+data Box { int v; }
+enum Opt { Some { own *Box b }, None }
+own *Box steal(&Opt o) {
+    return match (o) {
+        Some { b }  b,
+        None  null,
+    };
+}
+unit main() {
+    Opt o = Opt.Some { b = alloc Box { v = 5 } };
+    own *Box g = steal(&o);
+    log(0);
+}

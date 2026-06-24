@@ -1,0 +1,16 @@
+// Matching a borrowed enum (`&Enum`) downgrades an owning payload binding to a
+// non-owning borrow: it can be read but not moved out, and the scrutinee's real
+// owner frees it exactly once.  (Leak/UAF-freedom verified out of band.)
+data Box { int v; }
+enum Opt { Some { own &Box b }, None }
+int peek(&Opt o) {
+    return match (o) {
+        Some { b }  b.v,    // b downgraded to &Box; read-only
+        None  -1,
+    };
+}
+unit main() {
+    Opt s = Opt.Some { b = alloc Box { v = 77 } };
+    log(peek(&s));         // 77
+    log(peek(&Opt.None));  // -1
+}
