@@ -1,0 +1,15 @@
+// Match guards (`Pattern if cond  body,`) plus multiple arms for the same
+// variant: the guarded arm is tried first, falling through to the unguarded one.
+enum Shape { R { int w, int h }, C { int r } }
+int classify(Shape s) {
+    return match (s) {
+        R { w, h } if w == h  w * w,   // square
+        R { w, h }  w * h,             // rectangle
+        C { r }  r * r,
+    };
+}
+unit main() {
+    log(classify(Shape.R { w = 4, h = 4 }));   // 16
+    log(classify(Shape.R { w = 3, h = 5 }));   // 15
+    log(classify(Shape.C { r = 6 }));          // 36
+}

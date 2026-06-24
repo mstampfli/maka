@@ -1,0 +1,19 @@
+// A match guard that reads an owning payload binding, with two arms for the same
+// variant.  The payload is only read (never moved out), so the scrutinee's drop
+// frees it exactly once.  (Leak-freedom verified out of band with LSan.)
+data Box { int v; }
+enum Opt { Some { own &Box b }, None }
+int pick(Opt o, int threshold) {
+    return match (o) {
+        Some { b } if b.v > threshold  b.v,
+        Some { b }  0,
+        None  -1,
+    };
+}
+unit main() {
+    Opt hi = Opt.Some { b = alloc Box { v = 50 } };
+    log(pick(hi, 10));         // 50
+    Opt lo = Opt.Some { b = alloc Box { v = 5 } };
+    log(pick(lo, 10));         // 0
+    log(pick(Opt.None, 0));    // -1
+}
