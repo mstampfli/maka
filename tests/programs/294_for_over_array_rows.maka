@@ -1,0 +1,25 @@
+// Iterating the rows of a multi-dimensional array: `for ([N]T row in &grid)`.
+// The loop binding is itself an array, which C cannot declare as `T[N] name`
+// nor assign with `=`. Regression: the loop emitted `maka_int[3] row = {0};`
+// (invalid) and `row = grid[i];` (illegal array assignment). An array-typed
+// binding must be declared with its dimensions after the name and copied with
+// memcpy.
+unit main() {
+  // 2D: iterate rows, sum elements.
+  [2][3]int grid = [[1, 2, 3], [4, 5, 6]];
+  mut int s2 = 0;
+  for ([3]int row in &grid) {
+    for (int x in &row) { s2 = s2 + x; }
+  }
+  log(s2);
+
+  // 3D: iterate planes, then lines, then cells.
+  [2][2][2]int cube = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]];
+  mut int s3 = 0;
+  for ([2][2]int plane in &cube) {
+    for ([2]int line in &plane) {
+      for (int x in &line) { s3 = s3 + x; }
+    }
+  }
+  log(s3);
+}

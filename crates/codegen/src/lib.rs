@@ -7438,6 +7438,18 @@ impl<'a> Cx<'a> {
                     self.emit_block(f, body, true);
                     self.close();
                     self.wl("}");
+                } else if matches!(&li.ty, HType::Array { .. }) {
+                    // An array-typed element (`for ([N]T row in &grid)`) must be
+                    // declared with its dimensions after the name and copied with
+                    // memcpy: C forbids both `T[N] name` and assigning to an array
+                    // with `=`.
+                    self.wl(&format!("for (maka_int __i = 0; __i < {}; __i += 1) {{", len_str));
+                    self.open();
+                    self.wl(&format!("{};", self.c_decl(&li.ty, &var_name)));
+                    self.wl(&format!("memcpy({}, {}[__i], sizeof({}));", var_name, elem_access, var_name));
+                    self.emit_block(f, body, true);
+                    self.close();
+                    self.wl("}");
                 } else if can_alias {
                     self.aliased_locals.insert(var.0);
                     self.wl(&format!("for (maka_int __i = 0; __i < {}; __i += 1) {{", len_str));
