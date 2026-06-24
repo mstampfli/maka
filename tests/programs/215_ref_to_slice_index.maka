@@ -1,0 +1,22 @@
+// Indexing and `.len` through a borrow of a slice (`&[]T`).
+data Pt { int x; int y; }
+int sum_x(&[]Pt pts) {
+    mut int s = 0;
+    for (usize i in 0..pts.len) { s = s + pts[i].x; }
+    return s;
+}
+int sum_ints(&[]int xs) {
+    mut int s = 0;
+    for (usize i in 0..xs.len) { s = s + xs[i]; }
+    return s;
+}
+unit main() {
+    [3]Pt arr = [ { x = 1, y = 0 }, { x = 3, y = 0 }, { x = 5, y = 0 } ];
+    []Pt psl = arr;
+    log(sum_x(&psl));        // 9
+
+    [4]int nums = [10, 20, 30, 40];
+    []int nsl = nums;
+    log(sum_ints(&nsl));     // 100
+    log(nsl.len as int);     // 4
+}

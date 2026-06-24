@@ -4765,7 +4765,12 @@ impl<'a> Cx<'a> {
             HType::Enum(id) if self.drop_ty_owns(pointee) => {
                 self.wl(&format!("__maka_drop_{}({});", c_ident(&self.sym.enum_info(*id).name), ptr));
             }
-            HType::Array { .. } | HType::OwnPtr { .. } | HType::Heap { .. } if self.drop_ty_owns(pointee) => {
+            HType::Array { .. } | HType::OwnPtr { .. } | HType::Heap { .. }
+            | HType::Vec { .. } | HType::FnPtr { .. } | HType::RustOpaque(_) if self.drop_ty_owns(pointee) => {
+                // A heap-allocated value that itself owns resources: a boxed
+                // closure (`own *T(..)`) whose env must be freed, an owned Vec
+                // buffer, a Rust box, etc.  Drop through `*ptr` before the OwnPtr
+                // arm frees `ptr`.
                 self.emit_field_drop(&format!("(*({}))", ptr), pointee, depth);
             }
             _ => {}
@@ -8201,10 +8206,11 @@ impl<'a> Cx<'a> {
                         HType::Array { len, .. } => format!("(maka_int){}", len),
                         _ => "0".into(),
                     },
-                    // `.len` through a borrow / non-owning pointer to an array or vec.
-                    // `&Vec<T>` is `Vec_T*`, so the count is at `(*base).len`.
+                    // `.len` through a borrow / non-owning pointer to an array,
+                    // vec, or slice.  `&Vec<T>` / `&[]T` is a pointer to the
+                    // {data/ptr,len,cap} struct, so the count is at `(*base).len`.
                     HType::Ref { inner: i, .. } | HType::Ptr { inner: i, .. } | HType::OwnPtr { inner: i, .. } => match i.as_ref() {
-                        HType::Vec { .. } => format!("({})->len", s),
+                        HType::Vec { .. } | HType::Slice { .. } => format!("({})->len", s),
                         HType::Array { len, .. } => format!("(maka_int){}", len),
                         _ => "0".into(),
                     },

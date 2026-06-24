@@ -1,0 +1,13 @@
+// A heap-allocated (escaping) closure: returned as `alloc <fn-type>`, called
+// through the owning pointer, and freed (env + box) at scope exit.
+own &int(int) make_adder(int n) { return alloc int(int x) [n] x + n; }
+own *int(int) make_muler(int k) { return alloc int(int x) [k] x * k; }
+
+unit main() {
+    own &int(int) add10 = make_adder(10);
+    log(add10(5));    // 15
+    log(add10(90));   // 100
+
+    own *int(int) mul3 = make_muler(3);
+    log(mul3(7));     // 21
+}

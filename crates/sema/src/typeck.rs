@@ -1899,13 +1899,13 @@ impl<'a> TypeChecker<'a> {
                 _ => return self.try_index_overload_or_err(bh, ih_probe, sp),
             },
             HType::Ptr { inner, .. } => match inner.as_ref() {
-                HType::Vec { elem } | HType::Array { elem, .. } => (**elem).clone(),
+                HType::Vec { elem } | HType::Array { elem, .. } | HType::Slice { elem, .. } => (**elem).clone(),
                 _ => return self.try_index_overload_or_err(bh, ih_probe, sp),
             },
-            // A borrow of an array/vector (`&[N]T`, `&[*]T`) indexes through to
-            // the element - e.g. a non-owning pointer to a stack array.
+            // A borrow of an array/vector/slice (`&[N]T`, `&[*]T`, `&[]T`) indexes
+            // through to the element - e.g. a non-owning pointer to a stack array.
             HType::Ref { inner, .. } => match inner.as_ref() {
-                HType::Vec { elem } | HType::Array { elem, .. } => (**elem).clone(),
+                HType::Vec { elem } | HType::Array { elem, .. } | HType::Slice { elem, .. } => (**elem).clone(),
                 _ => return self.try_index_overload_or_err(bh, ih_probe, sp),
             },
             _ => return self.try_index_overload_or_err(bh, ih_probe, sp),
@@ -2024,16 +2024,31 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_call_inner(&mut self, callee: &ast::Expr, args: &[ast::Expr], sp: Span) -> HExpr {
-        // Indirect call: `f(args)` where `f` is a local of FnPtr type.
+        // Indirect call: `f(args)` where `f` is a local of FnPtr type, or a
+        // pointer/heap to a FnPtr (a heap-allocated / escaped closure, whose type
+        // is `own *T(..)` / `own &T(..)`).
         if let ast::Expr::Ident(n, _) = callee {
             if let Some(id) = self.lookup(n) {
-                if let HType::FnPtr { ret, params } = self.local(id).ty.clone() {
+                let lty = self.local(id).ty.clone();
+                let (fnptr_ty, via_deref) = match &lty {
+                    HType::FnPtr { .. } => (Some(lty.clone()), false),
+                    HType::OwnPtr { inner, .. } | HType::Ptr { inner, .. } | HType::Heap { inner }
+                        if matches!(inner.as_ref(), HType::FnPtr { .. }) => (Some((**inner).clone()), true),
+                    _ => (None, false),
+                };
+                if let Some(HType::FnPtr { ret, params }) = fnptr_ty {
                     let ret_ty = (*ret).clone();
                     let hargs: Vec<HExpr> = args.iter().enumerate().map(|(i, a)| {
                         let want = params.get(i).cloned().unwrap_or(HType::Int);
                         self.check_expr_coerce(a, &want)
                     }).collect();
-                    let callee_h = HExpr { kind: HExprKind::Local(id), ty: HType::FnPtr { ret: Box::new(ret_ty.clone()), params }, span: sp };
+                    let fnptr = HType::FnPtr { ret: Box::new(ret_ty.clone()), params };
+                    let callee_h = if via_deref {
+                        let local_h = HExpr { kind: HExprKind::Local(id), ty: lty.clone(), span: sp };
+                        HExpr { kind: HExprKind::DerefRef(Box::new(local_h)), ty: fnptr, span: sp }
+                    } else {
+                        HExpr { kind: HExprKind::Local(id), ty: fnptr, span: sp }
+                    };
                     return HExpr {
                         kind: HExprKind::CallIndirect { callee: Box::new(callee_h), args: hargs },
                         ty: ret_ty,
