@@ -6303,42 +6303,42 @@ impl<'a> Cx<'a> {
         self.w("    if (xl > sl) return 0;\n");
         self.w("    return strcmp(s + sl - xl, suffix) == 0 ? 1 : 0;\n");
         self.w("}\n");
-        self.w("const char* __maka_rt_str_to_upper(const char* s) {\n");
-        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return e; }\n");
+        self.w("maka_char* __maka_rt_str_to_upper(const char* s) {\n");
+        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return (maka_char*)e; }\n");
         self.w("    size_t l = strlen(s);\n");
         self.w("    char* o = (char*)malloc(l + 1);\n");
         self.w("    for (size_t i = 0; i < l; i++) {\n");
         self.w("        char c = s[i]; o[i] = (c >= 'a' && c <= 'z') ? (c - 32) : c;\n");
         self.w("    }\n");
-        self.w("    o[l] = 0; return o;\n");
+        self.w("    o[l] = 0; return (maka_char*)o;\n");
         self.w("}\n");
-        self.w("const char* __maka_rt_str_to_lower(const char* s) {\n");
-        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return e; }\n");
+        self.w("maka_char* __maka_rt_str_to_lower(const char* s) {\n");
+        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return (maka_char*)e; }\n");
         self.w("    size_t l = strlen(s);\n");
         self.w("    char* o = (char*)malloc(l + 1);\n");
         self.w("    for (size_t i = 0; i < l; i++) {\n");
         self.w("        char c = s[i]; o[i] = (c >= 'A' && c <= 'Z') ? (c + 32) : c;\n");
         self.w("    }\n");
-        self.w("    o[l] = 0; return o;\n");
+        self.w("    o[l] = 0; return (maka_char*)o;\n");
         self.w("}\n");
-        self.w("const char* __maka_rt_str_trim(const char* s) {\n");
-        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return e; }\n");
+        self.w("maka_char* __maka_rt_str_trim(const char* s) {\n");
+        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return (maka_char*)e; }\n");
         self.w("    const char* p = s;\n");
         self.w("    while (*p == ' ' || *p == '\\t' || *p == '\\n' || *p == '\\r') p++;\n");
         self.w("    const char* e = s + strlen(s);\n");
         self.w("    while (e > p && (e[-1] == ' ' || e[-1] == '\\t' || e[-1] == '\\n' || e[-1] == '\\r')) e--;\n");
         self.w("    size_t l = (size_t)(e - p);\n");
         self.w("    char* o = (char*)malloc(l + 1);\n");
-        self.w("    memcpy(o, p, l); o[l] = 0; return o;\n");
+        self.w("    memcpy(o, p, l); o[l] = 0; return (maka_char*)o;\n");
         self.w("}\n");
-        self.w("const char* __maka_rt_str_replace(const char* s, const char* from, const char* to) {\n");
+        self.w("maka_char* __maka_rt_str_replace(const char* s, const char* from, const char* to) {\n");
         // Always return a freshly malloc'd string so callers that free() the
         // result don't crash on degenerate inputs.
-        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return e; }\n");
+        self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return (maka_char*)e; }\n");
         self.w("    if (!from || !*from || !to) {\n");
         self.w("        size_t sl = strlen(s);\n");
         self.w("        char* o = (char*)malloc(sl + 1);\n");
-        self.w("        memcpy(o, s, sl + 1); return o;\n");
+        self.w("        memcpy(o, s, sl + 1); return (maka_char*)o;\n");
         self.w("    }\n");
         self.w("    size_t fl = strlen(from), tl = strlen(to);\n");
         // Count occurrences for sizing.
@@ -6357,7 +6357,7 @@ impl<'a> Cx<'a> {
         self.w("        memcpy(w, to, tl); w += tl;\n");
         self.w("        r = p + fl;\n");
         self.w("    }\n");
-        self.w("    *w = 0; return o;\n");
+        self.w("    *w = 0; return (maka_char*)o;\n");
         self.w("}\n");
         // Random — use a per-thread xorshift seeded from clock + addr.
         self.w("static __thread uint64_t __maka_rt_rng_state = 0;\n");

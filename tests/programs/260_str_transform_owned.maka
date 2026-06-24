@@ -1,0 +1,16 @@
+// str_to_upper/lower/trim/replace return owned String (own *char): the malloc'd
+// runtime buffer auto-frees when bound to a String, so heavy use does not leak.
+// (Leak-freedom verified out of band with LeakSanitizer.)
+import std.{ str_to_upper, str_to_lower, str_trim, str_replace, str_eq };
+
+unit main() {
+    String up = str_to_upper("hello");
+    log(up);                                  // HELLO
+    String lo = str_to_lower("WORLD");
+    log(lo);                                  // world
+    String tr = str_trim("  padded  ");
+    log(tr);                                  // padded
+    String rp = str_replace("a-b-c", "-", "+");
+    log(rp);                                  // a+b+c
+    log(str_eq(str_to_upper("abc"), "ABC")); // true
+}

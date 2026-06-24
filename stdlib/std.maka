@@ -770,18 +770,18 @@ extern "__maka_rt_str_substring"   string __str_substring  (string s, int start,
 extern "__maka_rt_file_mtime_ns"   int    __file_mtime_ns  (string path);
 extern "__maka_rt_str_starts_with" int    __str_starts_with(string s, string prefix);
 extern "__maka_rt_str_ends_with"   int    __str_ends_with  (string s, string suffix);
-extern "__maka_rt_str_to_upper"    string __str_to_upper   (string s);
-extern "__maka_rt_str_to_lower"    string __str_to_lower   (string s);
-extern "__maka_rt_str_trim"        string __str_trim       (string s);
-extern "__maka_rt_str_replace"     string __str_replace    (string s, string from, string to);
+extern "__maka_rt_str_to_upper"    String __str_to_upper   (string s);
+extern "__maka_rt_str_to_lower"    String __str_to_lower   (string s);
+extern "__maka_rt_str_trim"        String __str_trim       (string s);
+extern "__maka_rt_str_replace"     String __str_replace    (string s, string from, string to);
 pub string str_substring  (string s, int start, int len) { return __str_substring(s, start, len); }
 pub int    file_mtime_ns  (string path)                  { return __file_mtime_ns(path); }
 pub bool   str_starts_with(string s, string prefix)      { return __str_starts_with(s, prefix) != 0; }
 pub bool   str_ends_with  (string s, string suffix)      { return __str_ends_with  (s, suffix) != 0; }
-pub string str_to_upper   (string s)                     { return __str_to_upper(s); }
-pub string str_to_lower   (string s)                     { return __str_to_lower(s); }
-pub string str_trim       (string s)                     { return __str_trim(s); }
-pub string str_replace    (string s, string from, string to) { return __str_replace(s, from, to); }
+pub String str_to_upper   (string s)                     { return __str_to_upper(s); }
+pub String str_to_lower   (string s)                     { return __str_to_lower(s); }
+pub String str_trim       (string s)                     { return __str_trim(s); }
+pub String str_replace    (string s, string from, string to) { return __str_replace(s, from, to); }
 
 // =====================================================================
 // Process control + file admin + UDP recvfrom.
