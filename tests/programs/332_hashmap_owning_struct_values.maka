@@ -1,0 +1,26 @@
+// Gap 4 (general): a HashMap whose value type owns heap - an owning struct
+// (String, or `data` with owning fields), not just a nullable own-pointer - must
+// not leak or double-free, including across grows (rehash). Empty/tombstone slots
+// hold a ZEROED V (safe to drop) instead of copies of the owning default, and a
+// value moved between slots during rehash zeroes its old slot so the old table
+// does not double-free it. Access owning values via hm_get_ref.
+import std.{HashMap, hashmap, hm_put, hm_get_ref, String, StringOps, string_from, int_to_str};
+
+data Rec { String name; int qty; }
+
+unit main() {
+  mut int t = 0;
+  // HashMap<String>: 20 keys force several grows.
+  mut HashMap<String> sm = hashmap(string_from(""));
+  for (int i in 0..20) { hm_put(&mut sm, int_to_str(i), string_from("v") + string_from("x")); }
+  *String s7 = hm_get_ref(&mut sm, int_to_str(7));
+  if (s7 != null) { t = t + s7!.length(); }            // 2
+
+  // HashMap<Rec>: a struct value with an owning field.
+  mut HashMap<Rec> rm = hashmap(Rec { name = string_from(""), qty = 0 });
+  for (int i in 0..20) { hm_put(&mut rm, int_to_str(i), Rec { name = string_from("item"), qty = i }); }
+  *Rec r3 = hm_get_ref(&mut rm, int_to_str(3));
+  if (r3 != null) { t = t + r3!.name.length() + r3!.qty; }   // 4+3=7
+
+  log(t);                                              // 9
+}

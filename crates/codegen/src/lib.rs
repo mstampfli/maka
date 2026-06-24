@@ -8069,11 +8069,20 @@ impl<'a> Cx<'a> {
     /// source field/element so the owner's drop skips it - no double free.  Only
     /// nulls when the source is genuinely owned (not read through a borrow).
     fn emit_move_out_null(&mut self, f: &HFunc, src: &HExpr) {
-        if !matches!(&src.ty, HType::OwnPtr { .. } | HType::Heap { .. }) { return; }
         if !matches!(&src.kind, HExprKind::Field { .. } | HExprKind::Index { .. }) { return; }
         if !move_out_owned_place(src) { return; }
-        let place = self.emit_place(f, src);
-        self.wl(&format!("{} = NULL;", place));
+        if matches!(&src.ty, HType::OwnPtr { .. } | HType::Heap { .. }) {
+            let place = self.emit_place(f, src);
+            self.wl(&format!("{} = NULL;", place));
+        } else if self.drop_ty_owns(&src.ty) {
+            // An owning VALUE (struct / Vec / array) moved out of a container slot:
+            // zero the slot so the source container's later drop treats it as empty
+            // (its owning fields are now null) instead of double-freeing the moved
+            // value.  Pointers above just null; a value needs a full zero.
+            let place = self.emit_place(f, src);
+            let ty = self.c_type(&src.ty);
+            self.wl(&format!("{} = ({}){{0}};", place, ty));
+        }
     }
 
     fn emit_let(&mut self, f: &HFunc, id: LocalId, init: &HExpr) {
@@ -8636,6 +8645,10 @@ impl<'a> Cx<'a> {
                     let vp_ty = self.c_type(&args[0].ty);
                     let vp = self.emit_expr(f, &args[0]);
                     return format!("(__extension__ ({{ {0} __vp = {1}; if (__vp->len == 0) {{ maka_panic(\"pop from empty Vec\"); }} __vp->len--; __vp->data[__vp->len]; }}))", vp_ty, vp);
+                }
+                // `zeroed()` -> a zero-initialized value of the call's type.
+                if callee.0 == u32::MAX - 62 {
+                    return format!("(({}){{0}})", self.c_type(&e.ty));
                 }
                 // Built-in `spawn(closure)` — fiber tier.  Compound-stmt expr
                 // wraps the closure once so its env malloc happens exactly once

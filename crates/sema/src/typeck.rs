@@ -2169,6 +2169,25 @@ impl<'a> TypeChecker<'a> {
         // Capture (and clear, so nested arg calls don't inherit it) the expected
         // return type for return-position generic inference below.
         let ret_expected = self.call_ret_expected.take();
+        // Built-in `zeroed()` -> a zero-initialized value of the contextually
+        // expected type.  Codegen emits `(T){0}`: a zeroed value is safe to drop
+        // for every type (null pointers / Vecs, 0 scalars, a struct whose owning
+        // fields are all null).  Used to seed container slots without aliasing an
+        // owning default.  Infers T from the expected type at the call site.
+        if let ast::Expr::Ident(n, _) = callee {
+            if n == "zeroed" && args.is_empty() {
+                return match ret_expected {
+                    Some(ty) => HExpr {
+                        kind: HExprKind::Call { callee: FuncId(u32::MAX - 62), args: Vec::new() },
+                        ty, span: sp,
+                    },
+                    None => {
+                        self.err("cannot infer the type of `zeroed()` here; use it in a position with a known expected type", sp);
+                        HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp }
+                    }
+                };
+            }
+        }
         // Indirect call: `f(args)` where `f` is a local of FnPtr type, or a
         // pointer/heap to a FnPtr (a heap-allocated / escaped closure, whose type
         // is `own *T(..)` / `own &T(..)`).

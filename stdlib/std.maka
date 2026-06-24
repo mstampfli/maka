@@ -727,8 +727,8 @@ unit hm_grow<V>(&mut HashMap<V> m, int newcap) {
     Vec<int> ns = [];
     for (int i in 0..newcap) {
         push(nk, null);
-        push(nv, m.dflt);
-        push(ns, 0);
+        push(nv, zeroed());     // empty slots hold a zeroed V (safe to drop), not a
+        push(ns, 0);            // copy of an owning default (which would alias + double-free)
     }
     mut int j = 0;
     while (j < m.cap) {
