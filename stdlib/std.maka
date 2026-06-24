@@ -526,20 +526,20 @@ pub int file_truncate(int fd, int len)      { return __file_truncate(fd, len); }
 
 // =====================================================================
 // Whole-file IO - the ergonomic layer over the raw file primitives.
-//   read_file  : slurp a whole file into an owned String (null on error)
+//   read_file  : slurp a whole file into an owned own *string (null on error)
 //   write_file : write a string to a file, truncating (true on success)
 //   append_file: append a string to a file (true on success)
 //   read_lines : read a file and split it into a Vec of lines
 // The slurp/spill themselves are C (one malloc + fread / fwrite); the line
 // splitting is plain Maka on top.
 // =====================================================================
-extern "__maka_rt_read_file"     String __rt_read_file (string path);
+extern "__maka_rt_read_file"     own *string __rt_read_file (string path);
 extern "__maka_rt_write_file"    int    __rt_write_file(string path, string content, int len);
 extern "__maka_rt_str_byte"      int    __rt_str_byte  (string s, int i);
 extern "__maka_rt_str_hash"      int    __rt_str_hash  (string s);
-// Owned substring - the C side mallocs, so the result is an owned String that
-// auto-frees (the borrowed `str_substring` would leak it inside a Vec<String>).
-extern "__maka_rt_substr_owned"  String __rt_substr    (string s, int start, int len);
+// Owned substring - the C side mallocs, so the result is an owned own *string that
+// auto-frees (the borrowed `str_substring` would leak it inside a Vec<own *string>).
+extern "__maka_rt_substr_owned"  own *string __rt_substr    (string s, int start, int len);
 
 // Byte at index `i` of a string (0..len-1), or -1 if out of range.  Strings
 // are not indexable with `s[i]`; this is the byte-level read accessor.
@@ -548,9 +548,9 @@ pub int str_byte(string s, int i) { return __rt_str_byte(s, i); }
 // Non-negative FNV-1a hash of a string (for hash maps).
 pub int str_hash(string s) { return __rt_str_hash(s); }
 
-// Read an entire file into an owned String.  Returns null if the file cannot
+// Read an entire file into an owned own *string.  Returns null if the file cannot
 // be opened.  The buffer auto-frees at scope exit.
-pub String read_file(string path) { return __rt_read_file(path); }
+pub own *string read_file(string path) { return __rt_read_file(path); }
 
 // Write `content` to `path`, creating/truncating it.  Returns true on success.
 pub bool write_file(string path, string content) {
@@ -558,9 +558,9 @@ pub bool write_file(string path, string content) {
 }
 
 // Split `text` into lines on '\n' (a trailing newline yields no empty final
-// line).  Pure Maka: one O(n) scan via str_byte, one owned String per line.
-pub Vec<String> split_lines(string text) {
-    Vec<String> out = [];
+// line).  Pure Maka: one O(n) scan via str_byte, one owned own *string per line.
+pub Vec<own *string> split_lines(string text) {
+    Vec<own *string> out = [];
     int n = str_len(text) as int;
     mut int start = 0;
     mut int i = 0;
@@ -576,14 +576,14 @@ pub Vec<String> split_lines(string text) {
 }
 
 // Read a file and return its lines.  Empty Vec if the file cannot be read.
-pub Vec<String> read_lines(string path) {
-    String text = read_file(path);
-    if (text == null) { Vec<String> empty = []; return empty; }
+pub Vec<own *string> read_lines(string path) {
+    own *string text = read_file(path);
+    if (text == null) { Vec<own *string> empty = []; return empty; }
     return split_lines(text);
 }
 
-// An owned copy of a string (heap String that auto-frees).
-pub String str_dup(string s) { return __rt_substr(s, 0, str_len(s) as int); }
+// An owned copy of a string (heap own *string that auto-frees).
+pub own *string str_dup(string s) { return __rt_substr(s, 0, str_len(s) as int); }
 
 // =====================================================================
 // HashMap<V> - generic, string-keyed hash map (open addressing, linear
@@ -596,7 +596,7 @@ pub String str_dup(string s) { return __rt_substr(s, 0, str_len(s) as int); }
 // with the default.  string->int (a symbol table) is the canonical use.
 // =====================================================================
 pub data HashMap<V> {
-    mut Vec<String> keys;     // owned key copies; null in empty/tombstone slots
+    mut Vec<own *string> keys;     // owned key copies; null in empty/tombstone slots
     mut Vec<V> vals;
     mut Vec<int> states;      // 0 = empty, 1 = full, 2 = tombstone
     V dflt;                   // returned on a miss; fills empty slots
@@ -607,7 +607,7 @@ pub data HashMap<V> {
 // Create an empty map.  `dflt` is the value returned by `hm_get` on a miss
 // (and is what V infers from): e.g. `hashmap(0)` for a string->int map.
 //
-// When V owns heap (e.g. V = String = `own *string`, or a Box), pass `null` as
+// When V owns heap (e.g. V = own *string = `own *string`, or a Box), pass `null` as
 // the default: empty/tombstone slots hold a copy of `dflt`, so a `null` default
 // makes them safely droppable (free(null) is a no-op) - this is the "null =
 // empty" slot convention.  An owning, non-null default would be aliased into
@@ -620,7 +620,7 @@ pub HashMap<V> hashmap<V>(V dflt) {
 
 // Resize to `newcap` (a power of two) and rehash the live entries.
 unit hm_grow<V>(&mut HashMap<V> m, int newcap) {
-    Vec<String> nk = [];
+    Vec<own *string> nk = [];
     Vec<V> nv = [];
     Vec<int> ns = [];
     for (int i in 0..newcap) {
@@ -631,7 +631,7 @@ unit hm_grow<V>(&mut HashMap<V> m, int newcap) {
     mut int j = 0;
     while (j < m.cap) {
         if (m.states[j] == 1) {
-            String k = m.keys[j];                    // move key out of old slot
+            own *string k = m.keys[j];                    // move key out of old slot
             mut int idx = str_hash(k) & (newcap - 1);
             while (ns[idx] == 1) { idx = (idx + 1) & (newcap - 1); }
             nk[idx] = k;                             // move key into new slot
@@ -735,13 +735,13 @@ pub string env_get   (string name)  { return __env_get_raw(name); }
 pub unit   process_exit(int code)   { __process_exit(code); }
 
 // =====================================================================
-// String conversions + search.
+// own *string conversions + search.
 // =====================================================================
 extern "__maka_rt_str_to_int"   int    __str_to_int (string s);
-extern "__maka_rt_int_to_str"   String __int_to_str (int n);
+extern "__maka_rt_int_to_str"   own *string __int_to_str (int n);
 extern "__maka_rt_str_find"     int    __str_find   (string s, string needle);
 pub int    str_to_int(string s)            { return __str_to_int(s); }
-pub String int_to_str(int n)               { return __int_to_str(n); }
+pub own *string int_to_str(int n)               { return __int_to_str(n); }
 pub int    str_find  (string s, string needle) { return __str_find(s, needle); }
 
 // =====================================================================
@@ -792,18 +792,18 @@ extern "__maka_rt_str_substring"   string __str_substring  (string s, int start,
 extern "__maka_rt_file_mtime_ns"   int    __file_mtime_ns  (string path);
 extern "__maka_rt_str_starts_with" int    __str_starts_with(string s, string prefix);
 extern "__maka_rt_str_ends_with"   int    __str_ends_with  (string s, string suffix);
-extern "__maka_rt_str_to_upper"    String __str_to_upper   (string s);
-extern "__maka_rt_str_to_lower"    String __str_to_lower   (string s);
-extern "__maka_rt_str_trim"        String __str_trim       (string s);
-extern "__maka_rt_str_replace"     String __str_replace    (string s, string from, string to);
+extern "__maka_rt_str_to_upper"    own *string __str_to_upper   (string s);
+extern "__maka_rt_str_to_lower"    own *string __str_to_lower   (string s);
+extern "__maka_rt_str_trim"        own *string __str_trim       (string s);
+extern "__maka_rt_str_replace"     own *string __str_replace    (string s, string from, string to);
 pub string str_substring  (string s, int start, int len) { return __str_substring(s, start, len); }
 pub int    file_mtime_ns  (string path)                  { return __file_mtime_ns(path); }
 pub bool   str_starts_with(string s, string prefix)      { return __str_starts_with(s, prefix) != 0; }
 pub bool   str_ends_with  (string s, string suffix)      { return __str_ends_with  (s, suffix) != 0; }
-pub String str_to_upper   (string s)                     { return __str_to_upper(s); }
-pub String str_to_lower   (string s)                     { return __str_to_lower(s); }
-pub String str_trim       (string s)                     { return __str_trim(s); }
-pub String str_replace    (string s, string from, string to) { return __str_replace(s, from, to); }
+pub own *string str_to_upper   (string s)                     { return __str_to_upper(s); }
+pub own *string str_to_lower   (string s)                     { return __str_to_lower(s); }
+pub own *string str_trim       (string s)                     { return __str_trim(s); }
+pub own *string str_replace    (string s, string from, string to) { return __str_replace(s, from, to); }
 
 // =====================================================================
 // Process control + file admin + UDP recvfrom.

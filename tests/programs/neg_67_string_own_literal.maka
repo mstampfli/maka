@@ -1,7 +1,7 @@
-// A borrowed string is non-owning; making it an owned `String` requires
+// A borrowed string is non-owning; making it an owned `own *string` requires
 // allocating (e.g. concat or a builtin), so an implicit literal->owned that
 // would alias and later free a static literal must be rejected.
 unit main() {
-  String s = "x";
+  own *string s = "x";
   log(s);
 }

@@ -1,17 +1,17 @@
 // File I/O: write a whole file, read it back, and split it into lines.
-// (read_file -> owned String; split_lines/read_lines are pure Maka.)
+// (read_file -> owned own *string; split_lines/read_lines are pure Maka.)
 import std.{write_file, read_file, read_lines, split_lines, str_byte, str_len};
 unit main() {
     bool ok = write_file("/tmp/maka_test_201.txt", "one\ntwo\nthree\n");
     if (ok) { log("wrote"); }
-    String c = read_file("/tmp/maka_test_201.txt");
+    own *string c = read_file("/tmp/maka_test_201.txt");
     if (c != null) { log(str_len(c) as int); }      // 14
-    Vec<String> lines = read_lines("/tmp/maka_test_201.txt");
+    Vec<own *string> lines = read_lines("/tmp/maka_test_201.txt");
     log(lines.len as int);                           // 3
     for (string ln in lines) { log(ln); }            // one / two / three
-    Vec<String> one = split_lines("no newline here");
+    Vec<own *string> one = split_lines("no newline here");
     log(one.len as int);                             // 1
     log(str_byte("XYZ", 0));                          // 88
-    String missing = read_file("/tmp/does_not_exist_xyzzy");
+    own *string missing = read_file("/tmp/does_not_exist_xyzzy");
     if (missing == null) { log("null-ok"); }
 }

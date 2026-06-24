@@ -1,4 +1,4 @@
-// An enum variant whose payload embeds a container by value (a Vec or a String)
+// An enum variant whose payload embeds a container by value (a Vec or a own *string)
 // must have that element/container typedef emitted before the variant payload
 // struct. Regression: the dependency pre-scan that emits Vec/Slice/Callable
 // typedefs walked struct fields but not enum variant payload fields, so an enum
@@ -14,7 +14,7 @@ int sum(Data d) {
   };
 }
 
-enum Msg { Text { String s }, Blank }
+enum Msg { Text { own *string s }, Blank }
 int text_len(Msg m) {
   return match (m) {
     Text { s } { yield str_len(s) as int; },

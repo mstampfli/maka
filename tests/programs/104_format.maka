@@ -1,4 +1,4 @@
-// `format(fmt, ...)` builds a String from a literal format with `{}` slots.
+// `format(fmt, ...)` builds a own *string from a literal format with `{}` slots.
 // Each `{}` consumes one trailing arg; ints / floats / bools / chars / strings
 // are auto-converted via per-type to-string helpers.  Result is `own *char`,
 // auto-freed at scope exit.

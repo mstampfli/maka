@@ -9,7 +9,7 @@ data Node { int v; }
 enum Opt<T> { Some { T v }, None }
 
 // Returns an owning-payload enum, constructed in a match-yield then returned.
-Opt<String> lookup(int n) {
+Opt<own *string> lookup(int n) {
   return match (n) {
     0 { yield Opt.Some { v = str_dup("zero") }; },
     1 { yield Opt.Some { v = str_dup("oneoneone") }; },

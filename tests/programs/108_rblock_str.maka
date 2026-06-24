@@ -1,5 +1,6 @@
-// rblock: &str / String round-trip through generated shims.  Rust receives
-// a borrowed string, returns an owned String which Maka auto-frees.
+// rblock: &str / String round-trip through generated shims.  Rust receives a
+// borrowed string and returns an owned Rust String, which Maka auto-frees as an
+// `own *string`.
 rblock "
     pub fn shout(s: &str) -> String { s.to_uppercase() }
     pub fn count_letter(s: &str, ch: i32) -> i64 {

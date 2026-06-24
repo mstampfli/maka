@@ -405,12 +405,10 @@ pub fn resolve_type_in(
             "bool" => HType::Bool,
             "unit" => HType::Unit,
             "string" => HType::Str,
-            // `String` is the owned heap-text name.  Internally it's `own *char`
-            // (NUL-terminated, mutable, auto-freed at scope exit).  String literals
-            // and borrowed views keep the primitive `string` type; constructors
-            // (`a + b`, `read_line()`) and any function that allocates returns
-            // `String`.  Coerces to `string` for borrowed reads.
-            "String" => HType::owned_string(),
+            // NB: `String` is NOT a compiler builtin.  The owned heap-string
+            // primitive is spelled `own *string`; `String` is a real stdlib
+            // `data` type (a growable string), defined in std.maka like any
+            // other user type.
             other => {
                 if other == "_" {
                     errors.push(SemaError {
