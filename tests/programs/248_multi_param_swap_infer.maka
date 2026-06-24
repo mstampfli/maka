@@ -1,0 +1,10 @@
+data Two<A, B> { A a; B b; }
+Two<B, A> swap<A, B>(Two<A, B> t) {
+    return Two { a = t.b, b = t.a };
+}
+unit main() {
+    Two<int, char> t = Two { a = 5, b = 'q' };
+    Two<char, int> s = swap(t);
+    log(s.b);     // 5
+    log(s.a);     // q
+}

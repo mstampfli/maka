@@ -1,0 +1,16 @@
+data Box<T> { T inner; }
+enum Res<T, E> { Ok { own &Box<T> val }, Err { E e } }
+Res<int, int> make(int v) {
+    if (v < 0) { return Res.Err { e = 1 }; }
+    return Res.Ok { val = alloc Box { inner = v } };
+}
+int unwrap_or(Res<int, int> r, int dflt) {
+    return match (r) {
+        Ok { val } val.inner,
+        Err { e } dflt,
+    };
+}
+unit main() {
+    log(unwrap_or(make(5), 0));        // 5
+    log(unwrap_or(make(0 - 3), 99));   // 99
+}

@@ -1,0 +1,13 @@
+data Box<T> { T inner; }
+data Pair<A, B> { A first; mut own *Box<B> second; }
+unit main() {
+    Pair<int, int> p = Pair {
+        first = 42,
+        second = alloc Box { inner = 7 },
+    };
+    log(p.first);
+    *Box<int> s = p.second;
+    if (s != null) {
+        log(s!.inner);
+    }
+}
