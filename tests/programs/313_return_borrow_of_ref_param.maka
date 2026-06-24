@@ -1,0 +1,20 @@
+// Returning a borrow rooted in a non-owning reference parameter is sound: the
+// referent is the caller's data, which outlives the call (like Rust's elided
+// fn(&Box) -> &int). The escape checker previously rejected this conservatively
+// (it treated every parameter like a value local that dies on return). A borrow
+// of a value parameter or a stack local still escapes and is still rejected.
+data Box { int v; }
+
+&int field_ref(&Box b) { return &b.v; }          // borrow through a & param
+&int elem_ref(&Vec<int> xs) { return &xs[0]; }   // borrow a container element
+&Box deeper(&Box b) { return b; }                // pass a borrow straight through
+
+unit main() {
+  Box x = Box { v = 42 };
+  log(field_ref(&x));            // 42
+  log(field_ref(deeper(&x)));    // 42 (chained through a returned borrow)
+
+  mut Vec<int> v = [];
+  v.push(7); v.push(8);
+  log(elem_ref(&v));             // 7
+}

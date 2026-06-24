@@ -942,9 +942,21 @@ impl<'a> Analyzer<'a> {
             AddrOfRef { place, .. } => {
                 if let Some(root) = root_local(place) {
                     let li = &self.f().locals[root.0 as usize];
-                    // Stack locals AND value-class parameters both die when the
-                    // function returns — escaping a borrow of either is unsafe.
-                    if matches!(li.storage, StorageClass::Stack | StorageClass::Param) {
+                    // A borrow rooted in a non-owning reference parameter
+                    // (`&T` / `*T` / `raw *T`) targets the caller's data, which
+                    // outlives the call, so returning it is sound (cf. Rust's
+                    // elided `fn(&Box) -> &int`).  Stack locals, value parameters,
+                    // and OWNING parameters (`own &T` / `own *T`, whose referent
+                    // the function frees on exit) all die on return - reject those.
+                    let escapes = match li.storage {
+                        StorageClass::Stack => true,
+                        StorageClass::Param => !matches!(
+                            li.ty,
+                            HType::Ref { .. } | HType::Ptr { .. } | HType::RawPtr { .. }
+                        ),
+                        _ => false,
+                    };
+                    if escapes {
                         let name = li.name.clone();
                         let span = e.span;
                         self.err(
