@@ -7780,6 +7780,9 @@ impl<'a> Cx<'a> {
                 format!("(({}) {} ({}))", l, binop_c(*op), r)
             }
             HExprKind::Un { op, expr } => {
+                if let (HUnOp::Neg, HExprKind::LitInt(n)) = (op, &expr.kind) {
+                    return c_int_lit(n.wrapping_neg());
+                }
                 let v = self.emit_inline_expr(inline_f, expr, tag);
                 match op {
                     HUnOp::Neg => format!("(-({}))", v),
@@ -7835,7 +7838,7 @@ impl<'a> Cx<'a> {
         // through self.emit_expr but recurse into more handlers. Most expressions have already been
         // covered above; this fallback handles literals and calls.
         match &e.kind {
-            HExprKind::LitInt(n) => format!("(maka_int){}LL", n),
+            HExprKind::LitInt(n) => c_int_lit(*n),
             HExprKind::LitFloat(v) => format!("(maka_float){}", v),
             HExprKind::LitBool(b) => if *b { "true".into() } else { "false".into() },
             HExprKind::LitChar(c) => format!("(maka_char){}u", *c as u32),
@@ -8327,7 +8330,7 @@ impl<'a> Cx<'a> {
 
     fn emit_expr(&mut self, f: &HFunc, e: &HExpr) -> String {
         match &e.kind {
-            HExprKind::LitInt(n) => format!("(maka_int){}LL", n),
+            HExprKind::LitInt(n) => c_int_lit(*n),
             HExprKind::LitFloat(v) => format!("(maka_float){}", v),
             HExprKind::LitBool(b) => if *b { "true".into() } else { "false".into() },
             HExprKind::LitChar(c) => format!("(maka_char){}u", *c as u32),
@@ -8465,6 +8468,12 @@ impl<'a> Cx<'a> {
                 format!("(({}) {} ({}))", l, opc, r)
             }
             HExprKind::Un { op, expr } => {
+                // Fold negation of an integer literal so `-9223372036854775808`
+                // emits i64::MIN directly rather than `-(i64::MIN)`, which is a C
+                // overflow.  wrapping_neg keeps every other value identical.
+                if let (HUnOp::Neg, HExprKind::LitInt(n)) = (op, &expr.kind) {
+                    return c_int_lit(n.wrapping_neg());
+                }
                 let v = self.emit_expr(f, expr);
                 match op {
                     HUnOp::Neg => format!("(-({}))", v),
@@ -9508,7 +9517,7 @@ impl<'a> Cx<'a> {
 
     fn literal_str(&self, e: &HExpr) -> String {
         match &e.kind {
-            HExprKind::LitInt(n) => format!("(maka_int){}LL", n),
+            HExprKind::LitInt(n) => c_int_lit(*n),
             HExprKind::LitBool(b) => if *b { "true".into() } else { "false".into() },
             HExprKind::LitChar(c) => format!("(maka_char){}u", *c as u32),
             HExprKind::LitFloat(v) => format!("(maka_float){}", v),
@@ -9523,7 +9532,7 @@ impl<'a> Cx<'a> {
     /// produce a "not a constant expression" error - which is the right move.
     fn emit_global_init(&self, e: &HExpr) -> String {
         match &e.kind {
-            HExprKind::LitInt(n) => format!("(maka_int){}LL", n),
+            HExprKind::LitInt(n) => c_int_lit(*n),
             HExprKind::LitBool(b) => if *b { "true".into() } else { "false".into() },
             HExprKind::LitChar(c) => format!("(maka_char){}u", *c as u32),
             HExprKind::LitFloat(v) => format!("(maka_float){}", v),
@@ -9922,6 +9931,19 @@ fn needs_div_guard(op: HBinOp, lhs_ty: &HType, rhs: &HExpr) -> bool {
     matches!(op, HBinOp::Div | HBinOp::Mod)
         && matches!(lhs_ty, HType::Int | HType::SizedInt { .. } | HType::Char)
         && !matches!(&rhs.kind, HExprKind::LitInt(n) if *n != 0)
+}
+
+/// Emit an i64 literal as valid C.  Every value spells fine as `<n>LL` except
+/// i64::MIN, whose magnitude (9223372036854775808) overflows a signed long long
+/// when written as `-9223372036854775808LL`; spell it as `(-MAX - 1)` instead.
+/// (Large unsigned bit patterns reach here as their signed reinterpretation,
+/// e.g. u64::MAX as -1, and a cast to the target type restores the bits.)
+fn c_int_lit(n: i64) -> String {
+    if n == i64::MIN {
+        "(maka_int)(-9223372036854775807LL - 1)".to_string()
+    } else {
+        format!("(maka_int){}LL", n)
+    }
 }
 
 fn binop_c(op: HBinOp) -> &'static str {

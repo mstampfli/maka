@@ -382,7 +382,12 @@ impl<'a> Lexer<'a> {
             if raw.is_empty() {
                 return Err(LexError { msg: "missing digits in integer literal".into(), span: self.span_from(start, sline, scol) });
             }
-            let v = i64::from_str_radix(&raw, radix).map_err(|e| LexError { msg: e.to_string(), span: self.span_from(start, sline, scol) })?;
+            // Parse the magnitude as u64 (the `-` sign is a separate token) and
+            // bit-reinterpret into the i64 token, so the full unsigned range is
+            // accepted (e.g. 0xFFFFFFFFFFFFFFFF for a u64 mask).  Values fitting
+            // i64 are unchanged; only > u64::MAX is rejected.
+            let v = u64::from_str_radix(&raw, radix).map(|u| u as i64)
+                .map_err(|e| LexError { msg: e.to_string(), span: self.span_from(start, sline, scol) })?;
             // optional width suffix
             self.eat_width_suffix();
             return Ok(Token { kind: TokKind::Int(v), span: self.span_from(start, sline, scol) });
@@ -409,7 +414,7 @@ impl<'a> Lexer<'a> {
         let kind = if is_float || suffix_was_float {
             TokKind::Float(txt.parse::<f64>().map_err(|e| LexError { msg: e.to_string(), span: self.span_from(start, sline, scol) })?)
         } else {
-            TokKind::Int(txt.parse::<i64>().map_err(|e| LexError { msg: e.to_string(), span: self.span_from(start, sline, scol) })?)
+            TokKind::Int(txt.parse::<u64>().map(|u| u as i64).map_err(|e| LexError { msg: e.to_string(), span: self.span_from(start, sline, scol) })?)
         };
         Ok(Token { kind, span: self.span_from(start, sline, scol) })
     }

@@ -1,0 +1,32 @@
+// Integer literals must cover the full 64-bit range. Regression: the lexer
+// parsed literals as i64, so any value above i64::MAX (a u64 mask like
+// 0xFFFFFFFFFFFFFFFF or 18446744073709551615) and the i64::MIN literal itself
+// were rejected with "number too large". The lexer now parses the magnitude as
+// u64 and bit-reinterprets into the token; codegen spells i64::MIN safely and
+// folds negation of a literal so no value triggers a C overflow warning.
+unit main() {
+  // Full u64 bit pattern via hex and decimal (reinterpreted to int = -1).
+  u64 hexmax = 0xFFFFFFFFFFFFFFFF;
+  log(hexmax as int);                 // -1
+  u64 decmax = 18446744073709551615;
+  log(decmax as int);                 // -1
+
+  // A u64 value above i64::MAX used in arithmetic.
+  u64 big = 9223372036854775808;      // 2^63
+  log((big - 9223372036854775807) as int);   // 1
+
+  // i64::MIN as a direct literal, and the boundary max.
+  i64 imin = -9223372036854775808;
+  log(imin);                          // -9223372036854775808
+  i64 imax = 9223372036854775807;
+  log(imax);                          // 9223372036854775807
+
+  // A 32-bit all-ones mask.
+  u32 m = 0xFFFFFFFF;
+  log(m as int);                      // 4294967295
+
+  // Ordinary small literals and negation are unchanged.
+  log(-5);                            // -5
+  int n = 10;
+  log(-n + 3);                        // -7
+}
