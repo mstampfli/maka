@@ -1337,6 +1337,16 @@ impl<'a> TypeChecker<'a> {
                     if let Some(hir) = self.try_op_overload(op, &l, &r, sp) {
                         return hir;
                     }
+                    // No `Eq` overload and not a directly-comparable kind: structs,
+                    // arrays, slices, vectors, and dyn objects cannot be compared
+                    // with `==`/`!=` (C has no structural compare).  Reject here
+                    // rather than emitting `a == b` on aggregates (invalid C).
+                    let noncomparable = |t: &HType| matches!(t,
+                        HType::Struct(_) | HType::Array { .. } | HType::Slice { .. }
+                        | HType::Vec { .. } | HType::Dyn { .. });
+                    if noncomparable(&l.ty) || noncomparable(&r.ty) {
+                        self.err(format!("cannot compare values of type `{}` with `==` / `!=` (no `Eq` impl)", type_str(&l.ty)), sp);
+                    }
                 }
                 let _ = r_is_prim;
                 let (lh, rh) = if l_is_ptr && r_is_null {

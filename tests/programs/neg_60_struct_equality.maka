@@ -1,0 +1,8 @@
+// Structs have no built-in structural equality and no Eq impl here, so comparing
+// them with == must be rejected (rather than emitting invalid C).
+data Pt { int x; int y; }
+unit main() {
+    Pt a = { x = 1, y = 2 };
+    Pt b = { x = 1, y = 2 };
+    log(a == b);
+}

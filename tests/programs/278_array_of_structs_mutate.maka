@@ -1,0 +1,10 @@
+// Mutating a struct field through a fixed-array index, and reading neighbours.
+data Pt { mut int x; mut int y; }
+unit main() {
+    mut [3]Pt pts = [Pt{x=1,y=1}, Pt{x=2,y=2}, Pt{x=3,y=3}];
+    pts[1].x = 99;
+    log(pts[1].x);            // 99
+    log(pts[0].y);            // 1
+    pts[2].y = pts[2].y + 10;
+    log(pts[2].y);            // 13
+}
