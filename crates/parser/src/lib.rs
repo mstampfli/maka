@@ -2110,6 +2110,13 @@ impl Parser {
                         | (TokKind::Unsafe, _) | (TokKind::Match, _) | (TokKind::Break, _)
                         | (TokKind::Continue, _) | (TokKind::Yield, _) | (TokKind::Propagate, _)
                         | (TokKind::Underscore, _) => false,
+                        // A statement starting with a pointer/owning type prefix is a
+                        // typed local declaration (`own *T x = ...`, `raw *T x = ...`)
+                        // or a deref-assignment (`*p = ...`) - always a block body.  A
+                        // destructure field can only begin with an identifier, so these
+                        // can never start a pattern.
+                        (TokKind::Own, _) | (TokKind::Raw, _)
+                        | (TokKind::Star, _) | (TokKind::Amp, _) => false,
                         (TokKind::Ident(_), TokKind::LParen) => false,
                         (TokKind::Ident(_), TokKind::Dot)    => false,
                         // `Ident = ...` is an assignment statement — always a

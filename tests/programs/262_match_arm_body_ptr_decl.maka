@@ -1,0 +1,18 @@
+data Box { mut int v; }
+enum Tag { A, B }
+int f(Tag t, *Box p) {
+    mut int r = 0;
+    match (t) {
+        A {
+            *Box q = p;                       // arm body starting with `*` (pointer local)
+            if (q != null) { r = q!.v; }
+        }
+        B { r = 0; }
+    }
+    return r;
+}
+unit main() {
+    mut Box b = { v = 42 };
+    log(f(Tag.A, &mut b));    // 42
+    log(f(Tag.B, &mut b));    // 0
+}
