@@ -1,0 +1,32 @@
+// break and continue out of a loop must free owning locals declared in the loop
+// body (the jump leaves the loop-body scope without running its scope drops).
+data Box { int v; }
+
+int find_sq(int target) {
+    mut int i = 0;
+    mut int found = -1;
+    while (i < 20) {
+        own *Box b = alloc Box { v = i * i };   // owned each iteration
+        if (b!.v == target) { found = i; break; }   // break: must free b
+        i = i + 1;
+    }
+    return found;
+}
+
+int sum_even(int n) {
+    mut int i = 0;
+    mut int s = 0;
+    while (i < n) {
+        own *Box b = alloc Box { v = i };
+        i = i + 1;
+        if (b!.v % 2 == 1) { continue; }            // continue: must free b
+        s = s + b!.v;
+    }
+    return s;
+}
+
+unit main() {
+    log(find_sq(16));    // 4
+    log(find_sq(99));    // -1
+    log(sum_even(8));    // 0+2+4+6 = 12
+}

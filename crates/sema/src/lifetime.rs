@@ -239,7 +239,7 @@ fn stmt_walk(s: &HStmt, state: &mut Vec<bool>, summaries: &[bool], any: &mut boo
             WalkRes { ok: true, terminates: false }
         }
         HStmt::Block(b) | HStmt::Unsafe(b, _) => block_walk(b, state, summaries, any),
-        HStmt::Break(_) | HStmt::Continue(_) => WalkRes { ok: true, terminates: true },
+        HStmt::Break { .. } | HStmt::Continue { .. } => WalkRes { ok: true, terminates: true },
         HStmt::Propagate { .. } => WalkRes { ok: true, terminates: true },
         HStmt::ExprStmt(_) => WalkRes { ok: true, terminates: false },
     }
@@ -353,7 +353,7 @@ fn harvest_stmt(
             for i in 0..state.len() { state[i] = state[i] && body_state[i]; }
         }
         HStmt::Propagate { value: Some(v), .. } => harvest_expr(v, state, summaries, out),
-        HStmt::Propagate { value: None, .. } | HStmt::Break(_) | HStmt::Continue(_) => {}
+        HStmt::Propagate { value: None, .. } | HStmt::Break { .. } | HStmt::Continue { .. } => {}
     }
 }
 
@@ -723,7 +723,7 @@ impl<'a> Analyzer<'a> {
             }
             HStmt::Block(b) => self.walk_block(b, live_outer, depth + 1),
             HStmt::Unsafe(b, _) => self.walk_block(b, live_outer, depth + 1),
-            HStmt::Break(_) | HStmt::Continue(_) => {}
+            HStmt::Break { .. } | HStmt::Continue { .. } => {}
             HStmt::ForC { init, cond, step, body, .. } => {
                 self.walk_stmt(init, declared_here, live_outer, depth);
                 self.walk_expr(cond);
@@ -1152,7 +1152,7 @@ impl<'a> Analyzer<'a> {
 fn block_always_exits(b: &HBlock) -> bool {
     match b.stmts.last() {
         Some(HStmt::Return { .. }) => true,
-        Some(HStmt::Break(_)) | Some(HStmt::Continue(_)) => true,
+        Some(HStmt::Break { .. }) | Some(HStmt::Continue { .. }) => true,
         Some(HStmt::Propagate { .. }) => true,
         Some(HStmt::ExprStmt(e)) => matches!(
             &e.kind,
@@ -1478,7 +1478,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
         }
     }
 
-    fn visit_block(sym: &SymTab, locals: &[LocalInfo], b: &mut HBlock, scope_chain: &mut Vec<Vec<LocalId>>) {
+    fn visit_block(sym: &SymTab, locals: &[LocalInfo], b: &mut HBlock, scope_chain: &mut Vec<Vec<LocalId>>, loop_start: Option<usize>) {
         scope_chain.push(Vec::new());
         // Track moves up to each position in the block.
         let mut moved: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
@@ -1537,15 +1537,29 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     *heap_drops = drops;
                 }
                 HStmt::If { then_b, else_b, .. } => {
-                    visit_block(sym, locals, then_b, scope_chain);
-                    if let Some(b) = else_b { visit_block(sym, locals, b, scope_chain); }
+                    visit_block(sym, locals, then_b, scope_chain, loop_start);
+                    if let Some(b) = else_b { visit_block(sym, locals, b, scope_chain, loop_start); }
                 }
-                HStmt::While { body, .. } => visit_block(sym, locals, body, scope_chain),
-                HStmt::Block(b) => visit_block(sym, locals, b, scope_chain),
-                HStmt::Unsafe(b, _) => visit_block(sym, locals, b, scope_chain),
-                HStmt::Break(_) | HStmt::Continue(_) => {}
-                HStmt::ForC { body, .. } => visit_block(sym, locals, body, scope_chain),
-                HStmt::ForEach { body, .. } => visit_block(sym, locals, body, scope_chain),
+                HStmt::While { body, .. } => visit_block(sym, locals, body, scope_chain, Some(scope_chain.len())),
+                HStmt::Block(b) => visit_block(sym, locals, b, scope_chain, loop_start),
+                HStmt::Unsafe(b, _) => visit_block(sym, locals, b, scope_chain, loop_start),
+                HStmt::Break { heap_drops, .. } | HStmt::Continue { heap_drops, .. } => {
+                    // Free owning locals declared inside the enclosing loop before
+                    // the jump leaves the loop-body scope chain (same idea as the
+                    // return drops, but bounded to the loop body, not the whole fn).
+                    if let Some(start) = loop_start {
+                        let mut drops = Vec::new();
+                        for scope in scope_chain.iter().skip(start).rev() {
+                            for id in scope.iter().rev() {
+                                if moved.contains(id) { continue; }
+                                drops.push(*id);
+                            }
+                        }
+                        *heap_drops = drops;
+                    }
+                }
+                HStmt::ForC { body, .. } => visit_block(sym, locals, body, scope_chain, Some(scope_chain.len())),
+                HStmt::ForEach { body, .. } => visit_block(sym, locals, body, scope_chain, Some(scope_chain.len())),
                 HStmt::Propagate { value: Some(v), .. } => {
                     moved_locals_in_expr(sym, v, &mut moved);
                 }
@@ -1564,7 +1578,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
 
     let mut chain = Vec::new();
     let locals = f.locals.clone();
-    visit_block(sym, &locals, &mut f.body, &mut chain);
+    visit_block(sym, &locals, &mut f.body, &mut chain, None);
 
     // Append owning parameters to the body's heap_to_free so they auto-free at
     // function scope-exit — unless they were transferred out somewhere in the
@@ -1689,7 +1703,7 @@ fn mark_closure_escapes_block(b: &HBlock, cands: &std::collections::HashSet<Loca
                 for st in &body.stmts { scan_stmt(st, cands, escaped); }
             }
             HStmt::ForEach { src, body, .. } => { ex(src, cands, escaped); for st in &body.stmts { scan_stmt(st, cands, escaped); } }
-            HStmt::Break(_) | HStmt::Continue(_) => {}
+            HStmt::Break { .. } | HStmt::Continue { .. } => {}
         }
     }
     for s in &b.stmts { scan_stmt(s, cands, escaped); }
@@ -1780,7 +1794,7 @@ fn collect_param_moves_stmt(sym: &SymTab, s: &HStmt, out: &mut std::collections:
         }
         HStmt::Propagate { value: Some(v), .. } => collect_param_moves_expr(sym, v, out),
         HStmt::Propagate { value: None, .. } => {}
-        HStmt::Break(_) | HStmt::Continue(_) => {}
+        HStmt::Break { .. } | HStmt::Continue { .. } => {}
     }
 }
 fn collect_param_moves_expr(sym: &SymTab, e: &HExpr, out: &mut std::collections::HashSet<LocalId>) {

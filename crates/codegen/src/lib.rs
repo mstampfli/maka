@@ -4954,7 +4954,7 @@ impl<'a> Cx<'a> {
             HStmt::If { cond, then_b, else_b, .. } => { self.scan_expr(cond); self.scan_block(then_b); if let Some(b) = else_b { self.scan_block(b); } }
             HStmt::While { cond, body, .. } => { self.scan_expr(cond); self.scan_block(body); }
             HStmt::Block(b) | HStmt::Unsafe(b, _) => self.scan_block(b),
-            HStmt::Break(_) | HStmt::Continue(_) => {}
+            HStmt::Break { .. } | HStmt::Continue { .. } => {}
             HStmt::ForC { init, cond, step, body, .. } => {
                 self.scan_stmt(init);
                 self.scan_expr(cond);
@@ -7277,8 +7277,18 @@ impl<'a> Cx<'a> {
                 self.close();
                 self.wl("}");
             }
-            HStmt::Break(_) => self.wl("break;"),
-            HStmt::Continue(_) => self.wl("continue;"),
+            HStmt::Break { heap_drops, .. } => {
+                let drops: Vec<(String, HType)> = heap_drops.iter()
+                    .map(|id| { let li = &f.locals[id.0 as usize]; (local_name(*id, &li.name), li.ty.clone()) }).collect();
+                for (n, ty) in &drops { self.wl("/* drop on break */"); self.emit_field_drop(n, ty, 0); }
+                self.wl("break;");
+            }
+            HStmt::Continue { heap_drops, .. } => {
+                let drops: Vec<(String, HType)> = heap_drops.iter()
+                    .map(|id| { let li = &f.locals[id.0 as usize]; (local_name(*id, &li.name), li.ty.clone()) }).collect();
+                for (n, ty) in &drops { self.wl("/* drop on continue */"); self.emit_field_drop(n, ty, 0); }
+                self.wl("continue;");
+            }
             HStmt::Propagate { value, .. } => {
                 // `propagate X;` ⇒ `return X;` from the enclosing C function.
                 // Within an InlineCall expansion (which IS in the caller's C function), this exits
@@ -7611,8 +7621,8 @@ impl<'a> Cx<'a> {
                 s.push_str("} ");
                 s
             }
-            HStmt::Break(_) => "break; ".into(),
-            HStmt::Continue(_) => "continue; ".into(),
+            HStmt::Break { .. } => "break; ".into(),
+            HStmt::Continue { .. } => "continue; ".into(),
             HStmt::ForC { init, cond, step, body, .. } => {
                 let mut s = self.emit_inline_stmt(inline_f, init, tag, result_ty);
                 let cs = self.emit_inline_expr(inline_f, cond, tag);
@@ -9572,7 +9582,7 @@ fn stmt_mutates_local(s: &HStmt, iv: u32) -> bool {
             stmt_mutates_local(init, iv) || expr_mutates_local(cond, iv)
                 || stmt_mutates_local(step, iv) || block_mutates_local(body, iv),
         HStmt::ForEach { src, body, .. } => expr_mutates_local(src, iv) || block_mutates_local(body, iv),
-        HStmt::Break(_) | HStmt::Continue(_) => false,
+        HStmt::Break { .. } | HStmt::Continue { .. } => false,
     }
 }
 

@@ -713,8 +713,11 @@ pub enum HStmt {
     While { cond: HExpr, body: HBlock, span: Span },
     Block(HBlock),
     Unsafe(HBlock, Span),
-    Break(Span),
-    Continue(Span),
+    /// `heap_drops`: owning locals declared inside the enclosing loop that must
+    /// be freed before the jump (break/continue leaves the loop-body scope chain
+    /// without running its scope-exit drops, same as `return`).
+    Break { heap_drops: Vec<LocalId>, span: Span },
+    Continue { heap_drops: Vec<LocalId>, span: Span },
     /// Native C `for (init; cond; step) body` — for-range lowers to this.
     ForC { init: Box<HStmt>, cond: HExpr, step: Box<HStmt>, body: HBlock, span: Span },
     /// `for (T var in src) body` over a slice/array/vec value.
