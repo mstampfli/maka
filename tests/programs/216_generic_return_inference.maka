@@ -1,0 +1,14 @@
+// Infer a type parameter that appears only in the return type from the call's
+// expected type: snew() and pnew(...) bind T / A,B with no help from args.
+data Stack<T> { mut int n; T dflt; }
+Stack<T> snew<T>(T d) { Stack<T> s = { n = 0, dflt = d }; return s; }
+data Pair<A, B> { A a; B b; }
+Pair<A, B> pnew<A, B>(A a, B b) { Pair<A, B> p = { a = a, b = b }; return p; }
+unit main() {
+    Stack<int> s = snew(0);
+    log(s.n);                       // 0
+    Pair<int, bool> p = pnew(7, true);
+    log(p.a);                       // 7
+    Pair<int, int> q = pnew(3, 4);
+    log(q.a + q.b);                 // 7
+}

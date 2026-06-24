@@ -31,6 +31,11 @@ pub struct TypeChecker<'a> {
     /// if-expression result) instead of a discarded `ExprStmt` - so a `yield`
     /// nested inside an `if`/`while`/block statement still produces the value.
     yield_target: Vec<(LocalId, HType)>,
+    /// The expected type of the call expression currently being dispatched, set
+    /// by `check_expr` before `check_call`.  Lets a generic call infer a type
+    /// parameter that appears only in the return type from its context, e.g.
+    /// `Stack<int> s = snew();` binds T=int from the expected `Stack<int>`.
+    call_ret_expected: Option<HType>,
     /// Whether the current function is `inline` (governs `propagate` legality).
     cur_is_inline: bool,
     /// Dotted module path of the function currently being checked.  Used to enforce
@@ -276,6 +281,7 @@ impl<'a> TypeChecker<'a> {
             cur_ret: HType::Unit,
             cur_type_params: Vec::new(),
             yield_target: Vec::new(),
+            call_ret_expected: None,
             cur_is_inline: false,
             cur_module: Vec::new(),
             cur_imports: Vec::new(),
@@ -848,7 +854,10 @@ impl<'a> TypeChecker<'a> {
             ast::Expr::Ref { mutness, expr, span } => self.check_ref(matches!(mutness, Mutness::Mut), expr, *span, expected),
             ast::Expr::Field { base, name, span } => self.check_field(base, name, expected, *span),
             ast::Expr::Index { base, idx, span } => self.check_index(base, idx, *span),
-            ast::Expr::Call { callee, args, span } => self.check_call(callee, args, *span),
+            ast::Expr::Call { callee, args, span } => {
+                self.call_ret_expected = expected.cloned();
+                self.check_call(callee, args, *span)
+            }
             ast::Expr::AttrCall { attr, name, receiver, args, span } => {
                 self.check_attr_call(attr, name, receiver.as_deref(), args, *span)
             }
@@ -2024,6 +2033,9 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_call_inner(&mut self, callee: &ast::Expr, args: &[ast::Expr], sp: Span) -> HExpr {
+        // Capture (and clear, so nested arg calls don't inherit it) the expected
+        // return type for return-position generic inference below.
+        let ret_expected = self.call_ret_expected.take();
         // Indirect call: `f(args)` where `f` is a local of FnPtr type, or a
         // pointer/heap to a FnPtr (a heap-allocated / escaped closure, whose type
         // is `own *T(..)` / `own &T(..)`).
@@ -3665,6 +3677,14 @@ impl<'a> TypeChecker<'a> {
             for (i, ph) in probed.iter().enumerate() {
                 if let Some(want) = template_param_tys.get(i) {
                     unify_with_sym(want, &ph.ty, &mut env, self.sym);
+                }
+            }
+            // Bind type params that appear only in the return type from the call's
+            // expected type (e.g. `Stack<int> s = snew();` infers T=int even with
+            // no arguments to unify against).
+            if type_params.iter().any(|tp| !env.contains_key(tp)) {
+                if let Some(exp) = &ret_expected {
+                    unify_with_sym(&template_ret, exp, &mut env, self.sym);
                 }
             }
             // Ensure all type params got substitutions.

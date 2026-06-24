@@ -8003,6 +8003,23 @@ impl<'a> Cx<'a> {
         }
         self.wl(&format!("{} {} {};", lhs, assign_op_c(op), rhs));
         self.emit_move_out_null(f, value);
+        // Moving an owning *local* into an owning slot (a field/index or another
+        // owning local) transfers ownership: null the source so it is not freed
+        // again - by a later drop-on-reassign or at scope exit.  Mirrors the
+        // field move-out null above for `nx = cur.next`.  Without this,
+        // `cur.next = prev; prev = cur;` double-frees the node prev pointed at.
+        if matches!(op, HAssignOp::Assign) {
+            if let HExprKind::Local(sid) = value.kind {
+                if matches!(&value.ty, HType::OwnPtr { .. } | HType::Heap { .. })
+                    && self.drop_ty_owns(&place.ty)
+                    && place_root_local(place) != Some(sid.0)
+                {
+                    let base = local_name(sid, &f.locals[sid.0 as usize].name);
+                    let sname = if self.aliased_locals.contains(&sid.0) { format!("(*{})", base) } else { base };
+                    self.wl(&format!("{} = NULL;", sname));
+                }
+            }
+        }
     }
 
     /// Emit an lvalue suitable for the LHS of an assignment.

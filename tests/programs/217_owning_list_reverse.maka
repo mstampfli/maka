@@ -1,0 +1,32 @@
+// In-place reverse of an owning linked list: `cur.next = prev; prev = cur;`
+// each move an owning local into a slot - the source must be nulled so it is
+// not freed again (double free) by a later reassign or at scope exit.
+data N { int v; mut own *N next; }
+
+own *N rev(own *N head) {
+    mut own *N prev = null;
+    mut own *N cur = head;
+    while (cur != null) {
+        own *N nx = cur!.next;
+        cur!.next = prev;
+        prev = cur;
+        cur = nx;
+    }
+    return prev;
+}
+
+int at(*N n, int i) {
+    mut int k = i;
+    *N p = n;
+    while (k > 0) { if (p == null) { return -1; } p = p!.next; k = k - 1; }
+    if (p == null) { return -1; }
+    return p!.v;
+}
+
+unit main() {
+    own *N h = alloc N { v = 1, next = alloc N { v = 2, next = alloc N { v = 3, next = null } } };
+    h = rev(h);
+    log(at(h, 0));   // 3
+    log(at(h, 1));   // 2
+    log(at(h, 2));   // 1
+}

@@ -1732,8 +1732,20 @@ fn collect_param_moves_block(sym: &SymTab, b: &HBlock, out: &mut std::collection
 }
 fn collect_param_moves_stmt(sym: &SymTab, s: &HStmt, out: &mut std::collections::HashSet<LocalId>) {
     match s {
-        HStmt::Let { init, .. } => collect_param_moves_expr(sym, init, out),
-        HStmt::Assign { value, .. } => collect_param_moves_expr(sym, value, out),
+        HStmt::Let { init, .. } => {
+            // A direct owning-Local init moves it (`own *N cur = head;`).
+            if ty_owns_heap(sym, &init.ty) {
+                if let HExprKind::Local(id) = init.kind { out.insert(id); }
+            }
+            collect_param_moves_expr(sym, init, out);
+        }
+        HStmt::Assign { value, .. } => {
+            // Assigning an owning local into a slot moves it (`x.next = prev;`).
+            if ty_owns_heap(sym, &value.ty) {
+                if let HExprKind::Local(id) = value.kind { out.insert(id); }
+            }
+            collect_param_moves_expr(sym, value, out);
+        }
         HStmt::ExprStmt(e) => collect_param_moves_expr(sym, e, out),
         HStmt::Return { value: Some(v), .. } => {
             // A return that yields an owning local moves it out.
