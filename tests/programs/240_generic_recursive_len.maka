@@ -1,0 +1,24 @@
+// Self-recursive generic type used through a generic function: len<T>(*Node<T>)
+// recurses on n!.next where Node<T>.next is own *Node<T>.  This exercises
+// re-concretizing the recursive call's parameter types during monomorphization
+// (the Node<T> instantiation is not registered when the request is first recorded).
+data Node<T> { T val; mut own *Node<T> next; }
+
+int len<T>(*Node<T> n) {
+    if (n == null) { return 0; }
+    return 1 + len(n!.next);
+}
+
+unit main() {
+    own *Node<int> h = alloc Node {
+        val = 3,
+        next = alloc Node {
+            val = 2,
+            next = alloc Node { val = 1, next = null },
+        },
+    };
+    log(len(h));
+    // also exercise a different instantiation (char) to confirm mono per-type
+    own *Node<char> c = alloc Node { val = 'z', next = null };
+    log(len(c));
+}

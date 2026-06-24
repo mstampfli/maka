@@ -3781,7 +3781,16 @@ impl<'a> TypeChecker<'a> {
         // Compute the final FuncId: if generic, queue an instantiation. The analyze pass
         // will allocate the final FuncId and rewrite the placeholder later.
         let (final_fid, final_param_tys, final_ret) = if type_params.is_empty() {
-            (fid, template_param_tys, template_ret)
+            // The resolved callee may be an already-instantiated generic whose stored
+            // signature still carries un-concretized GenericPattern types (e.g. the
+            // target instantiation was not yet registered when the request was first
+            // recorded). Re-concretize at the call site now that all instantiations
+            // exist, so argument coercion sees the concrete Struct/Enum id.
+            let cp: Vec<HType> = template_param_tys.iter()
+                .map(|t| concretize_generic_patterns(t, self.sym))
+                .collect();
+            let cr = concretize_generic_patterns(&template_ret, self.sym);
+            (fid, cp, cr)
         } else {
             let new_param_tys: Vec<HType> = template_param_tys.iter()
                 .map(|t| concretize_generic_patterns(&t.subst(&env), self.sym))
