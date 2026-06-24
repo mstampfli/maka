@@ -1367,8 +1367,10 @@ impl<'a> TypeChecker<'a> {
                     }
                     self.err("bitwise operator on non-numeric types", sp);
                 }
-                let l_int = matches!(l.ty, HType::Int | HType::SizedInt { .. });
-                let r_int = matches!(r.ty, HType::Int | HType::SizedInt { .. });
+                // `char`/`u8` are the same 8-bit unsigned integer type here, so
+                // bitwise operators apply to them too.
+                let l_int = matches!(l.ty, HType::Int | HType::SizedInt { .. } | HType::Char);
+                let r_int = matches!(r.ty, HType::Int | HType::SizedInt { .. } | HType::Char);
                 if !l_int || !r_int {
                     self.err("bitwise operators require integer types", sp);
                 }

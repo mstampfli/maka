@@ -1,0 +1,12 @@
+unit main() {
+    u8 a = 240;
+    u8 b = 15;
+    log((a | b) as int);      // 255
+    log((a & b) as int);      // 0
+    log((a ^ 255) as int);    // 15
+    u8 x = 255;
+    log((x >> 4) as int);     // 15
+    log(((1 as u8) << 4) as int);  // 16
+    u16 w = 4096;
+    log((w >> 8) as int);     // 16
+}

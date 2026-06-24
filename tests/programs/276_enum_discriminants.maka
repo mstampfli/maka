@@ -1,0 +1,8 @@
+enum Color { Red = 1, Green = 5, Blue = 10 }
+unit main() {
+    log(Color.Red as int);    // 1
+    log(Color.Green as int);  // 5
+    log(Color.Blue as int);   // 10
+    Color c = Color.Green;
+    log(c as int);            // 5
+}
