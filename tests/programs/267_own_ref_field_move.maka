@@ -1,0 +1,18 @@
+// Initializing an `own &T` local from an `own &T` struct field (a heap-pointer
+// field read) moves the pointer; codegen must not mistake it for a plain value
+// being heap-allocated.  Exercises the take-and-replace idiom (swap two owning
+// fields through &mut).  (Leak/double-free-freedom verified out of band.)
+data Box { mut int v; }
+data Pair { mut own &Box a; mut own &Box b; }
+unit swap_fields(&mut Pair p) {
+    own &Box tmp = p.a;     // move the heap-pointer field out...
+    p.a = p.b;              // ... and immediately replace it
+    p.b = tmp;
+}
+int firsta(&Pair p) { return p.a.v; }
+unit main() {
+    mut Pair p = Pair { a = alloc Box { v = 1 }, b = alloc Box { v = 2 } };
+    log(firsta(&p));     // 1
+    swap_fields(&mut p);
+    log(firsta(&p));     // 2
+}

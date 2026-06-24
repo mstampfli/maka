@@ -7959,6 +7959,28 @@ impl<'a> Cx<'a> {
                     self.wl(&format!("{} {} = {};", ptr_ty, name, s));
                     return;
                 }
+                // A field read whose DECLARED field type is `own &T` (Heap) is a
+                // real heap pointer (e.g. `own &Box tmp = p.a;`): transfer it
+                // directly.  Using the declared field type (not init.ty) avoids
+                // confusing it with a plain `T` value coerced to a Heap slot (a
+                // struct literal `own &Node n = Node{..}`), which must allocate.
+                if let HExprKind::Field { base, field } = &init.kind {
+                    let base_sid = match &base.ty {
+                        HType::Struct(id) => Some(*id),
+                        HType::Ref { inner, .. } | HType::Heap { inner } | HType::Ptr { inner, .. } | HType::OwnPtr { inner, .. } => {
+                            if let HType::Struct(id) = inner.as_ref() { Some(*id) } else { None }
+                        }
+                        _ => None,
+                    };
+                    let field_is_heap = base_sid
+                        .and_then(|sid| self.sym.struct_info(sid).fields.get(*field).map(|fi| matches!(fi.ty, HType::Heap { .. })))
+                        .unwrap_or(false);
+                    if field_is_heap {
+                        let s = self.emit_expr(f, init);
+                        self.wl(&format!("{} {} = {};", ptr_ty, name, s));
+                        return;
+                    }
+                }
                 // New allocation: value expression of type `T` lifted into heap slot.
                 let value_s = self.emit_expr(f, init);
                 let ic = self.c_type(inner);
