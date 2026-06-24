@@ -627,8 +627,11 @@ pub attr StringOps {
     string as_str  (&_ self);
     unit   push    (&mut _ self, char c);
     unit   push_str(&mut _ self, string s);
-    bool   equals  (&_ self, &_ other);
 }
+
+// Operator attrs: `a + b` dispatches to `Add.add`, `a == b` to `Eq.eq`.
+pub attr Add { _   add(&_ a, &_ b); }
+pub attr Eq  { bool eq (&_ a, &_ b); }
 
 pub String has StringOps {
     // Number of chars held (excludes the trailing NUL).
@@ -650,11 +653,21 @@ pub String has StringOps {
         int n = str_len(s) as int;
         while (i < n) { self.push(s[i]); i = i + 1; }
     }
+}
 
-    // True if two Strings hold the same bytes.
-    bool equals(&String self, &String other) {
-        return str_eq(self.as_str(), other.as_str());
+// `a + b` -> a fresh String holding a's bytes followed by b's (operands borrowed,
+// not consumed).
+pub String has Add {
+    String add(&String a, &String b) {
+        mut String r = string_from(a.as_str());
+        r.push_str(b.as_str());
+        return r;
     }
+}
+
+// `a == b` (and `a.eq(&b)`) -> true if the two Strings hold the same bytes.
+pub String has Eq {
+    bool eq(&String a, &String b) { return str_eq(a.as_str(), b.as_str()); }
 }
 
 // =====================================================================

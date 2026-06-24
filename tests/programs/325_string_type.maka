@@ -1,9 +1,9 @@
 // String: a growable, owned string - fully coded in Maka (std), backed by a
-// NUL-terminated Vec<char>. Its operations are `attr StringOps` methods
-// (push / push_str / length / as_str / equals), so they live in the method
-// namespace and coexist with same-named free functions, called via dot syntax.
-// The Vec frees itself when the String drops, so String auto-frees. Leak-clean.
-import std.{String, StringOps, string_new, string_from};
+// NUL-terminated Vec<char>. Its ops are `attr StringOps` methods (push/push_str/
+// length/as_str), called via dot syntax, plus operator sugar `+` (Add) and `==`
+// (Eq). Trait methods coexist with same-named free functions. Auto-frees on
+// drop. Leak-clean.
+import std.{String, StringOps, Add, Eq, string_new, string_from};
 
 // A free function named `push` - must coexist with String's `push` method.
 data Counter { mut int n; }
@@ -19,8 +19,10 @@ unit main() {
   s.push_str(", world");
   log(s.length());                                     // 9  (String.push method)
   log(s.as_str());                                     // hi, world
-  String t = string_from("hi, world");
-  if (s.equals(&t)) { log(1); } else { log(0); }       // 1
+
+  String t = string_from("hi") + string_from(", world");   // + operator (Add)
+  if (s == t) { log(1); } else { log(0); }              // 1  (== operator, Eq)
   String u = string_from("nope");
-  if (s.equals(&u)) { log(1); } else { log(0); }       // 0
+  if (s == u) { log(1); } else { log(0); }              // 0
+  log(s.as_str());                                      // hi, world  (s not consumed by ==)
 }

@@ -1503,6 +1503,23 @@ impl<'a> TypeChecker<'a> {
 
     /// Try to dispatch `op` as a call to a user-defined logic block.
     /// Returns Some(hir) on success.
+    /// Coerce an operator operand to the overload's parameter type, auto-borrowing
+    /// a value into a `&T` parameter (the temp-hoisting pass makes `&<rvalue>` a
+    /// valid lvalue), so operator methods that take `&Self` don't consume operands.
+    fn op_operand(&mut self, e: HExpr, param: &HType) -> HExpr {
+        if let HType::Ref { mutable, inner } = param {
+            if !matches!(&e.ty, HType::Ref { .. }) && type_eq(&e.ty, inner) {
+                let sp = e.span;
+                return HExpr {
+                    kind: HExprKind::AddrOfRef { mutable: *mutable, place: Box::new(e) },
+                    ty: param.clone(),
+                    span: sp,
+                };
+            }
+        }
+        self.coerce(e, param)
+    }
+
     fn try_op_overload(&mut self, op: ast::BinOp, l: &HExpr, r: &HExpr, sp: Span) -> Option<HExpr> {
         use ast::BinOp::*;
         let (logic_name, fn_name) = match op {
@@ -1520,22 +1537,32 @@ impl<'a> TypeChecker<'a> {
             Shr => ("Shr", "shr"),
             And | Or => return None,
         };
-        let logic_info = self.sym.logic_by_name(logic_name)?.clone();
-        // Find a candidate matching by name + arity + first-param compatibility.
-        let cand = logic_info.funcs.iter().find_map(|fid| {
-            let sig = self.sym.func_sig(*fid);
-            if sig.name == fn_name && sig.param_tys.len() == 2 {
-                if param_compatible(&sig.param_tys[0], &l.ty, &sig.type_params)
-                    && param_compatible(&sig.param_tys[1], &r.ty, &sig.type_params) {
-                    return Some((*fid, sig.clone()));
+        // Operator operands auto-borrow: a value operand matches a `&T` parameter,
+        // so an overload taking `&Self` (e.g. `add(&String,&String)`,
+        // `eq(&String,&String)`) does NOT consume its operands.
+        let arg_ok = |param: &HType, actual: &HType, tps: &[String]| -> bool {
+            if param_compatible(param, actual, tps) { return true; }
+            if let HType::Ref { inner, .. } = param {
+                if !matches!(actual, HType::Ref { .. }) && param_compatible(inner, actual, tps) {
+                    return true;
                 }
             }
-            None
-        })?;
+            false
+        };
+        // Candidates: any impl method named `fn_name` registered under the operator's
+        // attr/logic name.  Both `logic` blocks and `attr` + `has` impls tag their
+        // methods with `logic = Some(<name>)`, so a single sig scan covers both.
+        let cand = self.sym.sigs.iter().enumerate()
+            .filter(|(_, s)| s.name == fn_name
+                && s.logic.as_deref() == Some(logic_name)
+                && s.param_tys.len() == 2)
+            .map(|(i, s)| (FuncId(i as u32), s.clone()))
+            .find(|(_, sig)| arg_ok(&sig.param_tys[0], &l.ty, &sig.type_params)
+                && arg_ok(&sig.param_tys[1], &r.ty, &sig.type_params))?;
         let (fid, sig) = cand;
         let ret = sig.ret.clone();
-        let lh = self.coerce(l.clone(), &sig.param_tys[0]);
-        let rh = self.coerce(r.clone(), &sig.param_tys[1]);
+        let lh = self.op_operand(l.clone(), &sig.param_tys[0]);
+        let rh = self.op_operand(r.clone(), &sig.param_tys[1]);
         let call = HExpr {
             kind: HExprKind::Call { callee: fid, args: vec![lh, rh] },
             ty: ret.clone(),
