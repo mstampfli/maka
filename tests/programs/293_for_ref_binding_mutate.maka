@@ -1,0 +1,25 @@
+// A reference loop binding (`for (&mut T x in &mut vec)`) binds a reference to
+// each element so the body can mutate it in place, and `for (&T x in &vec)`
+// gives a read-only reference view. Regression: a reference-typed loop binding
+// emitted a pointer-typed variable but the copy path assigned the element by
+// value (`Box* b = ...; b = vec.data[i];`), producing invalid C ("incompatible
+// types ... from type Box"). The binding must take the element's address.
+//
+// This must not disturb by-value iteration of a pointer element
+// (`for (*Node n in ns)`), where the loop var type IS the element type.
+data Box { mut int val = 0; }
+
+unit main() {
+  Vec<Box> v = [];
+  v.push(Box { val = 1 });
+  v.push(Box { val = 2 });
+  v.push(Box { val = 3 });
+
+  // Mutate each element in place through a &mut reference binding.
+  for (&mut Box b in &mut v) { b.val = b.val * 10; }
+
+  // Read back through a &-reference binding.
+  mut int s = 0;
+  for (&Box b in &v) { s = s + b.val; }
+  log(s);
+}

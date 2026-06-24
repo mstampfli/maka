@@ -7410,11 +7410,35 @@ impl<'a> Cx<'a> {
                     HExprKind::Local(s) => !block_mutates_local(body, s.0),
                     _ => true,
                 };
-                let can_alias = matches!(&li.ty, HType::Struct(_))
+                // An explicit reference binding (`for (&mut T x in &mut vec)`):
+                // the loop var is a reference TO the element, not the element by
+                // value, so bind it to the element's address.  Distinguished from
+                // a by-value pointer element (`for (*Thread t in ts)`, where the
+                // element type IS the pointer) by comparing the binding's pointee
+                // to the source's element type.
+                let li_inner: Option<&HType> = match &li.ty {
+                    HType::Ref { inner, .. } | HType::Ptr { inner, .. }
+                    | HType::OwnPtr { inner, .. } | HType::RawPtr { inner, .. } => Some(inner),
+                    _ => None,
+                };
+                let elem_ty = foreach_elem_ty(&src.ty);
+                let bind_by_ref = match (li_inner, elem_ty) {
+                    (Some(inner), Some(et)) => self.c_type(inner) == self.c_type(et),
+                    _ => false,
+                };
+                let can_alias = !bind_by_ref
+                    && matches!(&li.ty, HType::Struct(_))
                     && !self.drop_ty_owns(&li.ty)
                     && !block_mutates_local(body, var.0)
                     && src_local_ok;
-                if can_alias {
+                if bind_by_ref {
+                    self.wl(&format!("for (maka_int __i = 0; __i < {}; __i += 1) {{", len_str));
+                    self.open();
+                    self.wl(&format!("{} {} = &({}[__i]);", var_ty, var_name, elem_access));
+                    self.emit_block(f, body, true);
+                    self.close();
+                    self.wl("}");
+                } else if can_alias {
                     self.aliased_locals.insert(var.0);
                     self.wl(&format!("for (maka_int __i = 0; __i < {}; __i += 1) {{", len_str));
                     self.open();
@@ -9591,6 +9615,19 @@ impl<'a> Cx<'a> {
         }
     }
 
+}
+
+/// The element type produced by iterating `t` in a for-each, peeling any
+/// reference/pointer/heap wrapper around the container.  Used to decide whether
+/// a loop binding is the element by value or a reference to it.
+fn foreach_elem_ty(t: &HType) -> Option<&HType> {
+    match t {
+        HType::Array { elem, .. } | HType::Slice { elem, .. } | HType::Vec { elem } => Some(elem),
+        HType::Heap { inner }
+        | HType::Ref { inner, .. } | HType::Ptr { inner, .. }
+        | HType::OwnPtr { inner, .. } | HType::RawPtr { inner, .. } => foreach_elem_ty(inner),
+        _ => None,
+    }
 }
 
 /// If a `ForC` is a for-range counter provably within `[0, bound)` whose counter
