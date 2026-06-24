@@ -8161,6 +8161,26 @@ impl<'a> Cx<'a> {
             self.wl(&format!("*({}) {} {};", inner, assign_op_c(op), rhs));
             return;
         }
+        // Whole-array reassignment: a C array is not `=`-assignable, so copy.
+        // This keeps the bare-array representation (and its pointer-decay perf);
+        // only the explicit reassignment costs a memcpy.  An array-literal RHS
+        // becomes a compound literal so it can be copied from.
+        if matches!(op, HAssignOp::Assign) && matches!(&place.ty, HType::Array { .. }) {
+            // If the old contents own heap, drop them first (unless the new value
+            // is derived from the same array).
+            if self.drop_ty_owns(&place.ty) {
+                if let Some(root) = place_root_local(place) {
+                    if !expr_contains_local(value, root) { self.emit_field_drop(&lhs, &place.ty, 0); }
+                }
+            }
+            let src = if matches!(&value.kind, HExprKind::ArrayLit(_)) {
+                format!("(__typeof__({})){}", lhs, rhs)
+            } else {
+                rhs
+            };
+            self.wl(&format!("memcpy({}, {}, sizeof({}));", lhs, src, lhs));
+            return;
+        }
         // Drop-on-reassign: free the previous owning value before overwriting it.
         // Skipped (to avoid a double free) when the RHS reads the same root - it
         // may be moving out of, or deriving the new value from, the old one.

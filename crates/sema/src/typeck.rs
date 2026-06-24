@@ -632,10 +632,13 @@ impl<'a> TypeChecker<'a> {
             // path).  Pushing does not require this flag (it mutates through a
             // borrow), so a non-`mut` Vec is still usable, just not rebindable.
             HType::Vec { .. } => matches!(mutness, Mutness::Mut),
-            // refs, slices, fixed arrays, heap bindings: handle is fixed.  (A
-            // fixed array cannot be reassigned wholesale because a C array is not
-            // an assignable value; mutate elements instead.)
-            HType::Ref { .. } | HType::Slice { .. } | HType::Array { .. } | HType::Heap { .. } => false,
+            // A fixed array may be rebound wholesale when `mut`: codegen lowers
+            // the assignment to a memcpy (a C array is not `=`-assignable, but it
+            // is memcpy-able), keeping the bare-array representation and its
+            // pointer-decay performance.
+            HType::Array { .. } => matches!(mutness, Mutness::Mut),
+            // refs, slices, heap bindings: handle is fixed.
+            HType::Ref { .. } | HType::Slice { .. } | HType::Heap { .. } => false,
             // plain values: reassignable iff mut
             _ => matches!(mutness, Mutness::Mut),
         };
@@ -707,10 +710,10 @@ impl<'a> TypeChecker<'a> {
                 if ok { Ok(()) } else {
                     if matches!(li.ty, HType::Ref { .. }) {
                         Err(format!("cannot assign through `{}` - it is an immutable reference (`&T`); use `&mut T` to write through it", li.name))
-                    } else if li.mut_payload && matches!(li.ty, HType::Array { .. } | HType::Slice { .. }) {
-                        // Declared `mut`, but the whole aggregate cannot be rebound:
-                        // a C array is not an assignable value.
-                        Err(format!("cannot reassign `{}` wholesale - a fixed array cannot be rebound (a C array is not an assignable value); assign its elements instead (`{}[i] = ...`)", li.name, li.name))
+                    } else if li.mut_payload && matches!(li.ty, HType::Slice { .. }) {
+                        // Declared `mut`, but a slice is a fixed (ptr, len) view -
+                        // rebind the underlying storage, or assign its elements.
+                        Err(format!("cannot reassign the slice `{}` wholesale; assign its elements instead (`{}[i] = ...`)", li.name, li.name))
                     } else {
                         Err(format!("cannot assign to local `{}` - it was declared without `mut`", li.name))
                     }

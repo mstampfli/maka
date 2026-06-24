@@ -1,0 +1,21 @@
+// A fixed array may be reassigned wholesale when declared mut. A C array is not
+// =-assignable, so codegen lowers it to a memcpy - the bare-array representation
+// (and its pointer-decay parameter performance) is unchanged; only the explicit
+// reassignment costs a copy. An array-literal RHS is copied via a compound
+// literal; an array-to-array copy is a plain memcpy. Element writes are
+// independent (no aliasing). A non-mut array still cannot be rebound.
+unit main() {
+  mut [3]int a = [1, 2, 3];
+  a = [4, 5, 6];                 // literal reassign
+  log(a[0] + a[1] + a[2]);      // 15
+
+  mut [3]int b = [10, 20, 30];
+  a = b;                         // array-to-array copy
+  a[1] = 99;                     // mutate the copy; b must be unchanged
+  log(a[0] + a[1] + a[2]);      // 10 + 99 + 30 = 139
+  log(b[1]);                     // 20
+
+  mut [2][2]int g = [[1, 2], [3, 4]];
+  g = [[5, 6], [7, 8]];          // nested array reassign
+  log(g[0][0] + g[1][1]);       // 13
+}
