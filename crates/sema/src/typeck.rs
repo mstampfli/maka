@@ -3443,8 +3443,26 @@ impl<'a> TypeChecker<'a> {
             return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
         }
 
-        // Probe arg types once for overload resolution.
-        let mut probed: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+        // Probe arg types once for overload resolution.  When there is a single
+        // candidate by name and arity, there is no overload ambiguity, so probe
+        // each argument against that candidate's parameter type: this pushes the
+        // expected type down into generic struct/enum literals in argument
+        // position (bidirectional inference), e.g. `f(Option.Some{ value = ... })`
+        // where `f` expects a concrete `Option<Shape<int>>`.  A type hint only
+        // affects literals/constructors (idents and other exprs ignore it), so
+        // this is safe even for receiver/auto-borrow slots.  With multiple
+        // candidates the expected type is ambiguous, so fall back to no hint.
+        let single_expect: Option<Vec<HType>> = if candidates.len() == 1 {
+            let (_, sig) = &candidates[0];
+            if !sig.is_variadic && sig.param_tys.len() == args.len() {
+                Some(sig.param_tys.clone())
+            } else { None }
+        } else { None };
+        let mut probed: Vec<HExpr> = match &single_expect {
+            Some(ptys) => args.iter().enumerate()
+                .map(|(i, a)| self.check_expr(a, Some(&ptys[i]))).collect(),
+            None => args.iter().map(|a| self.check_expr(a, None)).collect(),
+        };
 
         // Dynamic dispatch path: if the receiver is a `dyn Trait` (possibly via &/*),
         // lower to an indirect call through the vtable. Skip overload resolution.

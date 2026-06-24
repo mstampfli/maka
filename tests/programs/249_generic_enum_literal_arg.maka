@@ -1,0 +1,20 @@
+// A generic enum literal constructed directly in argument position now infers
+// its type parameters from the (single) callee's parameter type.  Before, the
+// argument was probed with no expected type, so `Option.Some{ value = Shape.Seg
+// {...} }` got an under-specified type and no overload matched `describe`.
+import std.Option;
+enum Shape<T> { Dot, Seg { T a, T b } }
+int describe(Option<Shape<int>> o) {
+    return match (o) {
+        Some{value} match (value) {
+            Dot 0,
+            Seg{a, b} a + b,
+        },
+        None -1,
+    };
+}
+unit main() {
+    log(describe(Option.Some{ value = Shape.Seg{ a = 3, b = 4 } }));   // 7
+    log(describe(Option.Some{ value = Shape.Dot }));                   // 0
+    log(describe(Option.None));                                        // -1
+}
