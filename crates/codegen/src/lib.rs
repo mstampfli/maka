@@ -7491,6 +7491,16 @@ impl<'a> Cx<'a> {
                     self.close();
                     self.wl("}");
                 }
+                // A temporary owning container produced by a call/match (e.g.
+                // `for (x in make_vec())`) has no other owner, so free it
+                // (elements + buffer) after the loop.  A named place / borrow is
+                // freed by its owner, so __src (a shallow copy) is left alone.
+                if matches!(&src.kind, HExprKind::Call { .. } | HExprKind::Match { .. })
+                    && matches!(&src.ty, HType::Vec { .. } | HType::Heap { .. })
+                    && self.drop_ty_owns(&src.ty)
+                {
+                    self.emit_field_drop("__src", &src.ty, 0);
+                }
                 self.close();
                 self.wl("}");
             }

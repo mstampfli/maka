@@ -1,0 +1,41 @@
+// Iterating a temporary owning container produced by a call - for (x in make())
+// - must free that container after the loop. Regression: the for-loop
+// materialized the source into __src but never dropped it, so a temporary Vec
+// (and its owning elements) leaked. A named-local or borrowed source is freed
+// by its owner and must not be double-dropped, so only a fresh owned rvalue
+// (call/match result) is freed here.
+data Node { int v; }
+data Box { own &Node n; }
+
+Vec<int> ints(int n) {
+  mut Vec<int> v = [];
+  mut int i = 0;
+  while (i < n) { v.push(i); i = i + 1; }
+  return v;
+}
+
+Vec<Box> boxes() {
+  mut Vec<Box> v = [];
+  v.push(Box { n = alloc Node { v = 10 } });
+  v.push(Box { n = alloc Node { v = 20 } });
+  return v;
+}
+
+unit main() {
+  // Temporary Vec of scalars: buffer must be freed.
+  mut int s = 0;
+  for (int x in ints(5)) { s = s + x; }
+  log(s);                  // 10
+
+  // Temporary Vec of owning structs: elements and buffer must be freed.
+  mut int t = 0;
+  for (&Box b in boxes()) { t = t + b.n.v; }
+  log(t);                  // 30
+
+  // Sanity: a named-local source still iterates without double-free.
+  mut Vec<int> v = [];
+  v.push(7); v.push(8);
+  mut int u = 0;
+  for (int x in &v) { u = u + x; }
+  log(u);                  // 15
+}
