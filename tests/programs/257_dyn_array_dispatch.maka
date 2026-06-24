@@ -1,0 +1,18 @@
+data Cat { int n; }
+data Dog { int n; }
+logic Speak {
+    int sound(&Cat c) { return c.n; }
+    int sound(&Dog d) { return d.n * 10; }
+}
+unit main() {
+    Cat c = { n = 1 };
+    Dog d = { n = 2 };
+    [2]&dyn Speak arr = [&c as dyn Speak, &d as dyn Speak];
+    mut int sum = 0;
+    mut int i = 0;
+    while (i < 2) {
+        sum = sum + Speak.sound(&arr[i]);
+        i = i + 1;
+    }
+    log(sum);    // 1 + 20 = 21
+}

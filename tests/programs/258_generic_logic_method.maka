@@ -1,0 +1,10 @@
+data Box<T> { T inner; }
+logic Peek {
+    T peek<T>(&Box<T> b) { return b.inner; }
+}
+unit main() {
+    Box<int>  bi = { inner = 42 };
+    Box<char> bc = { inner = 'k' };
+    log(Peek.peek(&bi));    // 42
+    log(Peek.peek(&bc));    // k
+}

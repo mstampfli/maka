@@ -1,0 +1,10 @@
+import std.{ Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy };
+unit main() {
+    Atomic<int> a = atomic_new(0);
+    *Thread t1 = thread(unit() [a] { _ = atomic_add(a, 10); });
+    *Thread t2 = thread(unit() [a] { _ = atomic_add(a, 20); });
+    join(t1);
+    join(t2);
+    log(atomic_get(a));    // 30
+    atomic_destroy(a);
+}

@@ -1,0 +1,10 @@
+data Box<T> { T inner; }
+data Wrap<T> { own &Box<T> held; mut int tag; }
+int get<T>(&Wrap<T> w) {
+    return w.held.inner;
+}
+unit main() {
+    Wrap<int> w = Wrap { held = alloc Box { inner = 55 }, tag = 9 };
+    log(get(&w));    // 55
+    log(w.tag);      // 9
+}
