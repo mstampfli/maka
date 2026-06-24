@@ -1,0 +1,28 @@
+// A Vec whose element is a generic enum carrying an owning payload
+// (Vec<Opt<own &Node>>) exercises deep type-key nesting (the element typedef is
+// itself a monomorphized generic enum with a heap field) and recursive drop
+// through three levels: Vec -> each Opt -> the Some payload (own &Node). Mixed
+// Some/None elements; each owned Node must be freed exactly once.
+data Node { int v; }
+enum Opt<T> { Some { T v }, None }
+
+int sum_present() {
+  mut Vec<Opt<own &Node>> v = [];
+  v.push(Opt.Some { v = alloc Node { v = 1 } });
+  v.push(Opt.None);
+  v.push(Opt.Some { v = alloc Node { v = 2 } });
+  v.push(Opt.Some { v = alloc Node { v = 3 } });
+  v.push(Opt.None);
+  mut int s = 0;
+  for (int i in 0..(v.len as int)) {
+    s = s + match (v[i]) {
+      Some { v } { yield v.v; },
+      None { yield 0; },
+    };
+  }
+  return s;   // 1 + 0 + 2 + 3 + 0 = 6
+}
+
+unit main() {
+  log(sum_present());   // 6
+}
