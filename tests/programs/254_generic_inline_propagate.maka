@@ -1,0 +1,12 @@
+inline int checked<T>(T v, int code, bool bad) {
+    if (bad) { propagate code; }
+    return 1;
+}
+int run(int x) {
+    int ok = checked(x, 0 - 9, x < 0);
+    return 100 + ok;
+}
+unit main() {
+    log(run(5));        // 101
+    log(run(0 - 1));    // -9 (propagate fired)
+}

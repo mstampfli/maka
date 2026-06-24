@@ -1,0 +1,15 @@
+constexpr int N = 4;
+constexpr int M = N * 2;
+unit main() {
+    mut [N]int arr = [0; N];
+    mut int i = 0;
+    while (i < N) {
+        arr[i] = i * i;
+        i = i + 1;
+    }
+    log(arr[3]);    // 9
+    log(N);         // 4
+    log(M);         // 8
+    [M]int big = [1; M];
+    log(big[7]);    // 1
+}

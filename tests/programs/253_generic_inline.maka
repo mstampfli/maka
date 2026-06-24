@@ -1,0 +1,9 @@
+inline T pick<T>(T a, T b, bool first) {
+    if (first) { return a; }
+    return b;
+}
+unit main() {
+    log(pick(10, 20, true));     // 10
+    log(pick('x', 'y', false));  // y
+    log(pick(1, 2, false));      // 2
+}
