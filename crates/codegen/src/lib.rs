@@ -7432,14 +7432,33 @@ impl<'a> Cx<'a> {
                         (format!("(maka_int){}", len), src_c.clone())
                     }
                     HType::Slice { .. } | HType::Vec { .. } => {
-                        let src_key = self.type_key(&src.ty);
-                        let _ = src_key;
-                        let src_c_ty = self.c_type(&src.ty);
-                        self.wl(&format!("{} __src = {};", src_c_ty, src_c));
-                        if matches!(&src.ty, HType::Slice { .. }) {
-                            ("__src.len".to_string(), "__src.ptr".to_string())
+                        // If the body mutates a Vec Local source (e.g. push), its
+                        // backing buffer may be realloc'd or the binding reassigned
+                        // mid-iteration; a cached snapshot of `.data` would then
+                        // dangle (use-after-free).  Read `.data` live each access and
+                        // clamp the bound (see below) so iteration stays both
+                        // memory-safe and terminating.  Non-mutating loops keep the
+                        // cached snapshot (cheaper, and identical for them).
+                        let reread = matches!(&src.ty, HType::Vec { .. })
+                            && matches!(&src.kind, HExprKind::Local(s) if block_mutates_local(body, s.0));
+                        if reread {
+                            self.wl(&format!("maka_int __flen = (maka_int){}.len;", src_c));
+                            // Bound = min(current len, snapshot len).  The snapshot
+                            // cap gives snapshot semantics so a push cannot grow the
+                            // iteration unboundedly (no infinite loop); the live cap
+                            // keeps every index within the current buffer so a
+                            // shrink/reassign cannot read out of bounds.  Data is
+                            // read live each access.
+                            (format!("((maka_int){sc}.len < __flen ? (maka_int){sc}.len : __flen)", sc = src_c),
+                             format!("{}.data", src_c))
                         } else {
-                            ("__src.len".to_string(), "__src.data".to_string())
+                            let src_c_ty = self.c_type(&src.ty);
+                            self.wl(&format!("{} __src = {};", src_c_ty, src_c));
+                            if matches!(&src.ty, HType::Slice { .. }) {
+                                ("__src.len".to_string(), "__src.ptr".to_string())
+                            } else {
+                                ("__src.len".to_string(), "__src.data".to_string())
+                            }
                         }
                     }
                     HType::Heap { inner } if matches!(inner.as_ref(), HType::Vec { .. }) => {

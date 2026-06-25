@@ -1,0 +1,47 @@
+// Mutating a Vec while iterating it (e.g. push, which can realloc the backing
+// buffer) must stay memory-safe.  A foreach over a Vec whose body mutates that
+// same Vec re-reads the live `.data` each access and clamps the iteration to the
+// min of the snapshot length and the current length: a realloc cannot dangle a
+// cached data pointer (no use-after-free) and a push cannot grow the iteration
+// unboundedly (no infinite loop), while non-iterated pushed elements are still
+// owned and freed at scope exit (no leak).
+// Regression: the foreach cached the whole Vec struct, so a push-realloc freed
+// the cached data pointer -> heap-use-after-free.
+import std.{Vec, push, String, StringOps, string_from};
+
+int sum_with_push() {
+  mut Vec<int> v = [];
+  push(&mut v, 1); push(&mut v, 2); push(&mut v, 3);
+  mut int t = 0;
+  for (int x in v) {
+    if (x == 1) {
+      push(&mut v, 99); push(&mut v, 98); push(&mut v, 97); push(&mut v, 96);
+    }
+    t = t + x;
+  }
+  return t;   // snapshot count = the original 3 elements: 1 + 2 + 3 = 6
+}
+
+int sum_owning_with_push() {
+  mut Vec<String> v = [];
+  push(&mut v, string_from("aa"));
+  push(&mut v, string_from("bbb"));
+  push(&mut v, string_from("c"));
+  mut int t = 0;
+  for (String s in v) {
+    if (s.length() == 2) {
+      push(&mut v, string_from("zzzz")); push(&mut v, string_from("y"));
+    }
+    t = t + s.length();
+  }
+  return t;   // original 3: 2 + 3 + 1 = 6 (pushed strings owned + freed at drop)
+}
+
+unit main() {
+  mut int t = 0;
+  for (int i in 0..1000) {
+    t = t + sum_with_push();         // 6
+    t = t + sum_owning_with_push();  // 6
+  }
+  log(t);   // (6 + 6) * 1000 = 12000
+}
