@@ -1,0 +1,30 @@
+// Regression (#2): an InlineCall nested inside an inline function's body must be
+// expanded recursively with tag-aware local renaming.  The old emitter let a
+// nested inline fall through to the ordinary (untagged) emitter, so the outer
+// inline's params rendered as undeclared `a_0`-style names and the C did not
+// compile.  Arg rendering is now split out so a nested call renders its args in
+// the OUTER inline's tagged scope while taking its own fresh tag.  Covers a
+// plain int chain and an owning-String chain (drops must stay tag-correct);
+// verified leak-clean under ASan via the match_lsan sweep (`enum`/`match`).
+import std.{String, StringOps, string_from};
+
+enum Sel { A, B }
+
+int base(Sel s) {
+  return match (s) {
+    A 40,
+    B 0,
+  };
+}
+
+inline int inc(int n) { return n + 1; }
+inline int inc2(int n) { return inc(inc(n)); }              // nested inline call
+
+inline String bang(String s) { return s + string_from("!"); }
+inline String bang2(String s) { return bang(bang(s)); }     // nested inline, owning return
+
+unit main() {
+  log(inc2(base(Sel.A)));               // base=40 -> inc(inc(40)) = 42
+  String w = bang2(string_from("hi"));  // "hi" -> "hi!" -> "hi!!"
+  log(w.length());                      // 4
+}

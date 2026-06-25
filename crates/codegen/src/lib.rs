@@ -7723,6 +7723,19 @@ impl<'a> Cx<'a> {
     }
 
     fn emit_inline_expansion(&mut self, caller_f: &HFunc, callee: FuncId, args: &[HExpr], result_ty: &HType) -> String {
+        // Top-level expansion: args live in the caller's C function, so render
+        // them with the ordinary emitter.
+        let arg_strs: Vec<String> = args.iter().map(|a| self.emit_expr(caller_f, a)).collect();
+        self.emit_inline_expansion_args(callee, &arg_strs, result_ty)
+    }
+
+    /// Inline expansion given PRE-RENDERED argument strings.  Splitting argument
+    /// rendering out of the body expansion lets a NESTED `InlineCall` (one that
+    /// appears inside an inline function's body) render its args in the OUTER
+    /// inline's tagged scope (via `emit_inline_expr`), while a top-level call
+    /// renders them in the caller's scope (via `emit_expr`).  The nested call
+    /// still gets its own fresh `tag` for its locals, so names never collide.
+    fn emit_inline_expansion_args(&mut self, callee: FuncId, arg_strs: &[String], result_ty: &HType) -> String {
         // Find the inline HFunc by id.
         let inline_f = match self.sym.funcs.iter().find(|hf| hf.id == callee).cloned() {
             Some(hf) => hf,
@@ -7739,7 +7752,6 @@ impl<'a> Cx<'a> {
 
         // Emit argument-binding locals: for each param, declare a local of the param's type initialized with the arg expr.
         // Each inline-local needs a unique name in the caller's C function — append `_{tag}` to avoid collisions.
-        let arg_strs: Vec<String> = args.iter().map(|a| self.emit_expr(caller_f, a)).collect();
         for (i, &pid) in inline_f.params.iter().enumerate() {
             let li = &inline_f.locals[pid.0 as usize];
             let pname = inline_local_name(&inline_f, pid, &tag);
@@ -7988,6 +8000,17 @@ impl<'a> Cx<'a> {
             }
             HExprKind::Match { scrutinee, arms, result_ty } => {
                 self.emit_inline_match(inline_f, scrutinee, arms, result_ty, tag)
+            }
+            // A nested inline call inside this inline's body: its args reference
+            // THIS inline's params/locals, so render them in the current tagged
+            // scope; the nested expansion then takes its own fresh tag.  Without
+            // this the args would fall through to the untagged emitter and emit
+            // undeclared `a_0`-style names.
+            HExprKind::InlineCall { callee, args } => {
+                let arg_strs: Vec<String> = args.iter()
+                    .map(|a| self.emit_inline_expr(inline_f, a, tag))
+                    .collect();
+                self.emit_inline_expansion_args(*callee, &arg_strs, &e.ty)
             }
             // Everything else: fall back to ordinary emit_expr but with a dummy HFunc that holds
             // the inline locals so name lookups resolve. For simplicity, use the inline_f directly.
