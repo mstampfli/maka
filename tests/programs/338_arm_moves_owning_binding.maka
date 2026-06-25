@@ -1,0 +1,34 @@
+// An arm whose value MOVES an owning-struct binding (a `String`) out of the
+// scrutinee - by passing it to a by-value function, or by re-wrapping it into a
+// new enum - must null the scrutinee's field so its drop does not double-free.
+// (Regression: match_scrut_field_nulls only nulled `own *T`/`own &T` pointer
+// bindings, not owning structs like String, so this double-freed.)
+import std.{Option, String, StringOps, string_from};
+
+int eat(String s) { return s.length(); }
+
+int via_call(Option<String> o) {
+  return match (o) {
+    Option.Some { value } eat(value),
+    Option.None 0,
+  };
+}
+
+Option<String> rewrap(Option<String> o) {
+  return match (o) {
+    Option.Some { value } Option.Some { value = value },
+    Option.None Option.None,
+  };
+}
+
+unit main() {
+  mut int t = 0;
+  for (int i in 0..1000) {
+    t = t + via_call(Option.Some { value = string_from("hey") });   // 3
+    t = t + match (rewrap(Option.Some { value = string_from("xy") })) {
+      Option.Some { value } value.length(),
+      Option.None 0,                                                 // 2
+    };
+  }
+  log(t);   // (3 + 2) * 1000 = 5000
+}

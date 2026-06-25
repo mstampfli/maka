@@ -9864,10 +9864,15 @@ impl<'a> Cx<'a> {
         for (i, b) in bindings.iter().enumerate() {
             let Some(local) = b else { continue; };
             let li = &f.locals[local.0 as usize];
-            if !matches!(li.ty, HType::OwnPtr { .. } | HType::Heap { .. }) { continue; }
-            let moved = arm.value.as_ref().is_some_and(|val| self.value_moves_binding(val, *local));
-            if moved {
-                out.push_str(&format!("{}.payload.{}.{} = NULL; ", place, c_ident(&v.name), c_ident(&v.fields[i].name)));
+            // Any owning binding (an `own *T`/`own &T` pointer OR an owning struct
+            // like `String`/a `Vec`-backed value) that this arm moves out: zero the
+            // scrutinee's field so its drop does not double-free the escaped value.
+            // `arm_moves_binding` also catches a statement-form `return`/`propagate`,
+            // not just the expression-form arm value.
+            if !self.drop_ty_owns(&li.ty) { continue; }
+            if self.arm_moves_binding(arm, *local) {
+                out.push_str(&format!("{}.payload.{}.{} = ({}){{0}}; ",
+                    place, c_ident(&v.name), c_ident(&v.fields[i].name), self.c_type(&li.ty)));
             }
         }
         out
