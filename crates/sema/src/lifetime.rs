@@ -587,11 +587,19 @@ struct Analyzer<'a> {
     /// running its per-func pass — bridges (§6.3) capture flow into the
     /// synthesized closure body.
     capture_nonnull: Vec<(FuncId, LocalId)>,
+    /// Closure locals (`let f = ...[caps]...;`) that transitively borrow-capture
+    /// a local owning value the function frees on exit.  Returning or storing
+    /// such a closure beyond the function would dangle (the captured owner is
+    /// freed at scope exit while the escaped closure still points at it), so the
+    /// escape walk rejects it - mirrors the `&local` escape rule for the borrow a
+    /// capture really is.
+    closure_holds_dying: std::collections::HashSet<LocalId>,
 }
 
 impl<'a> Analyzer<'a> {
     fn new(sym: &'a SymTab, f: &mut HFunc, summaries: &'a [bool], ret_borrows: &'a [Vec<bool>]) -> Self {
         let n = f.locals.len();
+        let closure_holds_dying = compute_closure_holds_dying(sym, f);
         Self {
             sym,
             f: f as *mut _,
@@ -601,6 +609,7 @@ impl<'a> Analyzer<'a> {
             summaries,
             ret_borrows,
             capture_nonnull: Vec::new(),
+            closure_holds_dying,
         }
     }
 
@@ -1162,6 +1171,44 @@ impl<'a> Analyzer<'a> {
                     }
                 }
             }
+            // Returning/storing a closure LOCAL that borrow-captures a local the
+            // function frees on exit dangles: the captured owner is freed at
+            // scope exit while the escaped closure still points at it.
+            Local(id) => {
+                if self.closure_holds_dying.contains(id) {
+                    let name = self.f().locals[id.0 as usize].name.clone();
+                    let span = e.span;
+                    self.err(
+                        format!(
+                            "closure `{}` captures a local that the function frees on exit, so returning it would leave a dangling capture. Move the captured owner's ownership out, or build the value the closure needs in the caller",
+                            name
+                        ),
+                        span,
+                    );
+                }
+            }
+            // The same for a closure LITERAL appearing directly in the escaping
+            // value (`return unit() [b] { ... };`): each capture of a dying owner
+            // (or of a closure that itself holds one) would dangle.
+            Closure { env_values, .. } => {
+                for v in env_values {
+                    if let Some(c) = root_local(v) {
+                        if local_is_dying_owner(self.sym, self.f(), c)
+                            || self.closure_holds_dying.contains(&c)
+                        {
+                            let name = self.f().locals[c.0 as usize].name.clone();
+                            let span = e.span;
+                            self.err(
+                                format!(
+                                    "returned closure captures local `{}`, which the function frees on exit, so the caller would observe a dangling capture",
+                                    name
+                                ),
+                                span,
+                            );
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1366,6 +1413,60 @@ fn root_local(e: &HExpr) -> Option<LocalId> {
         HExprKind::AddrOfRef { place, .. } => root_local(place),
         _ => None,
     }
+}
+
+/// Whether the function frees this local's value on exit, so capturing it by
+/// reference into an escaping closure would dangle: it owns heap AND is not a
+/// borrowed reference parameter (whose referent is the caller's, outliving the
+/// call).  Stack owning values, `own *T`/heap locals, and owning value/`own`
+/// parameters all die on return.
+fn local_is_dying_owner(sym: &SymTab, f: &HFunc, id: LocalId) -> bool {
+    let li = &f.locals[id.0 as usize];
+    if !ty_owns_heap(sym, &li.ty) { return false; }
+    // A borrowed-reference param (`&T`/`*T`/`raw *T`) targets caller data; it
+    // does not own heap anyway, but guard explicitly for clarity.
+    if matches!(li.storage, StorageClass::Param)
+        && matches!(li.ty, HType::Ref { .. } | HType::Ptr { .. } | HType::RawPtr { .. })
+    {
+        return false;
+    }
+    true
+}
+
+/// Collect every `let d = ...closure-literal[caps]...;` in the function as
+/// `(d, [outer locals captured])`, descending into nested blocks.
+fn collect_closure_caps_block(b: &HBlock, out: &mut Vec<(LocalId, Vec<LocalId>)>) {
+    for s in &b.stmts {
+        if let HStmt::Let { local, init, .. } = s {
+            if let HExprKind::Closure { env_values, .. } = &init.kind {
+                let caps: Vec<LocalId> = env_values.iter().filter_map(root_local).collect();
+                if !caps.is_empty() { out.push((*local, caps)); }
+            }
+        }
+        for_each_child_block(s, &mut |cb| collect_closure_caps_block(cb, out));
+    }
+}
+
+/// Closure locals that transitively borrow-capture a local the function frees on
+/// exit.  Fixpoint over capture edges so a chain (outer captures inner captures
+/// an owner) is fully propagated.
+fn compute_closure_holds_dying(sym: &SymTab, f: &HFunc) -> std::collections::HashSet<LocalId> {
+    let mut closures: Vec<(LocalId, Vec<LocalId>)> = Vec::new();
+    collect_closure_caps_block(&f.body, &mut closures);
+    let mut set: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+    if closures.is_empty() { return set; }
+    loop {
+        let mut changed = false;
+        for (d, caps) in &closures {
+            if set.contains(d) { continue; }
+            if caps.iter().any(|c| local_is_dying_owner(sym, f, *c) || set.contains(c)) {
+                set.insert(*d);
+                changed = true;
+            }
+        }
+        if !changed { break; }
+    }
+    set
 }
 
 /// Hoist owning temporaries that are consumed by a borrowing context - a call

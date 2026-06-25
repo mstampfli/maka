@@ -1,0 +1,16 @@
+// A closure that borrow-captures a local the function frees on exit must not be
+// returned: the captured owner is freed at scope exit, so the returned closure
+// would hold a dangling capture (use-after-free when the caller invokes it).
+// Rejected at compile time, mirroring the `&local` escape rule.
+data Box { int v; }
+
+unit() make_dangling() {
+  own *Box b = alloc Box { v = 5 };
+  unit() f = unit() [b] { log(b!.v); };
+  return f;   // ERROR: f captures b, which make_dangling frees on exit
+}
+
+unit main() {
+  unit() g = make_dangling();
+  g();
+}
