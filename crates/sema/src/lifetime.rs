@@ -681,7 +681,7 @@ impl<'a> Analyzer<'a> {
                 //     reaches back to a parameter, `b` survives the call, so the
                 //     stash would escape.  Reject conservatively.
                 if matches!(place.kind, HExprKind::Field { .. } | HExprKind::Index { .. } | HExprKind::Unwrap { .. }) {
-                    self.check_no_local_ref_escape(value, false);
+                    self.check_no_local_ref_escape(value);
                     let place_root_is_param = root_local(place).map(|id|
                         matches!(self.f().locals[id.0 as usize].storage, StorageClass::Param)
                     ).unwrap_or(false);
@@ -763,7 +763,7 @@ impl<'a> Analyzer<'a> {
                     // dangle as soon as the caller dereferences the borrow.  Covers
                     // both `return &x;` directly and the escape-via-struct-field
                     // case `return Container { p = &x };`.
-                    self.check_no_local_ref_escape(v, false);
+                    self.check_no_local_ref_escape(v);
                 }
                 let _ = heap_drops;
             }
@@ -1051,31 +1051,9 @@ impl<'a> Analyzer<'a> {
     /// Walk an expression tree to catch every `&local` whose root is a
     /// function-scope stack binding — used to reject escape-via-return through
     /// any shape: direct, struct field, array element, variant payload, etc.
-    fn check_no_local_ref_escape(&mut self, e: &HExpr, nested: bool) {
+    fn check_no_local_ref_escape(&mut self, e: &HExpr) {
         use HExprKind::*;
         match &e.kind {
-            // A named local/parameter that OWNS its string buffer (`own *string`),
-            // reached while building the returned value (a struct/variant field, an
-            // array element, ...) but typed here as a borrowed `string` via the
-            // owned->borrow coercion: the owned buffer is freed when the function
-            // returns, so the embedded borrow would dangle.  Only flag it when
-            // nested - the direct `return owned;` form (and temporaries) is reported
-            // by the return-statement check in typeck, which has the pre-coercion type.
-            Local(id) if nested && matches!(e.ty, HType::Str) => {
-                let li = &self.f().locals[id.0 as usize];
-                let owns = li.ty.is_owned_string()
-                    || matches!(&li.ty, HType::Heap { inner } if matches!(**inner, HType::Str));
-                let name = li.name.clone();
-                if owns {
-                    self.err(
-                        format!(
-                            "owned string `{}` escapes the function as a borrowed `string` embedded in the returned value: its buffer is freed on return, so the caller would observe a dangling string. Carry it as an `own *string` to transfer ownership instead",
-                            name
-                        ),
-                        e.span,
-                    );
-                }
-            }
             AddrOfRef { place, .. } => {
                 if let Some(root) = root_local(place) {
                     let li = &self.f().locals[root.0 as usize];
@@ -1107,15 +1085,27 @@ impl<'a> Analyzer<'a> {
                 }
             }
             Struct { fields, .. } | VariantCtor { fields, .. } => {
-                for (_, fe) in fields { self.check_no_local_ref_escape(fe, true); }
+                for (_, fe) in fields { self.check_no_local_ref_escape(fe); }
             }
-            ArrayLit(elems) => for el in elems { self.check_no_local_ref_escape(el, true); }
-            HeapAlloc(inner) | Free(inner) => self.check_no_local_ref_escape(inner, true),
+            ArrayLit(elems) => for el in elems { self.check_no_local_ref_escape(el); }
+            HeapAlloc(inner) | Free(inner) => self.check_no_local_ref_escape(inner),
+            // An owned string (`own *string`) downgraded to a borrowed `string` whose result
+            // reaches the returned value: the owned buffer is always function-owned (a named
+            // local, a temporary, or an owning parameter the caller moved in), so it is freed
+            // on return and the borrow would dangle (or leak).  The `coerce` step marks the
+            // downgrade with this reinterpret cast; flag it wherever the walk reaches it -
+            // directly, or nested in a struct/variant field or array element.
+            Cast { expr, to, .. } if matches!(to, HType::Str) && expr.ty.is_owned_string() => {
+                self.err(
+                    "returning an owned string as a borrowed `string` would dangle: the owned buffer is freed when the function returns. Declare the return type as `own *string` to transfer ownership".to_string(),
+                    e.span,
+                );
+            }
             Cast { expr, .. } | CheckedCast { expr, .. } | DerefRef(expr) | DropWrite(expr)
-                | Un { expr, .. } | Unwrap { expr, .. } => self.check_no_local_ref_escape(expr, true),
+                | Un { expr, .. } | Unwrap { expr, .. } => self.check_no_local_ref_escape(expr),
             Bin { lhs, rhs, .. } => {
-                self.check_no_local_ref_escape(lhs, true);
-                self.check_no_local_ref_escape(rhs, true);
+                self.check_no_local_ref_escape(lhs);
+                self.check_no_local_ref_escape(rhs);
             }
             // A call whose borrowed return value aliases one of its arguments
             // (per `compute_return_borrows`): the result borrows whatever that
@@ -1132,7 +1122,7 @@ impl<'a> Analyzer<'a> {
                     .unwrap_or_default();
                 for m in borrowed {
                     if let Some(a) = args.get(m) {
-                        self.check_no_local_ref_escape(a, nested);
+                        self.check_no_local_ref_escape(a);
                     }
                 }
             }

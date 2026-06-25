@@ -1,0 +1,15 @@
+// Like neg_70, but the owned string is an unnamed TEMPORARY rather than a named
+// local: the concat `"a" + "b"` produces an `own *string` that is coerced to a
+// borrowed `string` field of the returned Box. The temporary's buffer is owned
+// by mk and freed (or leaked) on return, so the returned Box.s would dangle.
+// The owned->borrow coercion is marked with a reinterpret cast that the escape
+// walk flags wherever it reaches the returned value, so this is rejected just
+// like the named-local form. Make Box.s an `own *string` to transfer ownership.
+data Box { string s; }
+Box mk() {
+  return Box { s = "a" + "b" };
+}
+unit main() {
+  Box b = mk();
+  log(b.s);
+}

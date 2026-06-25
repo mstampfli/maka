@@ -468,24 +468,12 @@ impl<'a> TypeChecker<'a> {
             }
             ast::Stmt::Return(e, span) => {
                 let ret_ty = self.cur_ret.clone();
-                let v = e.as_ref().map(|e| {
-                    let h = self.check_expr(e, Some(&ret_ty));
-                    // Returning an owned string (`own *string` / `own &string`)
-                    // coerced down to a borrowed `string` is always unsound: the
-                    // owned buffer is freed when the function returns, whether it
-                    // is a named local, a temporary, or an owning parameter, so
-                    // the caller would observe a dangling string. Require an
-                    // ownership-transferring return type instead.
-                    let owned_str = h.ty.is_owned_string()
-                        || matches!(&h.ty, HType::Heap { inner } if matches!(**inner, HType::Str));
-                    if matches!(ret_ty, HType::Str) && owned_str {
-                        self.err(
-                            "returning an owned string as a borrowed `string` would dangle: the owned buffer is freed when the function returns. Declare the return type as `own *string` to transfer ownership".to_string(),
-                            h.span,
-                        );
-                    }
-                    self.coerce(h, &ret_ty)
-                });
+                // Returning an owned string coerced down to a borrowed `string` (directly, or
+                // nested in a struct/variant field, an array element, a temporary) is caught
+                // uniformly by the lifetime escape walk: the owned->borrow coercion is marked
+                // with a reinterpret cast (see `coerce`) that the walk flags wherever it reaches
+                // the returned value.  No separate typeck check is needed here.
+                let v = e.as_ref().map(|e| self.check_expr_coerce(e, &ret_ty));
                 // Lambda-escape rule: a capturing lambda returned by value escapes its
                 // creating scope, which would dangle. Force the user to allocate it.
                 if let Some(hv) = &v {
@@ -5250,8 +5238,19 @@ impl<'a> TypeChecker<'a> {
             return HExpr { ty: target.clone(), ..e };
         }
         // owned string → `string` — read-only borrowed view of the heap NUL-terminated buffer.
+        // Mark the downgrade with a reinterpret cast (not a bare retype) so the inner keeps its
+        // `own *string` type.  That lets the lifetime escape walk spot an owned buffer escaping
+        // as a borrowed `string` through the returned value in any shape - directly, a struct or
+        // variant field, an array element, a temporary - which would dangle or leak once the
+        // owner is freed on return.  The move/drop analysis treats this specific cast as a
+        // borrow (see `value_moves_binding`), so it does not perturb ownership of the inner.
         if matches!(target, HType::Str) && e.ty.is_owned_string() {
-            return HExpr { ty: HType::Str, ..e };
+            let span = e.span;
+            return HExpr {
+                kind: HExprKind::Cast { expr: Box::new(e), kind: CastKind::Reinterpret, to: HType::Str },
+                ty: HType::Str,
+                span,
+            };
         }
         // owned string → `*string` — the nullable sibling of the view above: a read-only
         // view that preserves nullability so the buffer pointer can be `== null` checked
