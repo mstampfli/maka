@@ -1,0 +1,26 @@
+// foreach over a Vec (or array) of `&dyn T` must bind each element BY VALUE: a
+// dyn is itself a fat pointer, so `&dyn T` and `dyn T` share one C type.  The
+// bind-by-reference heuristic compared only the loop var's pointee to the element
+// type (equal for a dyn element) and so emitted `Dyn_T x = &elem`, invalid C.
+// Fix also requires the var's own type to differ from the element type.
+import std.{Vec, push, String, StringOps, string_from};
+data Dog  { mut String name; int legs; }
+data Bird { mut String name; int legs; }
+logic Animal {
+  int legs(&Dog d)  { return d.legs; }
+  int legs(&Bird b) { return b.legs; }
+  int nlen(&Dog d)  { return d.name.length(); }
+  int nlen(&Bird b) { return b.name.length(); }
+}
+unit main() {
+  mut int t = 0;
+  for (int i in 0..1000) {
+    Dog d  = { name = string_from("Rex"),    legs = 4 };
+    Bird b = { name = string_from("Tweety"), legs = 2 };
+    mut Vec<&dyn Animal> zoo = [];
+    push(&mut zoo, &d as dyn Animal);
+    push(&mut zoo, &b as dyn Animal);
+    for (&dyn Animal a in zoo) { t = t + Animal.legs(a) + Animal.nlen(a); }
+  }
+  log(t);   // (4+3) + (2+6) = 7 + 8 = 15 ; *1000 = 15000
+}

@@ -7521,7 +7521,15 @@ impl<'a> Cx<'a> {
                 };
                 let elem_ty = foreach_elem_ty(&src.ty);
                 let bind_by_ref = match (li_inner, elem_ty) {
-                    (Some(inner), Some(et)) => self.c_type(inner) == self.c_type(et),
+                    // Bind by reference only when the loop var is genuinely one
+                    // indirection deeper than the element (its pointee matches the
+                    // element AND the var's own type is not already the element's).
+                    // A `&dyn T` element is itself a fat pointer whose C type equals
+                    // `dyn T`'s, so without the second check the var would be bound
+                    // to the element's address (`Dyn_T x = &elem`) - invalid C.
+                    (Some(inner), Some(et)) =>
+                        self.c_type(inner) == self.c_type(et)
+                        && self.c_type(&li.ty) != self.c_type(et),
                     _ => false,
                 };
                 let can_alias = !bind_by_ref
