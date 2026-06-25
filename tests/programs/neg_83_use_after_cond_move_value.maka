@@ -1,0 +1,11 @@
+// An owning VALUE moved on only one (non-diverging) branch and used after the
+// `if` is a use-after-move: unlike `own *T` it has no null state to fall back
+// on, so the merge marks it moved and the later use is rejected.
+import std.{String, StringOps, string_from};
+unit eat(String s) { }
+int tail(int c) {
+  String s = string_from("hi");
+  if (c > 0) { eat(s); }   // conditional move of an owning value
+  return s.length();       // ERROR: use of moved value
+}
+unit main() { log(tail(1)); }

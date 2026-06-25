@@ -1,0 +1,8 @@
+// Use-after-move via a let-binding move of an owning VALUE.
+import std.{String, StringOps, string_from};
+unit main() {
+  String s = string_from("hello");
+  String t = s;       // moves s into t
+  log(s.length());    // ERROR: use of moved value
+  log(t.length());
+}

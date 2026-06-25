@@ -1,0 +1,9 @@
+// Use-after-move via moving an owning VALUE into an aggregate literal.
+import std.{String, StringOps, string_from};
+data W { String name; }
+unit main() {
+  String s = string_from("hello");
+  W w = W { name = s };   // moves s into w
+  log(s.length());        // ERROR: use of moved value
+  log(w.name.length());
+}

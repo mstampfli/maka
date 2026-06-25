@@ -701,13 +701,13 @@ impl<'a> Analyzer<'a> {
                 self.state[id.0 as usize].auto_nulled = false;
                 declared_here.push(id);
 
-                // Move semantics: `heap T b = a;` or `own *T b = a;` moves `a`.
-                if matches!(li_ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
-                    if let HExprKind::Local(src) = init.kind {
-                        let src_ty = self.f().locals[src.0 as usize].ty.clone();
-                        if matches!(src_ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
-                            self.mark_moved(src, *span);
-                        }
+                // Move semantics: binding a bare owning Local (`own *T`/`heap T`
+                // or an owning VALUE like String/Vec/owning struct) moves it.
+                let _ = li_ty;
+                if let HExprKind::Local(src) = init.kind {
+                    if ty_owns_heap(self.sym, &init.ty) {
+                        let sp = *span;
+                        self.mark_moved(src, sp);
                     }
                 }
             }
@@ -739,6 +739,12 @@ impl<'a> Analyzer<'a> {
                     self.walk_expr(place);
                 }
                 self.walk_expr(value);
+                // A bare owning Local on the RHS is moved by the assignment.  A
+                // conditional move (e.g. `if (k != null) { nk[i] = k; }`) no
+                // longer hard-errors at the branch join - join_branches auto-nulls
+                // it per SPEC 6.4 - so it is safe to flag the move here too; a
+                // straight-line `x = y; y.use()` is then a proper use-after-move.
+                self.mark_owning_move(value);
                 // Reassigning a pointer-like or borrow-bearing local overwrites
                 // its deps (§3.8).  Pointers (`HType::Ptr`) participate in the
                 // null-collapse path; anything else (refs, structs that contain
@@ -978,19 +984,17 @@ impl<'a> Analyzer<'a> {
             HExprKind::Index { base, idx } => { self.walk_expr(base); self.walk_expr(idx); }
             HExprKind::Call { args, .. } => {
                 for a in args {
-                    // Detect move-in for heap parameters
+                    // Detect move-in for any owning value passed by value.
                     self.walk_expr(a);
-                    if matches!(a.ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
-                        if let HExprKind::Local(id) = a.kind {
-                            self.mark_moved(id, a.span);
-                        }
-                    }
+                    self.mark_owning_move(a);
                 }
             }
             HExprKind::Cast { expr, .. } => self.walk_expr(expr),
             HExprKind::CheckedCast { expr, .. } => self.walk_expr(expr),
-            HExprKind::Struct { fields, .. } => for (_, fe) in fields { self.walk_expr(fe); },
-            HExprKind::ArrayLit(elems) => for e in elems { self.walk_expr(e); },
+            // Aggregate literals move an owning value into the new aggregate (it
+            // now owns it), so the source local is moved - later use is rejected.
+            HExprKind::Struct { fields, .. } => for (_, fe) in fields { self.walk_expr(fe); self.mark_owning_move(fe); },
+            HExprKind::ArrayLit(elems) => for e in elems { self.walk_expr(e); self.mark_owning_move(e); },
             HExprKind::DropWrite(inner) => self.walk_expr(inner),
             HExprKind::ArrayToSlice { base, .. } => self.walk_expr(base),
             HExprKind::DerefRef(inner) => self.walk_expr(inner),
@@ -1009,11 +1013,7 @@ impl<'a> Analyzer<'a> {
                 // owning parameter.
                 for a in args {
                     self.walk_expr(a);
-                    if matches!(a.ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
-                        if let HExprKind::Local(id) = a.kind {
-                            self.mark_moved(id, a.span);
-                        }
-                    }
+                    self.mark_owning_move(a);
                 }
             }
             HExprKind::Closure { env_values, lifted, capture_lids, .. } => {
@@ -1039,7 +1039,7 @@ impl<'a> Analyzer<'a> {
             }
             HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => self.walk_expr(inner),
             HExprKind::FnRef(_) => {}
-            HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields { self.walk_expr(fe); },
+            HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields { self.walk_expr(fe); self.mark_owning_move(fe); },
             HExprKind::Match { scrutinee, arms, .. } => {
                 self.walk_expr(scrutinee);
                 for a in arms {
@@ -1223,6 +1223,21 @@ impl<'a> Analyzer<'a> {
         self.state[id.0 as usize].moved = true;
     }
 
+    /// Mark `a` moved if it is a bare owning Local consumed BY VALUE - the same
+    /// rule the drop pass uses (`ty_owns_heap`) to skip a value's scope-exit
+    /// free, applied to the use side so a later read is rejected as a
+    /// use-after-move.  Covers owning VALUES (String, Vec, owning struct/enum),
+    /// not just `own *T`/`heap T`; borrows (`&T`/`*T`) and bare `FnPtr` locals
+    /// own no heap here, so a borrowed receiver (`s.len()` -> `&s`) is not a
+    /// move.  Call AFTER walking `a`, so the move itself is not flagged.
+    fn mark_owning_move(&mut self, a: &HExpr) {
+        if ty_owns_heap(self.sym, &a.ty) {
+            if let HExprKind::Local(id) = a.kind {
+                self.mark_moved(id, a.span);
+            }
+        }
+    }
+
     /// Compute the deps set of an expression.
     fn expr_deps(&self, e: &HExpr) -> HashSet<u32> {
         let mut out = HashSet::new();
@@ -1363,14 +1378,32 @@ impl<'a> Analyzer<'a> {
     fn join_branches(&mut self, then_s: &[LocalState], else_s: &[LocalState], span: Span, in_scope: &std::collections::HashSet<u32>) {
         let n = self.state.len();
         for i in 0..n {
-            let li = &self.f().locals[i];
-            if matches!(li.ty, HType::Heap { .. } | HType::OwnPtr { .. }) {
+            // Classify the local up front so `li`'s borrow ends before we mutate
+            // `self.state[i]` below (the owner pointee vs owning value vs other).
+            let (is_owner_ptr, owns_heap_value) = {
+                let li = &self.f().locals[i];
+                let is_ptr = matches!(li.ty, HType::Heap { .. } | HType::OwnPtr { .. });
+                (is_ptr, !is_ptr && ty_owns_heap(self.sym, &li.ty))
+            };
+            if is_owner_ptr {
                 let tm = then_s[i].moved;
                 let em = else_s[i].moved;
-                if tm != em && in_scope.contains(&(i as u32)) {
-                    self.err(format!("`{}` is moved on one branch but not the other", li.name), span);
-                }
+                // Conditionally moved (moved on exactly one branch): per SPEC 6.4
+                // a path that frees/moves the owner AUTO-NULLs it; this is NOT a
+                // hard error.  SPEC 6.1 only invalidates a later *use*, and a
+                // conditional move with no later use is sound (e.g. hm_grow's
+                // `own *string k = m.keys[j]; if (k != null) { nk[i] = k; }`).
+                // After the merge the owner is no longer provably non-null, so a
+                // later deref needs fresh proof (SPEC 6.3); the owner is only
+                // "definitely moved" when BOTH paths moved it.
+                let cond_moved = tm != em && in_scope.contains(&(i as u32));
                 self.state[i].moved = tm && em;
+                self.state[i].known_nonnull = then_s[i].known_nonnull && else_s[i].known_nonnull && !cond_moved;
+                self.state[i].auto_nulled = then_s[i].auto_nulled || else_s[i].auto_nulled;
+                let mut deps = then_s[i].deps.clone();
+                for d in &else_s[i].deps { deps.insert(*d); }
+                self.state[i].deps = deps;
+                self.state[i].poisoned = then_s[i].poisoned || else_s[i].poisoned;
             } else {
                 // Reference/pointer: union deps; poison if poisoned in either reachable branch.
                 let mut deps = then_s[i].deps.clone();
@@ -1382,6 +1415,16 @@ impl<'a> Analyzer<'a> {
                 self.state[i].auto_nulled = then_s[i].auto_nulled || else_s[i].auto_nulled;
                 // known_nonnull holds only if BOTH branches established it.
                 self.state[i].known_nonnull = then_s[i].known_nonnull && else_s[i].known_nonnull;
+                // An owning VALUE (String/Vec/owning struct) is move-tracked but
+                // has no null state to fall back on like `own *T` does, so a move
+                // on EITHER reachable branch makes it moved after the join - a
+                // later use is then a use-after-move.  Both branches reach the
+                // join here (the caller filters out diverging branches), so the
+                // union is sound and does not over-reject a value consumed on a
+                // path that returns.
+                if owns_heap_value {
+                    self.state[i].moved = then_s[i].moved || else_s[i].moved;
+                }
             }
         }
     }

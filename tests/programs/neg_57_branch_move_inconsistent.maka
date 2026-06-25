@@ -1,11 +1,12 @@
-// A pre-existing owning local moved on only one (non-diverging) branch and used
-// after the `if` is a genuine inconsistency and must be rejected.
+// An owning pointer moved on only one (non-diverging) branch is AUTO-NULLED at
+// the merge (SPEC 6.4), not hard-errored. Dereferencing it after the `if`,
+// without re-proving non-null, is then rejected by the forced-handling rule
+// (SPEC 6.3) - an `own *T` errors only on a missing non-null proof.
 data Box { int v; }
-int eat(own *Box b) { if (b == null) { return 0; } return b!.v; }
+unit eat(own *Box b) { }
 int f(int c) {
     own *Box x = alloc Box { v = 7 };
-    mut int r = 0;
-    if (c > 0) { r = eat(x); }
-    return r + eat(x);
+    if (c > 0) { eat(x); }   // conditional move -> x auto-nulls at the join
+    return x!.v;             // ERROR: deref without a fresh non-null proof
 }
 unit main() { log(f(1)); }

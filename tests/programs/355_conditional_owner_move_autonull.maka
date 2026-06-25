@@ -1,0 +1,19 @@
+// SPEC 6.4: an `own *T` moved on only one branch auto-nulls at the merge instead
+// of hard-erroring, so a conditional move with no later use compiles and runs
+// clean on both paths - the shape the stdlib hm_grow rehash loop relies on
+// (`own *string k = ...; if (k != null) { nk[i] = k; }`).  The then-path's
+// callee frees the owner; the else-path frees it at scope exit (path-sensitive
+// drop). Verified leak/double-free clean under ASan.
+data Box { int v; }
+unit sink(own *Box b) { }
+
+int run(int c) {
+  own *Box k = alloc Box { v = 5 };
+  if (c > 0) { sink(k); }   // conditional move; k auto-nulls at the join, never read after
+  return c;
+}
+
+unit main() {
+  log(run(1));   // 1: then-path, sink frees k
+  log(run(0));   // 0: else-path, scope-exit frees k
+}

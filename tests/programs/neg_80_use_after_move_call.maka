@@ -1,0 +1,10 @@
+// Use-after-move for an owning VALUE passed by value to a consuming call: the
+// callee owns and frees it, so reading it afterward is a use-after-free.
+// Rejected like the `own *T` case.
+import std.{String, StringOps, string_from};
+unit eat(String s) { }
+unit main() {
+  String s = string_from("hello");
+  eat(s);             // moves s
+  log(s.length());    // ERROR: use of moved value
+}
