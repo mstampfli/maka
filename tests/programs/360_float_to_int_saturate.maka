@@ -1,0 +1,16 @@
+// Decision: float->int conversion SATURATES instead of being C UB out of range
+// (clamp to MIN/MAX) or on NaN (->0); matches Rust `as`, stays non-panicking per
+// the spec's "no runtime check" for numeric casts. (Computed floats are used for
+// the huge/inf/nan values to avoid a separate float-literal emit issue.)
+unit main() {
+  f64 k = 1000000000.0;
+  f64 big = k * k * k;          // 1e27, well above int64 range
+  log(big as int);             // INT64_MAX
+  log((0.0 - big) as int);     // INT64_MIN
+  f64 inf = 1.0 / 0.0;
+  log(inf as int);             // INT64_MAX
+  f64 nan = 0.0 / 0.0;
+  log(nan as int);             // 0
+  log(42.9 as int);            // 42 (normal truncation, in range)
+  log((0.0 - 7.5) as int);     // -7
+}

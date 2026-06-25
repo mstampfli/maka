@@ -321,6 +321,12 @@ impl<'a> Cx<'a> {
         // the same way zero and shift overflow panic.  `mn` is the type minimum.
         self.w("#define maka_divs(a, b, mn) (__extension__ ({ __typeof__(a) __dva = (a); __typeof__(b) __dvb = (b); if (__dvb == 0) maka_panic(\"divide by zero\"); if (__dva == (mn) && __dvb == -1) maka_panic(\"division overflow\"); __dva / __dvb; }))\n");
         self.w("#define maka_mods(a, b, mn) (__extension__ ({ __typeof__(a) __dma = (a); __typeof__(b) __dmb = (b); if (__dmb == 0) maka_panic(\"divide by zero\"); if (__dma == (mn) && __dmb == -1) maka_panic(\"division overflow\"); __dma % __dmb; }))\n");
+        // Saturating float->int conversion (C makes out-of-range / NaN UB): NaN->0,
+        // below-range->MIN, above-range->MAX.  `hi` is 2^(bits-1) (signed) or 2^bits
+        // (unsigned) as a double; saturated bounds are returned as ints, never routed
+        // through double (which would re-round INT64_MAX back out of range).
+        self.w("#define maka_f2i(f, T, hi, mn, mx) (__extension__ ({ double __ff = (double)(f); T __fr; if (__ff != __ff) __fr = 0; else if (__ff >= (hi)) __fr = (mx); else if (__ff < -(hi)) __fr = (mn); else __fr = (T)__ff; __fr; }))\n");
+        self.w("#define maka_f2u(f, T, hi, mx) (__extension__ ({ double __ff = (double)(f); T __fr; if (__ff != __ff) __fr = 0; else if (__ff <= 0.0) __fr = 0; else if (__ff >= (hi)) __fr = (mx); else __fr = (T)__ff; __fr; }))\n");
         self.w("#define maka_check_shift(n, w) (__extension__ ({ __typeof__(n) __msh = (n); if ((uint64_t)(__msh) >= (uint64_t)(w)) maka_panic(\"shift amount out of range\"); __msh; }))\n");
         // Atomic intrinsics — `__atomic_*` are compiler builtins (gcc/clang
         // emit them inline, no libc).  The runtime helpers that wrap them
@@ -450,6 +456,12 @@ impl<'a> Cx<'a> {
         // the same way zero and shift overflow panic.  `mn` is the type minimum.
         self.w("#define maka_divs(a, b, mn) (__extension__ ({ __typeof__(a) __dva = (a); __typeof__(b) __dvb = (b); if (__dvb == 0) maka_panic(\"divide by zero\"); if (__dva == (mn) && __dvb == -1) maka_panic(\"division overflow\"); __dva / __dvb; }))\n");
         self.w("#define maka_mods(a, b, mn) (__extension__ ({ __typeof__(a) __dma = (a); __typeof__(b) __dmb = (b); if (__dmb == 0) maka_panic(\"divide by zero\"); if (__dma == (mn) && __dmb == -1) maka_panic(\"division overflow\"); __dma % __dmb; }))\n");
+        // Saturating float->int conversion (C makes out-of-range / NaN UB): NaN->0,
+        // below-range->MIN, above-range->MAX.  `hi` is 2^(bits-1) (signed) or 2^bits
+        // (unsigned) as a double; saturated bounds are returned as ints, never routed
+        // through double (which would re-round INT64_MAX back out of range).
+        self.w("#define maka_f2i(f, T, hi, mn, mx) (__extension__ ({ double __ff = (double)(f); T __fr; if (__ff != __ff) __fr = 0; else if (__ff >= (hi)) __fr = (mx); else if (__ff < -(hi)) __fr = (mn); else __fr = (T)__ff; __fr; }))\n");
+        self.w("#define maka_f2u(f, T, hi, mx) (__extension__ ({ double __ff = (double)(f); T __fr; if (__ff != __ff) __fr = 0; else if (__ff <= 0.0) __fr = 0; else if (__ff >= (hi)) __fr = (mx); else __fr = (T)__ff; __fr; }))\n");
         self.w("#define maka_check_shift(n, w) (__extension__ ({ __typeof__(n) __msh = (n); if ((uint64_t)(__msh) >= (uint64_t)(w)) maka_panic(\"shift amount out of range\"); __msh; }))\n");
         // log helpers
         self.w("static void maka_log_int(maka_int v) { printf(\"%lld\\n\", (long long)v); }\n");
@@ -8156,7 +8168,7 @@ impl<'a> Cx<'a> {
                     return self.emit_to_dyn(inline_f, expr, trait_name, *struct_id);
                 }
                 let s = self.emit_inline_expr(inline_f, expr, tag);
-                self.emit_cast(s, kind.clone(), to)
+                self.emit_cast(s, kind.clone(), to, &expr.ty)
             }
             HExprKind::Struct { id, fields } => {
                 let info = self.sym.struct_info(*id);
@@ -9497,14 +9509,14 @@ impl<'a> Cx<'a> {
                     return self.emit_to_dyn(f, expr, trait_name, *struct_id);
                 }
                 let s = self.emit_expr(f, expr);
-                self.emit_cast(s, kind.clone(), to)
+                self.emit_cast(s, kind.clone(), to, &expr.ty)
             }
             HExprKind::CheckedCast { expr, kind, to } => {
                 // Dead path: the parser no longer constructs CheckedCast.
                 // Fall back to the regular cast emitter; new int→Enum and
                 // *int→*Enum live in `emit_cast` (see CastKind cases).
                 let s = self.emit_expr(f, expr);
-                self.emit_cast(s, kind.clone(), to)
+                self.emit_cast(s, kind.clone(), to, &expr.ty)
             }
             HExprKind::Struct { id, fields } => {
                 let info = self.sym.struct_info(*id);
@@ -10090,9 +10102,26 @@ impl<'a> Cx<'a> {
                 c_ident(trait_name), data_expr, c_ident(&sname))
     }
 
-    fn emit_cast(&self, s: String, kind: CastKind, to: &HType) -> String {
+    /// Saturating float->int conversion (C makes the out-of-range / NaN cases UB).
+    fn emit_float_to_int(&self, s: &str, to: &HType) -> String {
+        let to_c = self.c_type(to);
+        let bits = int_bits(to);
+        if is_signed_int(to) {
+            let (hi, mn, mx) = sat_signed_lits(bits);
+            format!("maka_f2i({}, {}, {}, {}, {})", s, to_c, hi, mn, mx)
+        } else {
+            let (hi, mx) = sat_unsigned_lits(bits);
+            format!("maka_f2u({}, {}, {}, {})", s, to_c, hi, mx)
+        }
+    }
+
+    fn emit_cast(&self, s: String, kind: CastKind, to: &HType, from: &HType) -> String {
         let to_c = self.c_type(to);
         match kind {
+            // float -> int is C-undefined out of range / on NaN; saturate it.
+            CastKind::Numeric if is_float_ty(from) && is_int_ty(to) => {
+                self.emit_float_to_int(&s, to)
+            }
             CastKind::Numeric | CastKind::SignChange | CastKind::EnumToInt | CastKind::CharIntInt | CastKind::Identity => {
                 format!("(({}){})", to_c, s)
             }
@@ -10425,6 +10454,45 @@ fn shift_width(ty: &HType) -> u32 {
 /// sign bit (`int` and signed sized ints; `char`/`u8` are unsigned).
 fn is_signed_int(ty: &HType) -> bool {
     matches!(ty, HType::Int) || matches!(ty, HType::SizedInt { signed: true, .. })
+}
+
+fn is_float_ty(ty: &HType) -> bool {
+    matches!(ty, HType::Float | HType::SizedFloat { .. })
+}
+
+fn is_int_ty(ty: &HType) -> bool {
+    matches!(ty, HType::Int | HType::SizedInt { .. } | HType::Char)
+}
+
+/// Bit width of an integer type for saturation thresholds (usize/isize = 64).
+fn int_bits(ty: &HType) -> u32 {
+    match ty {
+        HType::Char => 8,
+        HType::SizedInt { bits: 0, .. } => 64,
+        HType::SizedInt { bits, .. } => *bits as u32,
+        _ => 64,
+    }
+}
+
+/// `(2^(bits-1) as double-literal, MIN int-literal, MAX int-literal)` for a
+/// signed integer type, used by the saturating float->int conversion.
+fn sat_signed_lits(bits: u32) -> (&'static str, &'static str, &'static str) {
+    match bits {
+        8 => ("128.0", "(-128)", "127"),
+        16 => ("32768.0", "(-32768)", "32767"),
+        32 => ("2147483648.0", "(-2147483647 - 1)", "2147483647"),
+        _ => ("9223372036854775808.0", "(-9223372036854775807LL - 1)", "9223372036854775807LL"),
+    }
+}
+
+/// `(2^bits as double-literal, MAX uint-literal)` for an unsigned integer type.
+fn sat_unsigned_lits(bits: u32) -> (&'static str, &'static str) {
+    match bits {
+        8 => ("256.0", "255"),
+        16 => ("65536.0", "65535"),
+        32 => ("4294967296.0", "4294967295U"),
+        _ => ("18446744073709551616.0", "18446744073709551615ULL"),
+    }
 }
 
 /// The minimum value of a signed integer type as a C literal, used by maka_divs
