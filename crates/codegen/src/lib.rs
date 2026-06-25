@@ -317,6 +317,7 @@ impl<'a> Cx<'a> {
         // divisor is C undefined behaviour (a hardware trap), so panic cleanly
         // instead.  Type-preserving so the division keeps its operand width.
         self.w("#define maka_check_div(d) (__extension__ ({ __typeof__(d) __mdz = (d); if (__mdz == 0) maka_panic(\"divide by zero\"); __mdz; }))\n");
+        self.w("#define maka_check_shift(n, w) (__extension__ ({ __typeof__(n) __msh = (n); if ((uint64_t)(__msh) >= (uint64_t)(w)) maka_panic(\"shift amount out of range\"); __msh; }))\n");
         // Atomic intrinsics — `__atomic_*` are compiler builtins (gcc/clang
         // emit them inline, no libc).  The runtime helpers that wrap them
         // in `maka_atomic_*` symbols are kept here for any extern decl that
@@ -441,6 +442,7 @@ impl<'a> Cx<'a> {
         // so codegen emits a raw `(*p)` and never needs a runtime null check.
         self.w("static inline maka_int maka_check_idx(maka_int i, maka_int len, const char* msg){ if(i<0||i>=len) maka_panic(msg); return i; }\n");
         self.w("#define maka_check_div(d) (__extension__ ({ __typeof__(d) __mdz = (d); if (__mdz == 0) maka_panic(\"divide by zero\"); __mdz; }))\n");
+        self.w("#define maka_check_shift(n, w) (__extension__ ({ __typeof__(n) __msh = (n); if ((uint64_t)(__msh) >= (uint64_t)(w)) maka_panic(\"shift amount out of range\"); __msh; }))\n");
         // log helpers
         self.w("static void maka_log_int(maka_int v) { printf(\"%lld\\n\", (long long)v); }\n");
         self.w("static void maka_log_float(maka_float v) { printf(\"%g\\n\", v); }\n");
@@ -7929,6 +7931,9 @@ impl<'a> Cx<'a> {
                 if needs_div_guard(*op, &lhs.ty, rhs) {
                     return format!("(({}) {} maka_check_div({}))", l, binop_c(*op), r);
                 }
+                if matches!(op, HBinOp::Shl | HBinOp::Shr) {
+                    return self.emit_shift(&l, *op, &r, &lhs.ty);
+                }
                 format!("(({}) {} ({}))", l, binop_c(*op), r)
             }
             HExprKind::Un { op, expr } => {
@@ -8206,6 +8211,25 @@ impl<'a> Cx<'a> {
     /// field/index slot, which a monolithic container drop cannot selectively
     /// skip, needs the runtime null (the statement-form analogue is
     /// emit_move_out_null, used for Let/Assign).
+    /// Emit a `<<` / `>>` shift with full well-definedness.  C left-shifts have
+    /// three undefined cases: a shift amount >= the operand width, a negative
+    /// amount, and a left shift into the sign bit of a signed type.  Guard the
+    /// amount (panic if out of range, like maka_check_div) and, for a signed left
+    /// shift, perform the shift in the unsigned counterpart and reinterpret back
+    /// (well-defined two's-complement).  The result is cast to the operand type so
+    /// a narrow type is masked to its width.
+    fn emit_shift(&self, l: &str, op: HBinOp, r: &str, lhs_ty: &HType) -> String {
+        let w = shift_width(lhs_ty);
+        let checked = format!("maka_check_shift({}, {})", r, w);
+        let st = self.c_type(lhs_ty);
+        if matches!(op, HBinOp::Shl) && is_signed_int(lhs_ty) {
+            let ut = unsigned_ctype(lhs_ty);
+            format!("(({0})(({1})({2}) << {3}))", st, ut, l, checked)
+        } else {
+            format!("(({0})(({1}) {2} {3}))", st, l, binop_c(op), checked)
+        }
+    }
+
     fn emit_move_consuming(&mut self, f: &HFunc, e: &HExpr) -> String {
         let s = self.emit_expr(f, e);
         if !matches!(&e.kind, HExprKind::Field { .. } | HExprKind::Index { .. }) { return s; }
@@ -8692,6 +8716,9 @@ impl<'a> Cx<'a> {
                 }
                 if needs_div_guard(*op, &lhs.ty, rhs) {
                     return format!("(({}) {} maka_check_div({}))", l, opc, r);
+                }
+                if matches!(op, HBinOp::Shl | HBinOp::Shr) {
+                    return self.emit_shift(&l, *op, &r, &lhs.ty);
                 }
                 format!("(({}) {} ({}))", l, opc, r)
             }
@@ -10313,6 +10340,35 @@ fn printf_conv(s: String, ty: &HType) -> String {
 /// An integer `/` or `%` whose divisor is not a known-non-zero literal needs a
 /// runtime zero-check (`maka_check_div`): a zero divisor is C undefined
 /// behaviour.  Float division is defined (inf/nan) so it is never guarded, and a
+/// Bit width of an integer operand for shift bounds: a valid shift amount is in
+/// `0..width`.  `int` and pointer-sized ints are 64; `char`/`u8` are 8.
+fn shift_width(ty: &HType) -> u32 {
+    match ty {
+        HType::Char => 8,
+        HType::SizedInt { bits: 0, .. } => 64,
+        HType::SizedInt { bits, .. } => *bits as u32,
+        _ => 64,
+    }
+}
+
+/// Whether a left shift of this type needs the unsigned-domain workaround for the
+/// sign bit (`int` and signed sized ints; `char`/`u8` are unsigned).
+fn is_signed_int(ty: &HType) -> bool {
+    matches!(ty, HType::Int) || matches!(ty, HType::SizedInt { signed: true, .. })
+}
+
+/// Same-width unsigned C type, used to perform a signed left shift in the
+/// unsigned domain before reinterpreting the bits back.
+fn unsigned_ctype(ty: &HType) -> String {
+    match ty {
+        HType::Int => "uint64_t".into(),
+        HType::SizedInt { bits: 0, .. } => "uintptr_t".into(),
+        HType::SizedInt { bits, .. } => format!("uint{}_t", bits),
+        HType::Char => "maka_char".into(),
+        _ => "uint64_t".into(),
+    }
+}
+
 /// literal non-zero divisor is provably safe so the check is elided.
 fn needs_div_guard(op: HBinOp, lhs_ty: &HType, rhs: &HExpr) -> bool {
     matches!(op, HBinOp::Div | HBinOp::Mod)

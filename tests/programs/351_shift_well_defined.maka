@@ -1,0 +1,16 @@
+// Shifts are well-defined.  A valid amount shifts normally; a left shift into the
+// sign bit is computed in the unsigned domain (no UB) and yields the expected
+// two's-complement value; the result is masked to the operand width.
+// (An out-of-range or negative shift amount panics at runtime - not assertable
+// here, verified separately.)
+unit main() {
+  i64 x = 1;
+  log((x << 4) as int);          // 16
+  log((1024 >> 3) as int);       // 128
+  i64 hi = (1 as i64) << 63;     // INT64_MIN, defined (was UB)
+  if (hi < 0) { log(1); } else { log(0); }                     // 1
+  u8 b = (1 as u8) << 7;
+  log(b as int);                 // 128
+  u32 c = (1 as u32) << 31;
+  if ((c as i64) == 2147483648) { log(1); } else { log(0); }   // 1
+}
