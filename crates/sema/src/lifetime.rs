@@ -675,6 +675,41 @@ impl<'a> Analyzer<'a> {
         let _ = live_outer;
     }
 
+    /// Walk a loop body with a move-state fixpoint: a value moved by the body is
+    /// moved again on the next iteration, so after a first (silent) pass we fold
+    /// the body's moves into the entry state and re-walk, surfacing a
+    /// cross-iteration re-move / use-after-move that a single pass misses.  A
+    /// value re-assigned before the move on each iteration (`while { x = alloc;
+    /// eat(x); }`) is re-lived on the second pass, so it is correctly accepted.
+    /// `depth` is the body's depth; `narrow` is a pointer proven non-null by the
+    /// loop condition (narrowed inside the body).
+    fn walk_loop_body(&mut self, body: &mut HBlock, live_outer: &mut Vec<LocalId>, depth: u32, narrow: Option<LocalId>) {
+        let pre = self.snapshot();
+        let err_mark = self.errors.len();
+        let cap_mark = self.capture_nonnull.len();
+        if let Some(p) = narrow { self.state[p.0 as usize].narrowed_until = Some(depth); }
+        self.walk_block(body, live_outer, depth);
+        if let Some(p) = narrow { self.state[p.0 as usize].narrowed_until = None; }
+        let post = self.snapshot();
+        // Re-walk only if the body moved something that was live at entry - the
+        // loop-back edge then re-enters with it moved.  Pass 2 is a superset of
+        // pass 1's diagnostics (same flow, more entry moves), so discard pass-1
+        // errors / capture facts to avoid duplicates.
+        let new_moves = (0..self.state.len()).any(|i| post[i].moved && !pre[i].moved);
+        if new_moves {
+            self.errors.truncate(err_mark);
+            self.capture_nonnull.truncate(cap_mark);
+            let mut entry = pre;
+            for i in 0..entry.len() {
+                if post[i].moved { entry[i].moved = true; }
+            }
+            self.restore(entry);
+            if let Some(p) = narrow { self.state[p.0 as usize].narrowed_until = Some(depth); }
+            self.walk_block(body, live_outer, depth);
+            if let Some(p) = narrow { self.state[p.0 as usize].narrowed_until = None; }
+        }
+    }
+
     fn walk_stmt(&mut self, s: &mut HStmt, declared_here: &mut Vec<LocalId>, live_outer: &mut Vec<LocalId>, depth: u32) {
         match s {
             HStmt::Let { local, init, span } => {
@@ -887,14 +922,7 @@ impl<'a> Analyzer<'a> {
                 self.walk_expr(cond);
                 // narrow inside the body when the condition is `p != null`
                 let body_narrow = self.detect_not_null_narrow(cond);
-                if let Some(p) = body_narrow {
-                    self.state[p.0 as usize].narrowed_until = Some(depth + 1);
-                }
-                // For simplicity we don't do a fixpoint; we walk once.
-                self.walk_block(body, live_outer, depth + 1);
-                if let Some(p) = body_narrow {
-                    self.state[p.0 as usize].narrowed_until = None;
-                }
+                self.walk_loop_body(body, live_outer, depth + 1, body_narrow);
             }
             HStmt::Block(b) => self.walk_block(b, live_outer, depth + 1),
             HStmt::Unsafe(b, _) => self.walk_block(b, live_outer, depth + 1),
@@ -903,11 +931,11 @@ impl<'a> Analyzer<'a> {
                 self.walk_stmt(init, declared_here, live_outer, depth);
                 self.walk_expr(cond);
                 self.walk_stmt(step, declared_here, live_outer, depth);
-                self.walk_block(body, live_outer, depth + 1);
+                self.walk_loop_body(body, live_outer, depth + 1, None);
             }
             HStmt::ForEach { src, body, .. } => {
                 self.walk_expr(src);
-                self.walk_block(body, live_outer, depth + 1);
+                self.walk_loop_body(body, live_outer, depth + 1, None);
             }
             HStmt::Propagate { value: Some(v), .. } => self.walk_expr(v),
             HStmt::Propagate { value: None, .. } => {}

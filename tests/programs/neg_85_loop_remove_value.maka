@@ -1,0 +1,7 @@
+// Same cross-iteration re-move for an owning VALUE, in a range for-loop.
+import std.{String, StringOps, string_from};
+unit eat(String s) { }
+unit main() {
+  String s = string_from("hi");
+  for (int i in 0..3) { eat(s); }   // ERROR: s re-moved next iteration
+}

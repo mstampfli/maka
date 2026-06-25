@@ -1,0 +1,28 @@
+// Regression: the lifetime pass does a move-state fixpoint over loop bodies, so
+// a cross-iteration re-move is rejected (neg_84/85) while valid loop patterns
+// still compile and run clean: a borrow each iteration, a fresh body-local moved
+// each iteration, and an outer owner re-set before the move each iteration.
+data Box { int v; }
+unit eat(own *Box b) { }
+int val_of(*Box b) { if (b == null) { return 0; } return b!.v; }
+
+unit main() {
+  // borrow an outer owner each iteration (not a move)
+  own *Box keep = alloc Box { v = 5 };
+  mut int i = 0;
+  mut int total = 0;
+  while (i < 3) { total = total + val_of(keep); i = i + 1; }
+  log(total);                                  // 15
+
+  // a fresh body-local moved each iteration
+  mut int j = 0;
+  while (j < 2) { own *Box t = alloc Box { v = j }; eat(t); j = j + 1; }
+
+  // an outer owner re-set before the move each iteration
+  own *Box cur = alloc Box { v = 0 };
+  mut int k = 0;
+  while (k < 2) { eat(cur); cur = alloc Box { v = k }; k = k + 1; }
+  eat(cur);
+
+  log(0);                                      // 0
+}
