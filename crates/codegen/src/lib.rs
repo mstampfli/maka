@@ -1026,6 +1026,11 @@ impl<'a> Cx<'a> {
         // Stored as void* so the forward decl doesn't require the full type.
         self.w("    _Atomic(void*)  home_sched;\n");
         self.w("    _Atomic int64_t home_sched_epoch;\n");
+        // env_drop: per-closure recursive drop for the capture env, run before the
+        // env is freed so an owner MOVED into the thread (capture-by-value of
+        // `own *T`) is freed by the thread - even on cancel, where the body never
+        // runs.  NULL when the env owns no heap.  calloc'd, so default NULL.
+        self.w("    void (*env_drop)(void*);\n");
         self.w("} Thread;\n");
         // Bump/drop refs.  free(t) is illegal — always go through unref.
         self.w("static inline void __maka_thread_ref(Thread* t) {\n");
@@ -1038,6 +1043,13 @@ impl<'a> Cx<'a> {
         self.w("        pthread_cond_destroy(&t->done_cond);\n");
         self.w("        free(t);\n");
         self.w("    }\n");
+        self.w("}\n");
+        // Free a thread/fiber/job capture env, first running its recursive drop
+        // (t->env_drop) so any owner MOVED into the thread is freed exactly once,
+        // here, by the thread - regardless of whether the body ran (cancel).
+        self.w("static inline void __maka_free_env(Thread* t, void* env) {\n");
+        self.w("    if (env && t && t->env_drop) t->env_drop(env);\n");
+        self.w("    free(env);\n");
         self.w("}\n");
         // Allocator that initializes the mutex/cond + refcount=2 (one for the
         // returned handle, one for the runner side).  Every Thread alloc site
@@ -1095,13 +1107,14 @@ impl<'a> Cx<'a> {
         // Drop the runner-side ref so join/detach can free.  Without this,
         // every thread() leaks a Thread + its mutex/cond.
         self.w("    __maka_thread_unref(a->h);\n");
-        self.w("    free(a->env);\n");
+        self.w("    __maka_free_env(a->h, a->env);\n");
         self.w("    free(a);\n");
         self.w("    return NULL;\n");
         self.w("}\n");
         // thread() — kernel thread tier, default ~8 MB stack.
-        self.w("maka_unit* __maka_spawn_thread(void* code, void* env) {\n");
+        self.w("maka_unit* __maka_spawn_thread(void* code, void* env, void* env_drop) {\n");
         self.w("    Thread* t = __maka_thread_new();\n");
+        self.w("    t->env_drop = (void(*)(void*))env_drop;\n");
         self.w("    __maka_handle_args_t* a = (__maka_handle_args_t*)malloc(sizeof(__maka_handle_args_t));\n");
         self.w("    a->code = code; a->env = env; a->h = t;\n");
         self.w("    __maka_spawn_pthread(&t->handle, __maka_handle_entry, a, t);\n");
@@ -1866,7 +1879,7 @@ impl<'a> Cx<'a> {
         // slab.  Mirrors __maka_cancel_fiber_local at line 2668.
         self.w("                if (f != maka_anchor_fiber) {\n");
         self.w("                    while (atomic_load(&fcompl->aio_in_flight)) { struct timespec __mk_aio_ts = { 0, 1000 }; nanosleep(&__mk_aio_ts, NULL); }\n");
-        self.w("                    free(f->entry_env); __maka_slab_free(f->slab); free(f);\n");
+        self.w("                    __maka_free_env(f->completion, f->entry_env); __maka_slab_free(f->slab); free(f);\n");
         self.w("                }\n");
         self.w("                /* Drop the runner-side ref; last drop frees.\n");
         self.w("                   Both joiner + detacher race against this on\n");
@@ -2076,7 +2089,7 @@ impl<'a> Cx<'a> {
         self.w("            pthread_cond_broadcast(&tcompl->done_cond);\n");
         self.w("            pthread_mutex_unlock(&tcompl->done_mutex);\n");
         self.w("        }\n");
-        self.w("        if (wake->entry_env) free(wake->entry_env);\n");
+        self.w("        if (wake->entry_env) __maka_free_env(wake->completion, wake->entry_env);\n");
         self.w("        if (wake->slab) __maka_slab_free(wake->slab);\n");
         self.w("        free(wake);\n");
         self.w("        if (tcompl) __maka_thread_unref(tcompl);\n");
@@ -2206,10 +2219,11 @@ impl<'a> Cx<'a> {
         self.w("    swapcontext(&f->ctx, &maka_sched_ctx);\n");
         self.w("}\n");
         // spawn(): create a userspace cooperative fiber.
-        self.w("maka_unit* __maka_spawn_fiber(void* code, void* env) {\n");
+        self.w("maka_unit* __maka_spawn_fiber(void* code, void* env, void* env_drop) {\n");
         self.w("    __maka_sched_init();\n");
         self.w("    Thread* t = __maka_thread_new();\n");
         self.w("    t->is_fiber = 1;\n");
+        self.w("    t->env_drop = (void(*)(void*))env_drop;\n");
         self.w("    maka_fiber_t* f = (maka_fiber_t*)calloc(1, sizeof(maka_fiber_t));\n");
         self.w("    if (!f) {\n");
         self.w("        atomic_store(&t->is_failed, 1);\n");
@@ -2317,7 +2331,7 @@ impl<'a> Cx<'a> {
         self.w("            tcompl->done_flag = 1;\n");
         self.w("            pthread_cond_broadcast(&tcompl->done_cond);\n");
         self.w("            pthread_mutex_unlock(&tcompl->done_mutex);\n");
-        self.w("            free(f->entry_env); __maka_slab_free(f->slab); free(f);\n");
+        self.w("            __maka_free_env(f->completion, f->entry_env); __maka_slab_free(f->slab); free(f);\n");
         self.w("            __maka_thread_unref(tcompl);  /* runner ref */\n");
         self.w("            continue;\n");
         self.w("        }\n");
@@ -2402,7 +2416,7 @@ impl<'a> Cx<'a> {
         self.w("        t->done_flag = 1;\n");
         self.w("        pthread_cond_broadcast(&t->done_cond);\n");
         self.w("        pthread_mutex_unlock(&t->done_mutex);\n");
-        self.w("        free(f->entry_env); __maka_slab_free(f->slab); free(f);\n");
+        self.w("        __maka_free_env(f->completion, f->entry_env); __maka_slab_free(f->slab); free(f);\n");
         self.w("        __maka_thread_unref(t);  /* runner ref */\n");
         self.w("    }\n");
         self.w("    return (maka_unit*)t;\n");
@@ -2685,7 +2699,7 @@ impl<'a> Cx<'a> {
         self.w("    item->h->done_flag = 1;\n");
         self.w("    pthread_cond_broadcast(&item->h->done_cond);\n");
         self.w("    pthread_mutex_unlock(&item->h->done_mutex);\n");
-        self.w("    free(item->env);\n");
+        self.w("    __maka_free_env(item->h, item->env);\n");
         // Drop the runner-side ref — joiner/detacher will drop the spawner ref.
         self.w("    __maka_thread_unref(item->h);\n");
         self.w("}\n");
@@ -2758,10 +2772,11 @@ impl<'a> Cx<'a> {
         // job() — push to a worker's deque (round-robin from non-worker callers,
         // own-deque from worker callers).
         self.w("static __thread int __maka_job_rr = 0;\n");
-        self.w("maka_unit* __maka_spawn_job(void* code, void* env) {\n");
+        self.w("maka_unit* __maka_spawn_job(void* code, void* env, void* env_drop) {\n");
         self.w("    __maka_job_pool_init();\n");
         self.w("    Thread* t = __maka_thread_new();\n");
         self.w("    t->is_job = 1;\n");
+        self.w("    t->env_drop = (void(*)(void*))env_drop;\n");
         self.w("    __maka_job_entry_t item = { code, env, t };\n");
         self.w("    if (__maka_ws_worker_id >= 0) {\n");
         self.w("        /* Caller is a worker — push to own deque (LIFO, cache-warm). */\n");
@@ -2791,7 +2806,7 @@ impl<'a> Cx<'a> {
         // Existing tests that build `spawn(closure)` and previously hit the
         // pthread path now hit the smaller-stack fiber path — same observable
         // behavior, less RAM.
-        self.w("maka_unit* __maka_spawn(void* code, void* env) { return __maka_spawn_fiber(code, env); }\n");
+        self.w("maka_unit* __maka_spawn(void* code, void* env) { return __maka_spawn_fiber(code, env, NULL); }\n");
         // ====================================================================
         // JOIN — block on a single handle and reclaim its result.
         // ====================================================================
@@ -3035,7 +3050,7 @@ impl<'a> Cx<'a> {
         // fiber writes t->result.  Let natural completion own the flip.
         self.w("        return 1;\n");
         self.w("    }\n");
-        self.w("    free(found->entry_env); __maka_slab_free(found->slab); free(found);\n");
+        self.w("    __maka_free_env(found->completion, found->entry_env); __maka_slab_free(found->slab); free(found);\n");
         self.w("    if (cancelled_fd >= 0) __maka_fd_recompute(cancelled_fd);\n");
         self.w("    pthread_mutex_lock(&t->done_mutex);\n");
         self.w("    t->done_flag = 1;\n");
@@ -3120,7 +3135,7 @@ impl<'a> Cx<'a> {
         self.w("                t->done_flag = 1;\n");
         self.w("                pthread_cond_broadcast(&t->done_cond);\n");
         self.w("                pthread_mutex_unlock(&t->done_mutex);\n");
-        self.w("                free(pfound->entry_env); __maka_slab_free(pfound->slab); free(pfound);\n");
+        self.w("                __maka_free_env(pfound->completion, pfound->entry_env); __maka_slab_free(pfound->slab); free(pfound);\n");
         self.w("                __maka_thread_unref(t);  /* runner-side ref */\n");
         self.w("            }\n");
         // Otherwise the fiber's body is currently running — cancel_requested
@@ -8099,21 +8114,21 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 3 {
                     if let Some(a) = args.first() {
                         let s = self.emit_inline_expr(inline_f, a, tag);
-                        return format!("(Thread*)__maka_spawn_fiber(({}).code, ({}).env)", s, s);
+                        return format!("(Thread*)__maka_spawn_fiber(({}).code, ({}).env, NULL)", s, s);
                     }
                     return "NULL".into();
                 }
                 if callee.0 == u32::MAX - 15 {
                     if let Some(a) = args.first() {
                         let s = self.emit_inline_expr(inline_f, a, tag);
-                        return format!("(Thread*)__maka_spawn_thread(({}).code, ({}).env)", s, s);
+                        return format!("(Thread*)__maka_spawn_thread(({}).code, ({}).env, NULL)", s, s);
                     }
                     return "NULL".into();
                 }
                 if callee.0 == u32::MAX - 16 {
                     if let Some(a) = args.first() {
                         let s = self.emit_inline_expr(inline_f, a, tag);
-                        return format!("(Thread*)__maka_spawn_job(({}).code, ({}).env)", s, s);
+                        return format!("(Thread*)__maka_spawn_job(({}).code, ({}).env, NULL)", s, s);
                     }
                     return "NULL".into();
                 }
@@ -8937,7 +8952,7 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 3 {
                     if let Some(a) = args.first() {
                         let s = self.emit_expr(f, a);
-                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_fiber(__cb.code, __cb.env); }}))", s);
+                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_fiber(__cb.code, __cb.env, NULL); }}))", s);
                     }
                     return "NULL".into();
                 }
@@ -8945,7 +8960,7 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 15 {
                     if let Some(a) = args.first() {
                         let s = self.emit_expr(f, a);
-                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_thread(__cb.code, __cb.env); }}))", s);
+                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_thread(__cb.code, __cb.env, NULL); }}))", s);
                     }
                     return "NULL".into();
                 }
@@ -8953,7 +8968,7 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 16 {
                     if let Some(a) = args.first() {
                         let s = self.emit_expr(f, a);
-                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_job(__cb.code, __cb.env); }}))", s);
+                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_job(__cb.code, __cb.env, NULL); }}))", s);
                     }
                     return "NULL".into();
                 }
