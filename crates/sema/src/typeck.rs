@@ -517,7 +517,7 @@ impl<'a> TypeChecker<'a> {
                 if let Some((tgt, tgt_ty)) = self.yield_target.last().cloned() {
                     let h = self.check_expr_coerce(e, &tgt_ty);
                     let place = HExpr { kind: HExprKind::Local(tgt), ty: tgt_ty, span: *span };
-                    HStmt::Assign { op: HAssignOp::Assign, place, value: h, span: *span }
+                    HStmt::Assign { op: HAssignOp::Assign, place, value: h, drop_old: true, span: *span }
                 } else if let Some(ty) = self.yield_expected.last().cloned() {
                     // Owning-value arm: no synthetic local, but coerce the yielded
                     // value to the arm's expected type so an `alloc` picks the
@@ -721,11 +721,11 @@ impl<'a> TypeChecker<'a> {
                 ast::AssignOp::Assign => unreachable!(),
             };
             if let Some(combined) = self.try_op_overload(bin_op, &place_h, &value_h, span) {
-                return HStmt::Assign { op: HAssignOp::Assign, place: place_h, value: combined, span };
+                return HStmt::Assign { op: HAssignOp::Assign, place: place_h, value: combined, drop_old: true, span };
             }
             self.err("compound assignment on a non-numeric type needs the matching operator overload (e.g. an `Add` impl)", span);
         }
-        HStmt::Assign { op: hop, place: place_h, value: value_h, span }
+        HStmt::Assign { op: hop, place: place_h, value: value_h, drop_old: true, span }
     }
 
     /// Same shape as `is_place_mutable` but on failure returns a specific
@@ -4761,7 +4761,7 @@ impl<'a> TypeChecker<'a> {
             kind: HExprKind::Bin { op: HBinOp::Add, lhs: Box::new(var_expr.clone()), rhs: Box::new(one) },
             ty: declared.clone(), span: sp,
         };
-        let step = HStmt::Assign { op: HAssignOp::Assign, place: var_expr.clone(), value: plus, span: sp };
+        let step = HStmt::Assign { op: HAssignOp::Assign, place: var_expr.clone(), value: plus, drop_old: true, span: sp };
 
         // A constant or `slice.len` end is inlined directly into the condition
         // (`i < N` / `i < s.len`) rather than hoisted into a `__end` local, so

@@ -719,8 +719,11 @@ pub struct HBlock {
 pub enum HStmt {
     /// New local; `init` may be a `HExpr` of the declared type.
     Let { local: LocalId, init: HExpr, span: Span },
-    /// Assignment to a place.
-    Assign { op: HAssignOp, place: HExpr, value: HExpr, span: Span },
+    /// Assignment to a place.  `drop_old` = free the previous owning value before
+    /// the store (SPEC 6.2).  The lifetime pass clears it when the place's owner
+    /// was already MOVED out before this reassignment, so codegen does not
+    /// double-free the moved-out value.  Defaults to true.
+    Assign { op: HAssignOp, place: HExpr, value: HExpr, drop_old: bool, span: Span },
     ExprStmt(HExpr),
     Return { value: Option<HExpr>, /* heap locals to free in *this* scope chain before return */ heap_drops: Vec<LocalId>, span: Span },
     If { cond: HExpr, then_b: HBlock, else_b: Option<HBlock>, span: Span },

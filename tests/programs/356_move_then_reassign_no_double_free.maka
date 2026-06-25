@@ -1,0 +1,26 @@
+// Regression: reassigning an `own *T` after it was moved out must NOT free the
+// moved-out value again. SPEC 6.2's free-on-reassign now skips a moved owner
+// (the lifetime pass clears drop_old). Covers the straight-line move+reassign
+// and a conditional move + re-set on the same branch (valid: the other branch
+// never moved it). Verified double-free/leak clean under ASan.
+data Box { int v; }
+unit eat(own *Box b) { }
+
+int straight() {
+  own *Box x = alloc Box { v = 1 };
+  eat(x);                        // move (frees the old value)
+  x = alloc Box { v = 2 };       // reassign: must not double-free the moved-out value
+  return x!.v;
+}
+
+int conditional(int c) {
+  own *Box x = alloc Box { v = 3 };
+  if (c > 0) { eat(x); x = alloc Box { v = 4 }; }   // move + re-set on the same branch
+  return x!.v;
+}
+
+unit main() {
+  log(straight());       // 2
+  log(conditional(1));   // 4
+  log(conditional(0));   // 3
+}

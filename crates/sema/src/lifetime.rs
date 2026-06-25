@@ -711,7 +711,7 @@ impl<'a> Analyzer<'a> {
                     }
                 }
             }
-            HStmt::Assign { op, place, value, span } => {
+            HStmt::Assign { op, place, value, drop_old: _, span } => {
                 let _ = op;
                 // Conservative escape check on assigning into a struct field:
                 // (a) explicit `b.p = &local` — caught by check_no_local_ref_escape;
@@ -779,6 +779,21 @@ impl<'a> Analyzer<'a> {
                         self.state[id.0 as usize].known_nonnull = nn;
                         self.state[id.0 as usize].narrowed_until = None;
                         self.state[id.0 as usize].auto_nulled = false;
+                    } else if is_owner {
+                        // Reassigning an `own *T` / heap owner re-establishes its
+                        // nullness from the RHS (`alloc` => non-null, `null` =>
+                        // null).  This is what clears an auto-null left by a prior
+                        // conditional move (SPEC 6.4: only an explicit user
+                        // assignment clears it / re-proves non-null), so a deref
+                        // after re-setting on every path is accepted again while a
+                        // partial re-set still fails the join's `known_nonnull`.
+                        let nn = self.expr_nonnull(value);
+                        let d = self.expr_deps(value);
+                        self.state[id.0 as usize].deps = d;
+                        self.state[id.0 as usize].known_nonnull = nn;
+                        self.state[id.0 as usize].narrowed_until = None;
+                        self.state[id.0 as usize].auto_nulled = false;
+                        self.state[id.0 as usize].poisoned = false;
                     } else {
                         // For ref-shaped, owner-bearing, or borrow-bearing
                         // struct locals, refresh the deps so subsequent
@@ -1994,7 +2009,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                         scope_chain.last_mut().unwrap().push(*local);
                     }
                 }
-                HStmt::Assign { place, value, .. } => {
+                HStmt::Assign { place, value, drop_old, .. } => {
                     moved_locals_in_expr(sym, value, &mut moved);
                     if ty_owns_heap(sym, &value.ty) {
                         if let HExprKind::Local(id) = value.kind { moved.insert(id); }
@@ -2002,7 +2017,15 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     // The assigned-to local is redefined here, so it is live again -
                     // even if its old value was just consumed into the RHS (e.g.
                     // `x = Cons { tail = x }` or `left = Bin { l = left, ... }`).
-                    if let HExprKind::Local(id) = place.kind { moved.remove(&id); }
+                    if let HExprKind::Local(id) = place.kind {
+                        // If the owner was already moved out (here or by an earlier
+                        // statement / a conditional move), its old value is gone -
+                        // codegen must NOT free it before storing the new one, or it
+                        // double-frees the moved-out value.  No-runtime-null
+                        // counterpart to scope-exit drops skipping moved locals.
+                        if moved.contains(&id) { *drop_old = false; }
+                        moved.remove(&id);
+                    }
                 }
                 HStmt::ExprStmt(e) => {
                     moved_locals_in_expr(sym, e, &mut moved);

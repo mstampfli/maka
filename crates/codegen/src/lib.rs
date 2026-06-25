@@ -7296,8 +7296,8 @@ impl<'a> Cx<'a> {
     fn emit_stmt(&mut self, f: &HFunc, s: &HStmt) {
         match s {
             HStmt::Let { local, init, .. } => self.emit_let(f, *local, init),
-            HStmt::Assign { op, place, value, .. } => {
-                self.emit_assign(f, *op, place, value);
+            HStmt::Assign { op, place, value, drop_old, .. } => {
+                self.emit_assign(f, *op, place, value, *drop_old);
                 // A `yield` lowers to an assignment of an arm's synthetic `__yield`
                 // local; terminate the arm so a yield nested in an `if`/`while`
                 // wins instead of falling through to a later `yield`.
@@ -8375,7 +8375,7 @@ impl<'a> Cx<'a> {
         }
     }
 
-    fn emit_assign(&mut self, f: &HFunc, op: HAssignOp, place: &HExpr, value: &HExpr) {
+    fn emit_assign(&mut self, f: &HFunc, op: HAssignOp, place: &HExpr, value: &HExpr, drop_old: bool) {
         let lhs = self.emit_place(f, place);
         let rhs = self.emit_expr(f, value);
 
@@ -8429,7 +8429,7 @@ impl<'a> Cx<'a> {
         //   - RHS reads/moves the place by value      -> it derives the new value FROM
         //     the old one (`node = node.next`, `p.a = p.b`): leave the old value alone
         //     (dropping it would double-free the moved-out part).
-        if matches!(op, HAssignOp::Assign) && self.drop_ty_owns(&place.ty) {
+        if drop_old && matches!(op, HAssignOp::Assign) && self.drop_ty_owns(&place.ty) {
             if let Some(root) = place_root_local(place) {
                 if !expr_contains_local(value, root) {
                     self.emit_field_drop(&lhs, &place.ty, 0);
