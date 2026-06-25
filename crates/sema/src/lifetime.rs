@@ -1034,6 +1034,24 @@ impl<'a> Analyzer<'a> {
             HExprKind::Match { scrutinee, arms, .. } => {
                 self.walk_expr(scrutinee);
                 for a in arms {
+                    // A guard runs speculatively, before the arm commits, on a
+                    // binding that aliases the scrutinee's payload.  Moving an
+                    // owning binding out of a guard (e.g. passing it to a by-value
+                    // parameter) frees a value the scrutinee still owns, so a
+                    // failed guard or the scrutinee's later drop double-frees.
+                    // Guards may only borrow - reject the move.
+                    if let Some(g) = &a.guard {
+                        if let HArmKind::Variant { bindings, .. } = &a.kind {
+                            for b in bindings.iter().flatten() {
+                                if ty_owns_heap(self.sym, &self.f().locals[b.0 as usize].ty)
+                                    && expr_moves_owning_local(self.sym, g, *b)
+                                {
+                                    let name = self.f().locals[b.0 as usize].name.clone();
+                                    self.err(format!("cannot move `{}` out of a match guard: a guard may only borrow the matched value (moving it would double-free, since the scrutinee still owns it)", name), g.span);
+                                }
+                            }
+                        }
+                    }
                     if let Some(g) = &mut a.guard.clone() { self.walk_expr(g); }
                     if let Some(v) = &mut a.value.clone() { self.walk_expr(v); }
                     // Body stmts walked separately via the block.
@@ -1680,6 +1698,37 @@ pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
 /// that the directly-owning `Heap`/`OwnPtr` checks would miss?
 fn is_owning_value_composite(sym: &SymTab, ty: &HType) -> bool {
     matches!(ty, HType::Struct(_) | HType::Enum(_) | HType::Array { .. } | HType::Vec { .. } | HType::RustOpaque(_)) && ty_owns_heap(sym, ty)
+}
+
+// True if `e` moves the owning local `target` out of itself: `target` (an owning
+// value) appears in a by-value owning position - a call/inline-call argument, a
+// `transfer`, or an aggregate field.  A focused bool form of the move-detection
+// in `moved_locals_in_expr`, used to reject moving an owning binding out of a
+// match guard (a guard may only borrow; moving double-frees).
+fn expr_moves_owning_local(sym: &SymTab, e: &HExpr, target: LocalId) -> bool {
+    let is_move = |a: &HExpr| ty_owns_heap(sym, &a.ty) && matches!(a.kind, HExprKind::Local(id) if id == target);
+    match &e.kind {
+        HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } =>
+            args.iter().any(|a| is_move(a) || expr_moves_owning_local(sym, a, target)),
+        HExprKind::CallIndirect { callee, args } =>
+            expr_moves_owning_local(sym, callee, target) || args.iter().any(|a| expr_moves_owning_local(sym, a, target)),
+        HExprKind::Bin { lhs, rhs, .. } => expr_moves_owning_local(sym, lhs, target) || expr_moves_owning_local(sym, rhs, target),
+        HExprKind::Index { base, idx } => expr_moves_owning_local(sym, base, target) || expr_moves_owning_local(sym, idx, target),
+        HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } | HExprKind::Cast { expr, .. }
+        | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
+        | HExprKind::AddrOfRef { place: expr, .. } | HExprKind::Field { base: expr, .. }
+        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr) | HExprKind::SliceLen(expr)
+        | HExprKind::EnumTag(expr) | HExprKind::ArrayToSlice { base: expr, .. } => expr_moves_owning_local(sym, expr, target),
+        HExprKind::Transfer(inner) => matches!(inner.kind, HExprKind::Local(id) if id == target) || expr_moves_owning_local(sym, inner, target),
+        HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } =>
+            fields.iter().any(|(_, fe)| is_move(fe) || expr_moves_owning_local(sym, fe, target)),
+        HExprKind::ArrayLit(es) => es.iter().any(|x| is_move(x) || expr_moves_owning_local(sym, x, target)),
+        HExprKind::Match { scrutinee, arms, .. } =>
+            expr_moves_owning_local(sym, scrutinee, target) || arms.iter().any(|a|
+                a.guard.as_ref().is_some_and(|g| expr_moves_owning_local(sym, g, target))
+                || a.value.as_ref().is_some_and(|v| expr_moves_owning_local(sym, v, target))),
+        _ => false,
+    }
 }
 
 fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {

@@ -1,0 +1,21 @@
+// A match guard runs speculatively, before the arm commits, on a binding that
+// aliases the scrutinee's payload.  Moving an owning binding out of a guard
+// (here passing the owning String `value` to a by-value parameter) would free a
+// value the scrutinee still owns, so a failed guard or the scrutinee's later
+// drop double-frees.  Guards may only borrow the matched value; this must be
+// rejected.  (Borrowing in a guard, e.g. value.length(), stays allowed.)
+import std.{Option, String, StringOps, string_from};
+
+int eat(String s) { return s.length(); }
+
+int f(Option<String> o) {
+  return match (o) {
+    Option.Some { value } if eat(value) > 100 1,
+    Option.Some { value } 2,
+    Option.None 0,
+  };
+}
+
+unit main() {
+  log(f(Option.Some { value = string_from("hi") }));
+}
