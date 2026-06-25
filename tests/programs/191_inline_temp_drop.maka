@@ -11,8 +11,8 @@ unit consume(own *Box b) { if (b != null) { log(b!.v); } }
 
 unit main() {
     mut int i = 0;
-    while (i < 3) { log(format("row {}", i)); i = i + 1; }  // owning str temp -> log, per iter
-    log(take_str(format("ab{}", 9)));                        // -> user borrow fn  (str_len "ab9" = 3)
+    while (i < 3) { log(format("row {}", i)!); i = i + 1; }  // owning str temp -> log, per iter
+    log(take_str(format("ab{}", 9)!));                       // -> user borrow fn  (str_len "ab9" = 3)
     _ = format("discard {}", 1);                             // discarded owning temp
     consume(alloc Box { v = 42 });                           // -> own param: transferred, not double-freed
 }

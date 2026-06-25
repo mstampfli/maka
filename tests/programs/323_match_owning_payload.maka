@@ -6,7 +6,7 @@
 import std.{str_len};
 enum Msg { Text { own *string body }, Empty }
 
-int sz(Msg m) { return match (m) { Text { body } str_len(body) as int, Empty 0, }; }
+int sz(Msg m) { return match (m) { Text { body } { if (body != null) { yield str_len(body!) as int; } else { yield 0; } }, Empty 0, }; }
 own *string take(Msg m) { return match (m) { Text { body } body, Empty "none" + "", }; }
 
 unit main() {
@@ -14,6 +14,6 @@ unit main() {
   for (int i in 0..100) { a = a + sz(Msg.Text { body = "hello" + "" }); }   // read/borrow path
   log(a);                                                                    // 500
   mut int b = 0;
-  for (int i in 0..100) { own *string s = take(Msg.Text { body = "hi" + "" }); b = b + (str_len(s) as int); }  // move-out path
+  for (int i in 0..100) { own *string s = take(Msg.Text { body = "hi" + "" }); if (s != null) { b = b + (str_len(s!) as int); } }  // move-out path
   log(b);                                                                    // 200
 }

@@ -1,8 +1,8 @@
 import std.{int_to_str, str_len};
 unit main() {
-    string s = "v=" + int_to_str(123);
+    string s = ("v=" + int_to_str(123))!;
     log(s);                  // v=123
     log(str_len(s) as int);  // 5
-    string t = int_to_str(-42);
+    string t = int_to_str(-42)!;
     log(t);                  // -42
 }

@@ -9734,12 +9734,6 @@ impl<'a> Cx<'a> {
             // escape - the scrutinee keeps it and its drop frees it.  Treating
             // such a borrow as a move would null the scrutinee field and leak.
             HExprKind::Local(id) => *id == target && self.drop_ty_owns(&value.ty),
-            // A reinterpret of an owned string down to a borrowed `string` is a BORROW,
-            // not a move: the owner keeps the buffer.  Do NOT look through it, or a binding
-            // merely borrowed for a call (e.g. `str_len(value)` on an owning match binding)
-            // reads as moved, nulls the scrutinee field, and leaks the buffer.
-            HExprKind::Cast { to, expr, .. }
-                if matches!(to, HType::Str) && expr.ty.is_owned_string() => false,
             HExprKind::Transfer(inner)
             | HExprKind::Cast { expr: inner, .. }
             | HExprKind::CheckedCast { expr: inner, .. }

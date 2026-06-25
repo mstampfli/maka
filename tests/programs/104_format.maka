@@ -1,19 +1,20 @@
-// `format(fmt, ...)` builds a own *string from a literal format with `{}` slots.
+// `format(fmt, ...)` builds an own *string from a literal format with `{}` slots.
 // Each `{}` consumes one trailing arg; ints / floats / bools / chars / strings
-// are auto-converted via per-type to-string helpers.  Result is `own *char`,
-// auto-freed at scope exit.
+// are auto-converted via per-type to-string helpers.  Result is `own *string`
+// (always-allocating, so known non-null): deref it with `!` to get the `string`
+// value.  The owning buffer auto-frees at scope exit.
 unit main() {
     int hp = 7;
     int max_hp = 10;
-    string s = format("HP: {} / {}", hp, max_hp);
+    string s = format("HP: {} / {}", hp, max_hp)!;
     log(s);                                          // HP: 7 / 10
 
-    string greeting = format("hello, {}!", "world");
+    string greeting = format("hello, {}!", "world")!;
     log(greeting);                                   // hello, world!
 
     bool ok = true;
-    log(format("ok={}", ok));                        // ok=true
+    log(format("ok={}", ok)!);                       // ok=true
 
     char c = 'X';
-    log(format("c='{}'", c));                        // c='X'
+    log(format("c='{}'", c)!);                       // c='X'
 }

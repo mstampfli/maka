@@ -4,7 +4,7 @@
 unit main() {
     mut int i = 0;
     while (i < 3) {
-        string s = format("row {}", i);
+        string s = format("row {}", i)!;
         log(s);
         i = i + 1;
     }

@@ -1,6 +1,7 @@
 // An owned own *string reassigned via self-concat (`acc = acc + ...`) frees the old
 // buffer exactly once: the concat helper frees the consumed left operand and the
-// reassignment does not double-free.  Owned own *string is `own *string` (a char*).
+// reassignment does not double-free.  Owned own *string is a nullable owning heap
+// pointer; to read it as a `string` value, prove it non-null then deref with `!`.
 import std.{str_len, str_eq};
 own *string build(int n) {
   mut own *string acc = "x" + "";
@@ -9,6 +10,8 @@ own *string build(int n) {
 }
 unit main() {
   own *string s = build(3);
-  log(str_len(s) as int);          // 7  (x + ab*3)
-  log(str_eq(s, "xababab"));       // true
+  if (s != null) {
+    log(str_len(s!) as int);       // 7  (x + ab*3)
+    log(str_eq(s!, "xababab"));    // true
+  }
 }

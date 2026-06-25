@@ -1,18 +1,19 @@
 // `string + string` is concatenation.  The result is a heap-allocated NUL-
-// terminated buffer typed as `own *char`, which coerces back to `string` for
-// log and for arguments.  Auto-freed at scope exit, no manual cleanup.
+// terminated buffer typed as `own *string` (a nullable owning pointer).  Concat
+// is known non-null, so deref it with `!` to get the `string` value (no guard
+// needed); the owning temporary auto-frees at scope exit.
 unit shout(string s) { log(s); }
 
 unit main() {
     string a = "hello";
     string b = " world";
-    string c = a + b;
+    string c = (a + b)!;
     log(c);              // hello world
 
     // Chained concat: every intermediate buffer is auto-freed.
-    string d = a + b + "!";
+    string d = (a + b + "!")!;
     log(d);              // hello world!
 
     // Pass through to a function expecting `string`.
-    shout(a + " again");  // hello again
+    shout((a + " again")!);  // hello again
 }

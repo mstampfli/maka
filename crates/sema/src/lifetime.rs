@@ -114,9 +114,38 @@ fn return_type_nonnull(t: &HType) -> bool {
 /// Conservative: a returned `Local(_)` of pointer type is not treated as
 /// non-null here — flow-sensitive Local tracking lives in the per-function
 /// pass that runs *after* summary computation.
+// String builders that always allocate a fresh non-null buffer (they never
+// return null), so their `own *string` result is known-non-null and derefs
+// without a guard.  Compiler builtins: string concat `+` (and its
+// free-operand variants), the `*_to_str` conversions, and `format`.
+pub fn is_nonnull_string_builtin(id: u32) -> bool {
+    id == u32::MAX - 5  || id == u32::MAX - 8  || id == u32::MAX - 9  || id == u32::MAX - 10
+        || id == u32::MAX - 11 || id == u32::MAX - 12 || id == u32::MAX - 13 || id == u32::MAX - 14
+        || id == u32::MAX - 59
+}
+
+// Runtime builder externs that likewise always allocate a non-null result.
+// `__maka_rt_read_file` is deliberately ABSENT - it returns null on error.
+fn is_nonnull_builder_extern(c_name: &str) -> bool {
+    matches!(
+        c_name,
+        "__maka_rt_int_to_str"
+            | "__maka_rt_substr_owned"
+            | "__maka_rt_str_to_upper"
+            | "__maka_rt_str_to_lower"
+            | "__maka_rt_str_trim"
+            | "__maka_rt_str_replace"
+    )
+}
+
 pub fn compute_return_summaries(sym: &SymTab, funcs: &[HFunc]) -> Vec<bool> {
     let n = sym.sigs.len();
-    let mut summaries: Vec<bool> = (0..n).map(|i| return_type_nonnull(&sym.sigs[i].ret)).collect();
+    let mut summaries: Vec<bool> = (0..n)
+        .map(|i| {
+            return_type_nonnull(&sym.sigs[i].ret)
+                || (sym.sigs[i].is_extern && is_nonnull_builder_extern(&sym.sigs[i].c_name))
+        })
+        .collect();
     // Extern signatures stay at their type-derived value; only Maka bodies can be proven.
     loop {
         let mut changed = false;
@@ -366,7 +395,8 @@ fn expr_nonnull_flow(e: &HExpr, state: &[bool], summaries: &[bool]) -> bool {
             expr_nonnull_flow(expr, state, summaries)
         }
         HExprKind::Call { callee, .. } | HExprKind::InlineCall { callee, .. } => {
-            summaries.get(callee.0 as usize).copied().unwrap_or(false)
+            is_nonnull_string_builtin(callee.0)
+                || summaries.get(callee.0 as usize).copied().unwrap_or(false)
         }
         HExprKind::DerefRef(inner) => expr_nonnull_flow(inner, state, summaries),
         _ => false,
@@ -1089,18 +1119,6 @@ impl<'a> Analyzer<'a> {
             }
             ArrayLit(elems) => for el in elems { self.check_no_local_ref_escape(el); }
             HeapAlloc(inner) | Free(inner) => self.check_no_local_ref_escape(inner),
-            // An owned string (`own *string`) downgraded to a borrowed `string` whose result
-            // reaches the returned value: the owned buffer is always function-owned (a named
-            // local, a temporary, or an owning parameter the caller moved in), so it is freed
-            // on return and the borrow would dangle (or leak).  The `coerce` step marks the
-            // downgrade with this reinterpret cast; flag it wherever the walk reaches it -
-            // directly, or nested in a struct/variant field or array element.
-            Cast { expr, to, .. } if matches!(to, HType::Str) && expr.ty.is_owned_string() => {
-                self.err(
-                    "returning an owned string as a borrowed `string` would dangle: the owned buffer is freed when the function returns. Declare the return type as `own *string` to transfer ownership".to_string(),
-                    e.span,
-                );
-            }
             Cast { expr, .. } | CheckedCast { expr, .. } | DerefRef(expr) | DropWrite(expr)
                 | Un { expr, .. } | Unwrap { expr, .. } => self.check_no_local_ref_escape(expr),
             Bin { lhs, rhs, .. } => {
@@ -1172,7 +1190,8 @@ impl<'a> Analyzer<'a> {
             // is non-null).  `compute_return_summaries` runs before the per-func
             // pass populates these facts.
             HExprKind::Call { callee, .. } | HExprKind::InlineCall { callee, .. } => {
-                self.summaries.get(callee.0 as usize).copied().unwrap_or(false)
+                is_nonnull_string_builtin(callee.0)
+                    || self.summaries.get(callee.0 as usize).copied().unwrap_or(false)
             }
             _ => false,
         }
@@ -1451,8 +1470,15 @@ fn hoist_in_expr(sym: &SymTab, e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: 
             }
         }
         HExprKind::Bin { lhs, rhs, .. } => { hoist_in_expr(sym, lhs, locals, pre); hoist_in_expr(sym, rhs, locals, pre); }
+        // Deref of a temporary (`make()!`, e.g. `("a"+"b")!`): the temp owns its
+        // buffer and `!` only reads the value out, so the temp has no owner and
+        // would leak.  Bind it to a hidden local (dropped at scope exit), exactly
+        // like the field/element projections below.
+        HExprKind::Unwrap { expr, .. } => {
+            hoist_in_expr(sym, expr, locals, pre);
+            if is_droppable_temp(sym, expr) { hoist_one(expr, locals, pre); }
+        }
         HExprKind::Un { expr, .. }
-        | HExprKind::Unwrap { expr, .. }
         | HExprKind::Cast { expr, .. }
         | HExprKind::CheckedCast { expr, .. }
         | HExprKind::DropWrite(expr)

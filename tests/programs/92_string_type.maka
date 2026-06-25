@@ -1,16 +1,18 @@
-// `own *string` is the owned heap-text name (compiler alias for `own *char`).
-// Auto-frees at scope exit; coerces to `string` for borrowed reads.
-// `str_len` and `str_eq` live in the stdlib and need an explicit import.
+// `own *string` is the owned, nullable heap-text name.  Auto-frees at scope
+// exit.  It is a pointer: to read it as a `string` value, deref with `!` (after
+// proving non-null).  `str_len` and `str_eq` live in the stdlib (explicit import).
 import std.{str_len, str_eq};
 
 unit main() {
-    own *string s = "hi" + " there";
-    log(s);                        // hi there
+    own *string s = "hi" + " there";   // concat: known non-null
+    log(s!);                       // hi there
 
-    log(str_len(s));               // 8
+    log(str_len(s!));              // 8
 
-    own *string t = read_line();
-    log(str_eq(t, "world"));       // true (when stdin provides "world\n")
+    own *string t = read_line();   // read_line is nullable (EOF) - prove non-null
+    if (t != null) {
+        log(str_eq(t!, "world"));  // true (when stdin provides "world\n")
+    }
 
     // `own *string` going out of scope auto-frees the buffer.
 }

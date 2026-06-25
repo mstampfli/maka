@@ -20,7 +20,7 @@ Opt<own *string> lookup(int n) {
 // Reads the payload only (does NOT move it out): the temporary must be freed.
 int name_len(int n) {
   return match (lookup(n)) {
-    Some { v } { yield str_len(v) as int; },
+    Some { v } { if (v != null) { yield str_len(v!) as int; } else { yield -1; } },
     None { yield -1; },
   };
 }

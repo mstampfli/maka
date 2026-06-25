@@ -1,8 +1,11 @@
-// A HashMap whose values own heap (here own *string = own *string).  The empty/
+// A HashMap whose values own heap (here own *string).  The empty/
 // tombstone slots hold the map's default, so for an owning value type the
 // default must be `null` (free(null) is a no-op) - that is the "null = empty"
 // slot convention.  Access owning values through hm_get_ref (a borrow); a
-// by-value hm_get would alias the owned buffer.  Must be leak-clean.
+// by-value hm_get would alias the owned buffer.  hm_get_ref returns a nullable
+// reference to the slot; deref it (`a!`) into a non-owning `*string` view (no
+// move, no double-free), then prove that view non-null before deref'ing it
+// (`av!`) to read it as a `string`.  Must be leak-clean.
 import std.{HashMap, hashmap, hm_put, hm_get_ref, str_len, str_eq};
 unit main() {
   mut HashMap<own *string> m = hashmap(null);
@@ -10,9 +13,9 @@ unit main() {
   hm_put(&mut m, "b", "beta" + "");
   hm_put(&mut m, "a", "again" + "");      // overwrite frees the old value
   *own *string a = hm_get_ref(&mut m, "a");
-  if (a != null) { log(str_len(a!) as int); }   // 5  (again)
+  if (a != null) { *string av = a!; if (av != null) { log(str_len(av!) as int); } }   // 5  (again)
   *own *string b = hm_get_ref(&mut m, "b");
-  if (b != null) { if (str_eq(b!, "beta")) { log(1); } else { log(0); } }   // 1
+  if (b != null) { *string bv = b!; if (bv != null) { if (str_eq(bv!, "beta")) { log(1); } else { log(0); } } }   // 1
   *own *string miss = hm_get_ref(&mut m, "nope");
   if (miss == null) { log(-1); }                // -1
 }

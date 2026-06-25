@@ -1,9 +1,11 @@
-// An enum variant whose payload embeds a container by value (a Vec or a own *string)
+// An enum variant whose payload embeds a container by value (a Vec or an own *string)
 // must have that element/container typedef emitted before the variant payload
 // struct. Regression: the dependency pre-scan that emits Vec/Slice/Callable
 // typedefs walked struct fields but not enum variant payload fields, so an enum
 // carrying a Vec only-as-payload referenced an undefined Vec_maka_int. The
 // payloads are also owning, so they must be freed when the enum drops.
+// An own *string payload binding is not provably non-null, so deref it (`s!`)
+// only inside an `if (s != null)` guard.
 import std.{str_dup, str_len};
 
 enum Data { List { Vec<int> xs }, Empty }
@@ -17,7 +19,7 @@ int sum(Data d) {
 enum Msg { Text { own *string s }, Blank }
 int text_len(Msg m) {
   return match (m) {
-    Text { s } { yield str_len(s) as int; },
+    Text { s } { if (s != null) { yield str_len(s!) as int; } else { yield 0; } },
     Blank { yield 0; },
   };
 }

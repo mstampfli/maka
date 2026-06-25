@@ -5237,21 +5237,11 @@ impl<'a> TypeChecker<'a> {
         if matches!(e.ty, HType::NullT) && matches!(target, HType::Ptr { .. }) {
             return HExpr { ty: target.clone(), ..e };
         }
-        // owned string → `string` — read-only borrowed view of the heap NUL-terminated buffer.
-        // Mark the downgrade with a reinterpret cast (not a bare retype) so the inner keeps its
-        // `own *string` type.  That lets the lifetime escape walk spot an owned buffer escaping
-        // as a borrowed `string` through the returned value in any shape - directly, a struct or
-        // variant field, an array element, a temporary - which would dangle or leak once the
-        // owner is freed on return.  The move/drop analysis treats this specific cast as a
-        // borrow (see `value_moves_binding`), so it does not perturb ownership of the inner.
-        if matches!(target, HType::Str) && e.ty.is_owned_string() {
-            let span = e.span;
-            return HExpr {
-                kind: HExprKind::Cast { expr: Box::new(e), kind: CastKind::Reinterpret, to: HType::Str },
-                ty: HType::Str,
-                span,
-            };
-        }
+        // NOTE: there is deliberately NO implicit `own *string` -> `string` coercion.
+        // An `own *string` is a nullable owning pointer; a `string` is the non-null value.
+        // Getting the value out is a deref that must prove non-null first - write `s!`.
+        // A silent reinterpret would let a null `own *string` become a null `string`
+        // (a SEGV in any later string op), so the conversion is explicit by design.
         // owned string → `*string` — the nullable sibling of the view above: a read-only
         // view that preserves nullability so the buffer pointer can be `== null` checked
         // (e.g. iterating a HashMap's keys, where empty slots hold a null key).

@@ -12,14 +12,14 @@ unit main() {
   mut int t = 0;
   // HashMap<String>: 20 keys force several grows.
   mut HashMap<String> sm = hashmap(string_from(""));
-  for (int i in 0..20) { hm_put(&mut sm, int_to_str(i), string_from("v") + string_from("x")); }
-  *String s7 = hm_get_ref(&mut sm, int_to_str(7));
+  for (int i in 0..20) { hm_put(&mut sm, int_to_str(i)!, string_from("v") + string_from("x")); }
+  *String s7 = hm_get_ref(&mut sm, int_to_str(7)!);
   if (s7 != null) { t = t + s7!.length(); }            // 2
 
   // HashMap<Rec>: a struct value with an owning field.
   mut HashMap<Rec> rm = hashmap(Rec { name = string_from(""), qty = 0 });
-  for (int i in 0..20) { hm_put(&mut rm, int_to_str(i), Rec { name = string_from("item"), qty = i }); }
-  *Rec r3 = hm_get_ref(&mut rm, int_to_str(3));
+  for (int i in 0..20) { hm_put(&mut rm, int_to_str(i)!, Rec { name = string_from("item"), qty = i }); }
+  *Rec r3 = hm_get_ref(&mut rm, int_to_str(3)!);
   if (r3 != null) { t = t + r3!.name.length() + r3!.qty; }   // 4+3=7
 
   log(t);                                              // 9

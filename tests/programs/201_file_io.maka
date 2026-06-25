@@ -5,10 +5,10 @@ unit main() {
     bool ok = write_file("/tmp/maka_test_201.txt", "one\ntwo\nthree\n");
     if (ok) { log("wrote"); }
     own *string c = read_file("/tmp/maka_test_201.txt");
-    if (c != null) { log(str_len(c) as int); }      // 14
+    if (c != null) { log(str_len(c!) as int); }     // 14
     Vec<own *string> lines = read_lines("/tmp/maka_test_201.txt");
     log(lines.len as int);                           // 3
-    for (string ln in lines) { log(ln); }            // one / two / three
+    for (own *string ln in lines) { if (ln != null) { log(ln!); } }  // one / two / three
     Vec<own *string> one = split_lines("no newline here");
     log(one.len as int);                             // 1
     log(str_byte("XYZ", 0));                          // 88

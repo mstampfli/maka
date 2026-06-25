@@ -579,7 +579,7 @@ pub Vec<own *string> split_lines(string text) {
 pub Vec<own *string> read_lines(string path) {
     own *string text = read_file(path);
     if (text == null) { Vec<own *string> empty = []; return empty; }
-    return split_lines(text);
+    return split_lines(text!);
 }
 
 // An owned copy of a string (heap own *string that auto-frees).
@@ -733,11 +733,13 @@ unit hm_grow<V>(&mut HashMap<V> m, int newcap) {
     while (j < m.cap) {
         if (m.states[j] == 1) {
             own *string k = m.keys[j];                    // move key out of old slot
-            mut int idx = str_hash(k) & (newcap - 1);
-            while (ns[idx] == 1) { idx = (idx + 1) & (newcap - 1); }
-            nk[idx] = k;                             // move key into new slot
-            nv[idx] = m.vals[j];
-            ns[idx] = 1;
+            if (k != null) {                              // occupied slot: key is non-null
+                mut int idx = str_hash(k!) & (newcap - 1);
+                while (ns[idx] == 1) { idx = (idx + 1) & (newcap - 1); }
+                nk[idx] = k;                             // move key into new slot
+                nv[idx] = m.vals[j];
+                ns[idx] = 1;
+            }
         }
         j = j + 1;
     }
@@ -745,6 +747,17 @@ unit hm_grow<V>(&mut HashMap<V> m, int newcap) {
     m.vals = nv;        // keys are null, so they are skipped)
     m.states = ns;
     m.cap = newcap;
+}
+
+// Compare a stored key slot (a nullable owning `own *string`, borrowed here as
+// `*string`) against a lookup key.  Empty and removed slots hold a null key,
+// which never matches; an occupied slot's key is non-null, so we deref it after
+// the guard.  This is the one place the map turns a stored owning key back into
+// a borrowed `string` - via an explicit, proven-non-null deref, never a silent
+// coercion.
+bool __hm_key_eq(*string stored, string key) {
+    if (stored == null) { return false; }
+    return str_eq(stored!, key);
 }
 
 // Insert or update `key -> val`.
@@ -756,7 +769,7 @@ pub unit hm_put<V>(&mut HashMap<V> m, string key, V val) {
     }
     mut int idx = str_hash(key) & (m.cap - 1);
     while (m.states[idx] == 1) {
-        if (str_eq(m.keys[idx], key)) { m.vals[idx] = val; return; }
+        if (__hm_key_eq(m.keys[idx], key)) { m.vals[idx] = val; return; }
         idx = (idx + 1) & (m.cap - 1);
     }
     m.keys[idx] = str_dup(key);
@@ -771,7 +784,7 @@ pub V hm_get<V>(&HashMap<V> m, string key) {
     mut int idx = str_hash(key) & (m.cap - 1);
     while (m.states[idx] != 0) {
         if (m.states[idx] == 1) {
-            if (str_eq(m.keys[idx], key)) { return m.vals[idx]; }
+            if (__hm_key_eq(m.keys[idx], key)) { return m.vals[idx]; }
         }
         idx = (idx + 1) & (m.cap - 1);
     }
@@ -787,7 +800,7 @@ pub *V hm_get_ref<V>(&mut HashMap<V> m, string key) {
     if (m.cap == 0) { return null; }
     mut int idx = str_hash(key) & (m.cap - 1);
     while (m.states[idx] != 0) {
-        if (m.states[idx] == 1 && str_eq(m.keys[idx], key)) { return &mut m.vals[idx]; }
+        if (m.states[idx] == 1 && __hm_key_eq(m.keys[idx], key)) { return &mut m.vals[idx]; }
         idx = (idx + 1) & (m.cap - 1);
     }
     return null;
@@ -798,7 +811,7 @@ pub bool hm_has<V>(&HashMap<V> m, string key) {
     if (m.cap == 0) { return false; }
     mut int idx = str_hash(key) & (m.cap - 1);
     while (m.states[idx] != 0) {
-        if (m.states[idx] == 1 && str_eq(m.keys[idx], key)) { return true; }
+        if (m.states[idx] == 1 && __hm_key_eq(m.keys[idx], key)) { return true; }
         idx = (idx + 1) & (m.cap - 1);
     }
     return false;
@@ -809,7 +822,7 @@ pub bool hm_remove<V>(&mut HashMap<V> m, string key) {
     if (m.cap == 0) { return false; }
     mut int idx = str_hash(key) & (m.cap - 1);
     while (m.states[idx] != 0) {
-        if (m.states[idx] == 1 && str_eq(m.keys[idx], key)) {
+        if (m.states[idx] == 1 && __hm_key_eq(m.keys[idx], key)) {
             m.keys[idx] = null;       // free the owned key (drop-on-reassign)
             m.states[idx] = 2;        // tombstone
             m.count = m.count - 1;
