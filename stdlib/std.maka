@@ -784,10 +784,23 @@ pub unit hm_put<V>(&mut HashMap<V> m, string key, V val) {
         hm_grow(m, m.cap * 2);
     }
     mut int idx = str_hash(key) & (m.cap - 1);
-    while (m.states[idx] == 1) {
-        if (__hm_key_eq(m.keys[idx], key)) { m.vals[idx] = val; return; }
+    // Scan the probe chain to an EMPTY slot, looking for an existing copy of the
+    // key.  A tombstone (state 2) must be scanned PAST, not stopped at: an existing
+    // entry can sit beyond a tombstone left by an earlier removal in this chain, so
+    // stopping at the tombstone would insert a DUPLICATE key (two live slots for
+    // one key - inflating count and leaving a shadow that survives a later remove).
+    // Remember the first tombstone as the slot to reclaim if the key is absent.
+    mut int tomb = -1;
+    while (m.states[idx] != 0) {
+        if (m.states[idx] == 1) {
+            if (__hm_key_eq(m.keys[idx], key)) { m.vals[idx] = val; return; }
+        } else if (tomb < 0) {
+            tomb = idx;
+        }
         idx = (idx + 1) & (m.cap - 1);
     }
+    // Not present: insert at the first reclaimable tombstone, else this empty slot.
+    if (tomb >= 0) { idx = tomb; }
     m.keys[idx] = str_dup(key);
     m.vals[idx] = val;
     m.states[idx] = 1;

@@ -1,0 +1,28 @@
+// Regression: hm_put must scan PAST tombstones when looking for an existing key.
+// Open addressing with linear probing leaves a tombstone (state 2) on removal, and
+// an existing entry can sit BEYOND that tombstone in the same probe chain.  The old
+// hm_put stopped its overwrite scan at the first tombstone (`while states[idx]==1`)
+// and inserted a DUPLICATE key - inflating count and leaving a shadow entry that
+// survived a later remove.  The keys "c", "k", "s" all hash to the same slot (mod
+// 8 = the initial capacity), so they share one probe chain and exercise this.
+import std.{HashMap, hashmap, hm_put, hm_get, hm_remove, hm_len, hm_has};
+
+unit main() {
+  mut HashMap<int> m = hashmap(-1);
+  hm_put(&mut m, "c", 1);            // slot S
+  hm_put(&mut m, "k", 2);            // collides -> S+1
+  hm_put(&mut m, "s", 3);            // collides -> S+2
+  bool r0 = hm_remove(&mut m, "c");  // tombstone at S; "k" and "s" sit beyond it
+  hm_put(&mut m, "k", 20);           // must UPDATE "k" past the tombstone, not duplicate
+  hm_put(&mut m, "s", 30);           // must UPDATE "s"
+  log(hm_len(&m));                   // 2  ({k,s})
+  log(hm_get(&m, "k"));              // 20
+  log(hm_get(&m, "s"));              // 30
+  bool r1 = hm_remove(&mut m, "k");  // removes the single "k"
+  log(hm_has(&m, "k"));              // false: no surviving shadow
+  log(hm_get(&m, "k"));              // -1 (default on miss)
+  log(hm_len(&m));                   // 1  ({s})
+  hm_put(&mut m, "c", 100);          // reclaims a tombstone slot, count stays exact
+  log(hm_len(&m));                   // 2  ({s,c})
+  log(hm_get(&m, "c"));              // 100
+}
