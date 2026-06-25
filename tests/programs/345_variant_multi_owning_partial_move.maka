@@ -1,0 +1,31 @@
+// A variant carrying TWO owning fields, matched and partially consumed: an arm
+// that MOVES one binding (passes it to a by-value fn) while only BORROWING the
+// other must null exactly the moved field in the scrutinee, so the scrutinee's
+// drop frees the still-owned field once and does not double-free the moved one.
+// Covers the multi-owning-field case beyond the single-field tests 338-340.
+import std.{String, StringOps, string_from};
+enum Pair2 { Both { String a, String b }, Neither }
+int eat(String s) { return s.length(); }
+
+int move_one_borrow_other(Pair2 p) {
+  return match (p) {
+    Pair2.Both { a, b } eat(a) + b.length(),   // move a, borrow b
+    Pair2.Neither 0,
+  };
+}
+int move_both(Pair2 p) {
+  return match (p) {
+    Pair2.Both { a, b } eat(a) + eat(b),       // move both
+    Pair2.Neither 0,
+  };
+}
+
+unit main() {
+  mut int t = 0;
+  for (int i in 0..1000) {
+    t = t + move_one_borrow_other(Pair2.Both { a = string_from("aaa"), b = string_from("bb") }); // 3+2=5
+    t = t + move_one_borrow_other(Pair2.Neither);                                                // 0
+    t = t + move_both(Pair2.Both { a = string_from("xxxx"), b = string_from("y") });             // 4+1=5
+  }
+  log(t);   // (5 + 0 + 5) * 1000 = 10000
+}
