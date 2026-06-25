@@ -1,0 +1,14 @@
+// Regression: signed + - * and unary - compute in the unsigned domain so
+// overflow WRAPS (two's-complement) instead of being C UB; ordinary results are
+// unchanged. Verified UBSan-clean.
+unit main() {
+  log(2 + 3 * 4 - 5);                  // 9
+  log(0 - 5);                          // -5
+  int mx = 9223372036854775807;        // INT64_MAX
+  log(mx + 1);                         // wraps -> INT64_MIN
+  int mn = -9223372036854775807 - 1;   // INT64_MIN
+  log(mn - 1);                         // wraps -> INT64_MAX
+  log(0 - mn);                         // -INT_MIN wraps -> INT_MIN
+  int big = 3037000500;
+  log(big * big);                      // wraps (defined)
+}

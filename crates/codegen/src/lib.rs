@@ -7954,7 +7954,7 @@ impl<'a> Cx<'a> {
                 if matches!(op, HBinOp::Shl | HBinOp::Shr) {
                     return self.emit_shift(&l, *op, &r, &lhs.ty);
                 }
-                format!("(({}) {} ({}))", l, binop_c(*op), r)
+                self.emit_arith(&l, *op, &r, &lhs.ty)
             }
             HExprKind::Un { op, expr } => {
                 if let (HUnOp::Neg, HExprKind::LitInt(n)) = (op, &expr.kind) {
@@ -7962,7 +7962,7 @@ impl<'a> Cx<'a> {
                 }
                 let v = self.emit_inline_expr(inline_f, expr, tag);
                 match op {
-                    HUnOp::Neg => format!("(-({}))", v),
+                    HUnOp::Neg => self.emit_neg(&v, &expr.ty),
                     HUnOp::Not => format!("(!({}))", v),
                     // C integer-promotes `~`, so cast back to the operand's type
                     // to mask the result into its width (e.g. `~(u8)0` is 255, not -1).
@@ -8272,6 +8272,32 @@ impl<'a> Cx<'a> {
             return format!("{}({}, {}, {})", mac, l, r, signed_min_lit(lhs_ty));
         }
         format!("(({}) {} maka_check_div({}))", l, binop_c(op), r)
+    }
+
+    /// Emit a binary op, making signed `+` / `-` / `*` overflow WRAP instead of
+    /// being C undefined behaviour: compute in the unsigned counterpart (which
+    /// wraps by definition) and reinterpret back.  Branchless and zero-cost, and
+    /// identical to the raw op for any non-overflowing value.  Non-arithmetic and
+    /// unsigned ops keep the plain form.
+    fn emit_arith(&self, l: &str, op: HBinOp, r: &str, lhs_ty: &HType) -> String {
+        if matches!(op, HBinOp::Add | HBinOp::Sub | HBinOp::Mul) && is_signed_int(lhs_ty) {
+            let st = self.c_type(lhs_ty);
+            let ut = unsigned_ctype(lhs_ty);
+            return format!("(({0})(({1})({2}) {3} ({1})({4})))", st, ut, l, binop_c(op), r);
+        }
+        format!("(({}) {} ({}))", l, binop_c(op), r)
+    }
+
+    /// Emit unary negation; signed `-MIN` is C UB, so negate in the unsigned
+    /// counterpart (wraps) and reinterpret back.  Unsigned negation is already
+    /// well-defined in C.
+    fn emit_neg(&self, v: &str, ty: &HType) -> String {
+        if is_signed_int(ty) {
+            let st = self.c_type(ty);
+            let ut = unsigned_ctype(ty);
+            return format!("(({0})(-({1})({2})))", st, ut, v);
+        }
+        format!("(-({}))", v)
     }
 
     fn emit_move_consuming(&mut self, f: &HFunc, e: &HExpr) -> String {
@@ -8764,7 +8790,7 @@ impl<'a> Cx<'a> {
                 if matches!(op, HBinOp::Shl | HBinOp::Shr) {
                     return self.emit_shift(&l, *op, &r, &lhs.ty);
                 }
-                format!("(({}) {} ({}))", l, opc, r)
+                self.emit_arith(&l, *op, &r, &lhs.ty)
             }
             HExprKind::Un { op, expr } => {
                 // Fold negation of an integer literal so `-9223372036854775808`
@@ -8775,7 +8801,7 @@ impl<'a> Cx<'a> {
                 }
                 let v = self.emit_expr(f, expr);
                 match op {
-                    HUnOp::Neg => format!("(-({}))", v),
+                    HUnOp::Neg => self.emit_neg(&v, &expr.ty),
                     HUnOp::Not => format!("(!({}))", v),
                     // C integer-promotes `~`, so cast back to the operand's type
                     // to mask the result into its width (e.g. `~(u8)0` is 255, not -1).
@@ -9889,11 +9915,11 @@ impl<'a> Cx<'a> {
             HExprKind::LitStr(s) => format!("{:?}", s),
             HExprKind::LitNull => "NULL".into(),
             HExprKind::LitUnit => "MAKA_UNIT".into(),
-            HExprKind::Un { op: HUnOp::Neg, expr } => format!("(-({}))", self.emit_global_init(expr)),
+            HExprKind::Un { op: HUnOp::Neg, expr } => self.emit_neg(&self.emit_global_init(expr), &expr.ty),
             HExprKind::Bin { op, lhs, rhs } => {
                 let l = self.emit_global_init(lhs);
                 let r = self.emit_global_init(rhs);
-                format!("(({}) {} ({}))", l, binop_c(*op), r)
+                self.emit_arith(&l, *op, &r, &lhs.ty)
             }
             _ => "0".into(),
         }
