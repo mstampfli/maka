@@ -1,0 +1,34 @@
+// Evaluation-order invariants whose regression would be a silent miscompile:
+//  - a match scrutinee is evaluated exactly ONCE (not re-evaluated per arm),
+//  - `&&` / `||` short-circuit (the right operand is skipped once the result is
+//    determined),
+//  - the FIRST matching guard wins, and guards are tried in order.
+data Ctr { mut int n; }
+int  bump(&mut Ctr c) { c.n = c.n + 1; return c.n; }
+bool tick(&mut Ctr c) { c.n = c.n + 1; return true; }
+
+int classify(int x) {
+  return match (x) {
+    n if n < 0   0 - 1,
+    n if n == 0  0,
+    n if n < 10  1,
+    else         2,
+  };
+}
+
+unit main() {
+  // The scrutinee call runs once: the matched arm is 1 and the counter is 1.
+  mut Ctr a = { n = 0 };
+  int r = match (bump(&mut a)) { 1 100, 2 200, else 300, };
+  log(r + a.n);            // 100 + 1 = 101
+
+  // Short-circuit: tick runs only in the branch that is actually evaluated.
+  mut Ctr b = { n = 0 };
+  if (false && tick(&mut b)) { log(0); }   // RHS skipped
+  if (true  || tick(&mut b)) { }           // RHS skipped
+  if (true  && tick(&mut b)) { }           // RHS runs once
+  log(b.n);                // 1
+
+  // First matching guard wins.
+  log(classify(0 - 5) + classify(0) + classify(5) + classify(50));   // -1 + 0 + 1 + 2 = 2
+}
