@@ -1,0 +1,14 @@
+// Like neg_69, but the owned string escapes nested inside the returned value:
+// `o` owns its buffer and is freed when `mk` returns, yet it is embedded as a
+// borrowed `string` field of the returned `Box`, so the caller would observe a
+// dangling string. Must be rejected; carry it as an `own *string` field to
+// transfer ownership instead.
+data Box { string s; }
+Box mk() {
+  own *string o = "a" + "b";
+  return Box { s = o };
+}
+unit main() {
+  Box b = mk();
+  log(b.s);
+}
