@@ -1,0 +1,38 @@
+// A move of an OUTER owning binding inside a NESTED match - in the nested arm's
+// body, or in a nested arm's guard - must still null the OUTER scrutinee's field,
+// or its drop double-frees.  Regression: value_moves_binding(Match) inspected only
+// nested arm values (not bodies/guards) and did not recurse into Bin operands.
+import std.{Option, String, StringOps, string_from};
+enum Box { Has { String s }, Empty }
+
+int taker(String s) { return s.length(); }
+
+int via_body(Box b, Option<int> flag) {
+  return match (b) {
+    Box.Has { s } {
+      mut int n = 0;
+      match (flag) { Option.Some { value } { n = taker(s); } Option.None { } }
+      yield n;
+    },
+    Box.Empty 0,
+  };
+}
+
+int via_guard(Box b, Option<int> flag) {
+  return match (b) {
+    Box.Has { s } {
+      int n = match (flag) { Option.Some { value } if taker(s) > 0 7, Option.None 0, };
+      yield n;
+    },
+    Box.Empty 0,
+  };
+}
+
+unit main() {
+  mut int t = 0;
+  for (int i in 0..500) {
+    t = t + via_body(Box.Has { s = string_from("hey") }, Option.Some { value = 1 });   // 3
+    t = t + via_guard(Box.Has { s = string_from("hi") }, Option.Some { value = 1 });   // 7
+  }
+  log(t);   // (3 + 7) * 500 = 5000
+}

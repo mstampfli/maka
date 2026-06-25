@@ -9803,8 +9803,32 @@ impl<'a> Cx<'a> {
             HExprKind::ArrayLit(es) => es.iter().any(|e| self.value_moves_binding(e, target)),
             HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } =>
                 args.iter().any(|a| self.value_moves_binding(a, target)),
-            HExprKind::Match { arms, .. } =>
-                arms.iter().any(|a| a.value.as_ref().is_some_and(|v| self.value_moves_binding(v, target))),
+            HExprKind::CallIndirect { callee, args } =>
+                self.value_moves_binding(callee, target) || args.iter().any(|a| self.value_moves_binding(a, target)),
+            // Operator operands and a unary operand can contain a move (e.g. a
+            // call `eat(s)` inside `eat(s) > 0`).  A bare owning Local never appears
+            // as a Bin/Un operand (operator overloads auto-borrow their operands),
+            // so recursing here flags real moves without false positives.  Field /
+            // Index-base / Unwrap / AddrOfRef are borrow positions (a bare Local
+            // there is a read, not a move), so they are deliberately NOT recursed;
+            // only Index's subscript expression is a value position.
+            HExprKind::Bin { lhs, rhs, .. } =>
+                self.value_moves_binding(lhs, target) || self.value_moves_binding(rhs, target),
+            HExprKind::Un { expr, .. } => self.value_moves_binding(expr, target),
+            HExprKind::Index { idx, .. } => self.value_moves_binding(idx, target),
+            HExprKind::Closure { env_values, .. } =>
+                env_values.iter().any(|v| self.value_moves_binding(v, target)),
+            // Evaluating a nested match moves `target` if its scrutinee, any
+            // guard, any arm value, OR any arm body moves it - not just the arm
+            // values.  Without the body/guard check a move inside a nested match's
+            // body would not null the outer scrutinee's field -> double-free.
+            HExprKind::Match { scrutinee, arms, .. } =>
+                self.value_moves_binding(scrutinee, target)
+                    || arms.iter().any(|a| {
+                        a.value.as_ref().is_some_and(|v| self.value_moves_binding(v, target))
+                            || a.guard.as_ref().is_some_and(|g| self.value_moves_binding(g, target))
+                            || self.stmts_move_binding(&a.body.stmts, target)
+                    }),
             _ => false,
         }
     }
