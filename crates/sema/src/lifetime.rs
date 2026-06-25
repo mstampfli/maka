@@ -86,6 +86,9 @@ pub fn analyze_func(
     hoist_owning_temps(sym, f);
     // Final: walk the body and fill heap_to_free for each block in reverse scope-decl order.
     fill_heap_drops(sym, f);
+    // Scoped-borrow rule: a cross-thread closure may capture a borrowed reference
+    // only if its handle is provably joined before scope exit.
+    check_scoped_thread_borrows(f, &mut errors);
     if errors.is_empty() {
         Ok(AnalyzeOk { warnings, capture_nonnull })
     } else {
@@ -1862,6 +1865,100 @@ fn hoist_one(e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: &mut Vec<HStmt>) {
 /// these moves its owning captures into the thread).
 fn is_spawn_callee(c: FuncId) -> bool {
     c.0 == u32::MAX - 3 || c.0 == u32::MAX - 15 || c.0 == u32::MAX - 16 || c.0 == u32::MAX - 37
+}
+
+/// CROSS-thread spawn tiers (thread / job / spawn_pool), excluding the
+/// same-thread fiber `spawn`.  Only these can outlive the spawning scope, so a
+/// borrowed-reference capture into one is sound only with a proven join.
+fn is_cross_thread_callee(c: FuncId) -> bool {
+    c.0 == u32::MAX - 15 || c.0 == u32::MAX - 16 || c.0 == u32::MAX - 37
+}
+
+/// If `e` is a cross-thread spawn whose closure captures a borrowed reference
+/// (`&T`/`&mut T`), return that capture's span (the borrow that needs a join).
+fn cross_thread_borrow_capture(e: &HExpr) -> Option<Span> {
+    let HExprKind::Call { callee, args } = &e.kind else { return None };
+    if !is_cross_thread_callee(*callee) { return None; }
+    let mut cur = args.first()?;
+    loop {
+        match &cur.kind {
+            HExprKind::Closure { env_values, .. } => {
+                for v in env_values {
+                    if matches!(v.ty, HType::Ref { .. }) { return Some(v.span); }
+                }
+                return None;
+            }
+            HExprKind::HeapAlloc(i) | HExprKind::DropWrite(i)
+            | HExprKind::DerefRef(i) | HExprKind::Transfer(i) => cur = i,
+            _ => return None,
+        }
+    }
+}
+
+/// Is `e` a `join(handle)` call (the single-handle blocking join, MAX-4)?
+fn is_join_of(e: &HExpr, handle: LocalId) -> bool {
+    if let HExprKind::Call { callee, args } = &e.kind {
+        if callee.0 == u32::MAX - 4 {
+            if let Some(a) = args.first() { return root_local(a) == Some(handle); }
+        }
+    }
+    false
+}
+
+/// Within `b`, is the spawn at `spawn_idx` (binding `handle`) UNCONDITIONALLY
+/// joined later in the same block before any branch or early-exit?  Only
+/// straight-line `let`/expr statements may precede the `join(handle)`; any
+/// Assign / If / While / For / Match / Return / Break / Continue / Propagate in
+/// between means the join cannot be proven to dominate the block's exit (and
+/// thus every in-scope local's drop), so we answer no (caller rejects).
+fn handle_joined_in_block(b: &HBlock, spawn_idx: usize, handle: LocalId) -> bool {
+    for s in &b.stmts[spawn_idx + 1..] {
+        match s {
+            HStmt::Let { .. } => continue,
+            HStmt::ExprStmt(e) => { if is_join_of(e, handle) { return true; } }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Reject a cross-thread spawn (thread/job/spawn_pool) whose closure captures a
+/// borrowed reference UNLESS the handle is unconditionally joined before scope
+/// exit (Rust `thread::scope`-style scoped borrow).  Conservative by design:
+/// when a join cannot be proven, reject - an under-rejection here would be a
+/// use-after-free, so "unsure" must mean "no".
+fn check_scoped_thread_borrows(f: &HFunc, errors: &mut Vec<SemaError>) {
+    fn walk(b: &HBlock, locals: &[LocalInfo], errors: &mut Vec<SemaError>) {
+        for (i, s) in b.stmts.iter().enumerate() {
+            match s {
+                HStmt::Let { local, init, .. } => {
+                    if let Some(bspan) = cross_thread_borrow_capture(init) {
+                        if !handle_joined_in_block(b, i, *local) {
+                            let h = &locals[local.0 as usize].name;
+                            errors.push(SemaError {
+                                msg: format!(
+                                    "a cross-thread closure captures a borrowed reference, which is sound only if the thread finishes before the borrowed data's scope ends; add an unconditional `join({})` after the spawn in this block (no branch or early return in between), or capture by value to move ownership into the thread",
+                                    h
+                                ),
+                                span: bspan,
+                            });
+                        }
+                    }
+                }
+                HStmt::ExprStmt(e) => {
+                    if let Some(bspan) = cross_thread_borrow_capture(e) {
+                        errors.push(SemaError {
+                            msg: "a cross-thread closure captures a borrowed reference but its handle is discarded, so it can never be joined; bind the handle and `join` it before scope exit, or capture by value".to_string(),
+                            span: bspan,
+                        });
+                    }
+                }
+                _ => {}
+            }
+            for_each_child_block(s, &mut |cb| walk(cb, locals, errors));
+        }
+    }
+    walk(&f.body, &f.locals, errors);
 }
 
 pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {

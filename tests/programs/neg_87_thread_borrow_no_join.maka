@@ -1,0 +1,10 @@
+// A cross-thread closure capturing a borrowed reference WITHOUT a join is a
+// dangling borrow (the thread can outlive the borrowed data) - rejected.
+data Box { int v; }
+unit reads(&Box b) { log(b.v); }
+unit main() {
+  Box b = { v = 1 };
+  &Box r = &b;
+  *Thread t = thread(unit() [r] { reads(r); });
+  detach(t);   // not joined -> ERROR
+}

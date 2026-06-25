@@ -1,0 +1,17 @@
+// Scoped borrow: a cross-thread closure MAY capture a borrowed reference (&T)
+// when its handle is unconditionally joined before scope exit - the thread is
+// guaranteed to finish before the borrowed data is freed (Rust thread::scope
+// style). enum/match so match_lsan exercises it under ASan.
+import std.{ Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy };
+data Box { int v; }
+enum Sel { A, B }
+int pick(Sel s) { return match (s) { A 21, B 0, }; }
+unit main() {
+  Box b = { v = pick(Sel.A) };
+  &Box r = &b;
+  Atomic<int> acc = atomic_new(0);
+  *Thread t = thread(unit() [r, acc] { _ = atomic_add(acc, r.v); });
+  join(t);                 // unconditional join before b/r go out of scope
+  log(atomic_get(acc));    // 21
+  atomic_destroy(acc);
+}

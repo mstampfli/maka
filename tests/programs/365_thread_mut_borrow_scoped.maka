@@ -1,10 +1,10 @@
-// Capturing `&mut T` into thread() / job() / spawn_pool() must error —
-// the borrow is tied to the spawning thread's scope and can't cross
-// safely.  `spawn()` (cooperative fiber, same thread) is fine.
+// Scoped borrow with `&mut`: a cross-thread closure may capture `&mut local`
+// when its handle is unconditionally joined before scope exit - the thread is
+// guaranteed to finish before the borrowed data is freed, and join synchronizes
+// the write. (The no-join variant is rejected: neg_52 / neg_87.)
 unit main() {
-    mut int counter = 0;
-    *Thread t = thread(unit() [&mut counter] {
-        counter = counter + 1;
-    });
-    join(t);
+  mut int counter = 0;
+  *Thread t = thread(unit() [&mut counter] { counter = counter + 1; });
+  join(t);
+  log(counter);   // 1
 }

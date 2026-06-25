@@ -186,18 +186,13 @@ impl<'a> TypeChecker<'a> {
             if matches!(ty, HType::OwnPtr { .. } | HType::Heap { .. }) {
                 continue;
             }
-            // Borrows are the most common foot-gun; specific diagnostic.
+            // Borrowed references: allowed as a SCOPED borrow.  The lifetime pass
+            // (check_scoped_thread_borrows) accepts the capture only when the
+            // spawn handle is provably joined before the borrowed data's scope
+            // exits, and rejects it otherwise - so defer to that check rather
+            // than rejecting every borrow here.
             if matches!(ty, HType::Ref { .. }) {
-                self.err(
-                    format!(
-                        "`{0}` captures a borrowed reference (`{1}`) which can't cross a thread \
-                         boundary — the borrow's lifetime is tied to this scope but the thread can \
-                         outlive it.  Capture by value `[name]` (moves ownership for `own *T` / \
-                         `own &T`, copies Shareable values), or restructure to pass an `own *T`.",
-                        tier, type_str(ty)
-                    ),
-                    sp,
-                );
+                let _ = tier;
                 continue;
             }
             // (b) anything else must be Shareable.

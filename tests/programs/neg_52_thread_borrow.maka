@@ -1,8 +1,8 @@
-// Spawn-tier closures (thread/job/spawn_pool) reject borrowed captures.
-// The borrow's lifetime is tied to the caller's scope but the thread can
-// outlive it — would race or dangle.
+// A cross-thread closure capturing a borrowed `&mut` WITHOUT a join is rejected:
+// the borrow is tied to the caller's scope but the thread can outlive it. (With
+// an unconditional join before scope exit it is allowed - see 365.)
 unit main() {
-    mut int counter = 0;
-    *Thread t = thread(unit() [&mut counter] { counter = counter + 1; });
-    join(t);
+  mut int counter = 0;
+  *Thread t = thread(unit() [&mut counter] { counter = counter + 1; });
+  detach(t);   // not joined -> ERROR
 }
