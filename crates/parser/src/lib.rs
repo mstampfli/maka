@@ -469,7 +469,7 @@ impl Parser {
             Expr::Ident(n, _) => env.get(n).copied().or_else(|| self.constexprs.get(n).copied()),
             Expr::Un { op, expr, .. } => {
                 let v = self.ct_expr(expr, env, budget)?;
-                Some(match op { UnOp::Neg => v.wrapping_neg(), UnOp::Not => if v == 0 { 1 } else { 0 } })
+                Some(match op { UnOp::Neg => v.wrapping_neg(), UnOp::Not => if v == 0 { 1 } else { 0 }, UnOp::BitNot => !v })
             }
             Expr::Bin { op, lhs, rhs, .. } => {
                 // Short-circuit logical operators.
@@ -1801,6 +1801,11 @@ impl Parser {
                 self.bump();
                 let e = self.parse_unary()?;
                 Ok(Expr::Un { op: UnOp::Not, expr: Box::new(e), span: start })
+            }
+            TokKind::Tilde => {
+                self.bump();
+                let e = self.parse_unary()?;
+                Ok(Expr::Un { op: UnOp::BitNot, expr: Box::new(e), span: start })
             }
             TokKind::Amp => {
                 self.bump();

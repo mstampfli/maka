@@ -1674,6 +1674,22 @@ impl<'a> TypeChecker<'a> {
                 let h = self.check_expr_coerce(e, &HType::Bool);
                 HExpr { kind: HExprKind::Un { op: HUnOp::Not, expr: Box::new(h) }, ty: HType::Bool, span: sp }
             }
+            ast::UnOp::BitNot => {
+                // Bitwise complement is integer-only (char/u8 included, like the
+                // binary bitwise operators); the result keeps the operand type.
+                let is_int = |t: &HType| matches!(t, HType::Int | HType::SizedInt { .. } | HType::Char);
+                let inner_expected = expected.filter(|t| is_int(t));
+                let h = self.check_expr(e, inner_expected);
+                if !is_int(&h.ty) {
+                    // Allow user types to overload `~` via a `BitNot` attr (mirrors Neg).
+                    if let Some(hir) = self.try_unary_overload("BitNot", "bitnot", &h, sp) {
+                        return hir;
+                    }
+                    self.err("bitwise NOT requires an integer type", sp);
+                }
+                let ty = h.ty.clone();
+                HExpr { kind: HExprKind::Un { op: HUnOp::BitNot, expr: Box::new(h) }, ty, span: sp }
+            }
         }
     }
 

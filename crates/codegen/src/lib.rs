@@ -7939,6 +7939,9 @@ impl<'a> Cx<'a> {
                 match op {
                     HUnOp::Neg => format!("(-({}))", v),
                     HUnOp::Not => format!("(!({}))", v),
+                    // C integer-promotes `~`, so cast back to the operand's type
+                    // to mask the result into its width (e.g. `~(u8)0` is 255, not -1).
+                    HUnOp::BitNot => format!("(({})(~({})))", self.c_type(&expr.ty), v),
                 }
             }
             HExprKind::Unwrap { expr, skip_check: _ } => {
@@ -8703,6 +8706,9 @@ impl<'a> Cx<'a> {
                 match op {
                     HUnOp::Neg => format!("(-({}))", v),
                     HUnOp::Not => format!("(!({}))", v),
+                    // C integer-promotes `~`, so cast back to the operand's type
+                    // to mask the result into its width (e.g. `~(u8)0` is 255, not -1).
+                    HUnOp::BitNot => format!("(({})(~({})))", self.c_type(&expr.ty), v),
                 }
             }
             HExprKind::Unwrap { expr, skip_check: _ } => {

@@ -1,0 +1,2 @@
+// `~` (bitwise NOT) requires an integer type; applying it to a float is an error.
+unit main() { f64 x = 1.5; log((~x) as int); }

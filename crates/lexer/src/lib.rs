@@ -109,6 +109,7 @@ pub enum TokKind {
     Amp,         // & (also bit-and via overload)
     Pipe,        // | (bit-or)
     Caret,       // ^ (bit-xor)
+    Tilde,       // ~ (unary bit-not)
     ShlOp,       // <<
     ShrOp,       // >>
     Bang,        // ! (unary or postfix unwrap)
@@ -336,6 +337,7 @@ impl<'a> Lexer<'a> {
                     b'&' => TokKind::Amp,
                     b'|' => TokKind::Pipe,
                     b'^' => TokKind::Caret,
+                    b'~' => TokKind::Tilde,
                     b'!' => TokKind::Bang,
                     b'=' => TokKind::Eq,
                     b'<' => TokKind::Lt,

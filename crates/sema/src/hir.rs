@@ -558,7 +558,7 @@ pub enum HBinOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum HUnOp { Neg, Not }
+pub enum HUnOp { Neg, Not, BitNot }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HAssignOp { Assign, Add, Sub, Mul, Div, Mod }
