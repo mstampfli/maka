@@ -610,6 +610,11 @@ pub struct AttrDecl {
     pub name: String,
     /// Generic type parameters declared on the attr: `attr Convert<U> { ... }`.
     pub type_params: Vec<String>,
+    /// Optional default for each type parameter, parallel to `type_params`:
+    /// `attr Add<R = _> { ... }`.  `_` means the implementing type (Self).  A
+    /// `has` impl that omits an attr type-argument inherits the default; a
+    /// parameter with no default must be supplied explicitly.
+    pub type_param_defaults: Vec<Option<Type>>,
     /// Method signatures inside the attr block (may have default bodies in `funcs`).
     pub funcs: Vec<FuncDecl>,
     /// Associated-type declarations: `type Slot;` lines (§10.5).

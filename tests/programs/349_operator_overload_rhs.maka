@@ -1,0 +1,27 @@
+// Operator/attr overloading by right-operand type.  An attr type parameter with
+// a default (`attr Add<R = _>`) lets a type implement an operator for its own
+// type (the default RHS) AND for other right-hand types; dispatch picks the impl
+// by operand type.  The stdlib String uses this so `s + "literal"` (String +
+// string) works alongside String + String.
+import std.{String, StringOps, string_from};
+
+data V { int x; }
+V has Add      { V add(&V a, &V b)  { return { x = a.x + b.x }; } }   // R = Self (default)
+V has Add<int> { V add(&V a, int b) { return { x = a.x + b }; } }     // R = int (overload)
+
+unit main() {
+  mut int t = 0;
+  for (int i in 0..1000) {
+    V a = { x = 10 };
+    V b = { x = 5 };
+    V c = a + b;          // V + V   -> 15
+    V d = a + 100;        // V + int -> 110
+    t = t + c.x + d.x;    // 125
+
+    String s = string_from("foo");
+    String e = s + "bar";              // String + string literal -> "foobar"
+    String f = e + string_from("!");   // String + String          -> "foobar!"
+    t = t + f.length();                // 7
+  }
+  log(t);   // (125 + 7) * 1000 = 132000
+}

@@ -628,8 +628,9 @@ impl Parser {
     fn parse_attr(&mut self) -> Result<AttrDecl, ParseError> {
         let kw = self.expect(&TokKind::Attr, "`attr`")?;
         let (name, _) = self.expect_ident("attribute name")?;
-        // Optional generic params: `attr Convert<U> { ... }`.
-        let type_params = self.parse_type_params()?;
+        // Optional generic params: `attr Convert<U> { ... }`, with optional
+        // per-parameter defaults: `attr Add<R = _> { ... }`.
+        let (type_params, type_param_defaults, _bounds) = self.parse_type_params_with_bounds(true)?;
         self.expect(&TokKind::LBrace, "`{`")?;
         let mut funcs = Vec::new();
         let mut assoc_types: Vec<AssocTypeDecl> = Vec::new();
@@ -652,7 +653,7 @@ impl Parser {
             }
         }
         self.expect(&TokKind::RBrace, "`}`")?;
-        Ok(AttrDecl { name, type_params, funcs, assoc_types, is_pub: false, span: kw.span })
+        Ok(AttrDecl { name, type_params, type_param_defaults, funcs, assoc_types, is_pub: false, span: kw.span })
     }
 
     /// Parse one method declaration inside an `attr` block.  Accepts either:
@@ -669,7 +670,7 @@ impl Parser {
         }
         let ret = self.parse_type()?;
         let (name, _) = self.expect_ident("method name")?;
-        let (type_params, inline_bounds) = self.parse_type_params_with_bounds()?;
+        let (type_params, _tp_defaults, inline_bounds) = self.parse_type_params_with_bounds(false)?;
         self.expect(&TokKind::LParen, "`(`")?;
         let mut params = Vec::new();
         if !self.at(&TokKind::RParen) {
@@ -770,17 +771,18 @@ impl Parser {
     }
 
     fn parse_type_params(&mut self) -> Result<Vec<String>, ParseError> {
-        let (names, _) = self.parse_type_params_with_bounds()?;
+        let (names, _, _) = self.parse_type_params_with_bounds(false)?;
         Ok(names)
     }
 
     /// Parse `<T, U: Trait>` and return both the names AND any inline bound shorthands
     /// converted to `WhereClause` form.  Callers that already pass `where_clauses`
     /// downstream should merge these.
-    fn parse_type_params_with_bounds(&mut self) -> Result<(Vec<String>, Vec<WhereClause>), ParseError> {
+    fn parse_type_params_with_bounds(&mut self, allow_defaults: bool) -> Result<(Vec<String>, Vec<Option<Type>>, Vec<WhereClause>), ParseError> {
         let mut out = Vec::new();
+        let mut defaults: Vec<Option<Type>> = Vec::new();
         let mut bounds = Vec::new();
-        if !self.eat(&TokKind::Lt) { return Ok((out, bounds)); }
+        if !self.eat(&TokKind::Lt) { return Ok((out, defaults, bounds)); }
         loop {
             let start = self.peek_span();
             let (n, _) = self.expect_ident("type parameter")?;
@@ -816,11 +818,21 @@ impl Parser {
                     if !self.eat(&TokKind::Plus) { break; }
                 }
             }
+            // Optional default: `<R = Type>`.  Only attrs accept defaults; a `=`
+            // here in any other generic list is a clear error.
+            let default = if self.at(&TokKind::Eq) {
+                if !allow_defaults {
+                    return Err(ParseError { msg: "type-parameter defaults are only allowed on `attr` declarations".into(), span: self.peek_span() });
+                }
+                self.bump();
+                Some(self.parse_type()?)
+            } else { None };
             out.push(n);
+            defaults.push(default);
             if !self.eat(&TokKind::Comma) { break; }
         }
         self.expect(&TokKind::Gt, "`>`")?;
-        Ok((out, bounds))
+        Ok((out, defaults, bounds))
     }
 
     fn parse_where_clauses(&mut self) -> Result<Vec<WhereClause>, ParseError> {
@@ -1041,7 +1053,7 @@ impl Parser {
         }
         let ret = self.parse_type()?;
         let (name, _) = self.expect_ident("function name")?;
-        let (type_params, inline_bounds) = self.parse_type_params_with_bounds()?;
+        let (type_params, _tp_defaults, inline_bounds) = self.parse_type_params_with_bounds(false)?;
         self.expect(&TokKind::LParen, "`(`")?;
         let mut params = Vec::new();
         if !self.at(&TokKind::RParen) {

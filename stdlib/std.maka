@@ -637,18 +637,23 @@ pub attr StringOps {
 //   a & b -> BitAnd.band   a | b -> BitOr.bor   a ^ b -> BitXor.bxor
 //   a << b -> Shl.shl      a >> b -> Shr.shr
 // Operands auto-borrow into the `&_` parameters, so they are not consumed.
-pub attr Add    { _   add (&_ a, &_ b); }
-pub attr Sub    { _   sub (&_ a, &_ b); }
-pub attr Mul    { _   mul (&_ a, &_ b); }
-pub attr Div    { _   div (&_ a, &_ b); }
-pub attr Mod    { _   mod (&_ a, &_ b); }
-pub attr Eq     { bool eq (&_ a, &_ b); }
-pub attr Ord    { int cmp (&_ a, &_ b); }
-pub attr BitAnd { _   band(&_ a, &_ b); }
-pub attr BitOr  { _   bor (&_ a, &_ b); }
-pub attr BitXor { _   bxor(&_ a, &_ b); }
-pub attr Shl    { _   shl (&_ a, &_ b); }
-pub attr Shr    { _   shr (&_ a, &_ b); }
+// The right operand is a type parameter defaulting to the implementing type
+// (`R = _`), so `a + b` is `Self + Self` by default but a type may also overload
+// an operator for other right-hand types - e.g. `String + string`, `Vec * int` -
+// by adding `Type has Add<Other> { ... }`.  Dispatch picks the impl by operand
+// type.
+pub attr Add<R = _>    { _   add (&_ a, &R b); }
+pub attr Sub<R = _>    { _   sub (&_ a, &R b); }
+pub attr Mul<R = _>    { _   mul (&_ a, &R b); }
+pub attr Div<R = _>    { _   div (&_ a, &R b); }
+pub attr Mod<R = _>    { _   mod (&_ a, &R b); }
+pub attr Eq<R = _>     { bool eq (&_ a, &R b); }
+pub attr Ord<R = _>    { int cmp (&_ a, &R b); }
+pub attr BitAnd<R = _> { _   band(&_ a, &R b); }
+pub attr BitOr<R = _>  { _   bor (&_ a, &R b); }
+pub attr BitXor<R = _> { _   bxor(&_ a, &R b); }
+pub attr Shl<R = _>    { _   shl (&_ a, &R b); }
+pub attr Shr<R = _>    { _   shr (&_ a, &R b); }
 
 pub String has StringOps {
     // Number of chars held (excludes the trailing NUL).
@@ -678,6 +683,17 @@ pub String has Add {
     String add(&String a, &String b) {
         mut String r = string_from(a.as_str());
         r.push_str(b.as_str());
+        return r;
+    }
+}
+
+// `a + s` where `s` is a `string` view (e.g. a literal): a fresh String holding
+// a's bytes followed by s.  Overloads Add on a non-Self right operand; the view
+// is taken by value (a `&string` would be unusable).
+pub String has Add<string> {
+    String add(&String a, string b) {
+        mut String r = string_from(a.as_str());
+        r.push_str(b);
         return r;
     }
 }

@@ -762,6 +762,11 @@ pub struct AttrInfo {
     pub name: String,
     /// Generic type parameters: `attr Convert<U> { ... }` → `["U"]`.
     pub type_params: Vec<String>,
+    /// Optional default per type parameter, parallel to `type_params`:
+    /// `attr Add<R = _> { ... }`.  Kept as raw AST so `_` (Self) resolves
+    /// against each `has` impl's receiver; a `has` impl that omits a trailing
+    /// attr type-argument inherits the default.
+    pub type_param_defaults: Vec<Option<maka_ast::Type>>,
     pub is_pub: bool,
     pub module_path: Vec<String>,
     pub span: Span,

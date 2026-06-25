@@ -1,0 +1,4 @@
+// Type-parameter defaults are only allowed on `attr` declarations, not on
+// structs/enums/functions.
+data Box<T = int> { T v; }
+unit main() { log(0); }

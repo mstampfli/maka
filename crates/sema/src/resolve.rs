@@ -1119,6 +1119,7 @@ impl SymTab {
                     sym.attrs.push(AttrInfo {
                         name: a.name.clone(),
                         type_params: a.type_params.clone(),
+                        type_param_defaults: a.type_param_defaults.clone(),
                         is_pub: a.is_pub,
                         module_path: item_module.clone(),
                         span: a.span,
@@ -1159,12 +1160,41 @@ impl SymTab {
                         });
                         continue;
                     }
+                    // Resolve the receiver pattern first: it is the `_` (Self) used
+                    // by any inherited attr-arg default below, and is also used for
+                    // coherence and assoc-type resolution.  Type-variable
+                    // identifiers introduced by the receiver (e.g. `T` in `*T`) are
+                    // collected so we know which identifiers in the impl's assoc-type
+                    // defs are free variables to be substituted at call sites.
+                    let receiver_tyvars = collect_receiver_tyvars(&sym, &h.receiver);
+                    let receiver_pattern = resolve_type_in(&sym, &h.receiver, &receiver_tyvars, &mut errors);
                     // Resolve concrete attr args (`Color has Convert<int> { ... }`).
-                    // Arity must match the attr's declared `type_params`.
-                    let attr_args: Vec<HType> = h.attr_args.iter()
-                        .map(|t| resolve_type(&sym, t, &mut errors))
+                    // When fewer args are supplied than the attr declares, the
+                    // trailing parameters inherit their declared defaults
+                    // (`attr Add<R = _>`); `_` means the implementing type (Self =
+                    // the receiver).  A parameter with no default must be supplied.
+                    let mut attr_args: Vec<HType> = h.attr_args.iter()
+                        .map(|t| resolve_type_in(&sym, t, &receiver_tyvars, &mut errors))
                         .collect();
-                    if attr_args.len() != attr_info.type_params.len() {
+                    if attr_args.len() < attr_info.type_params.len() {
+                        for i in attr_args.len()..attr_info.type_params.len() {
+                            match attr_info.type_param_defaults.get(i).and_then(|d| d.as_ref()) {
+                                Some(maka_ast::Type::Named(n, _)) if n == "_" => attr_args.push(receiver_pattern.clone()),
+                                Some(dty) => attr_args.push(resolve_type_in(&sym, dty, &receiver_tyvars, &mut errors)),
+                                None => {
+                                    errors.push(SemaError {
+                                        msg: format!(
+                                            "`{} has {}` provides {} attr arg(s) but the attr declares {} (parameter `{}` has no default)",
+                                            h.type_name, h.attr_name, h.attr_args.len(), attr_info.type_params.len(),
+                                            attr_info.type_params.get(i).cloned().unwrap_or_default(),
+                                        ),
+                                        span: h.span,
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                    } else if attr_args.len() > attr_info.type_params.len() {
                         errors.push(SemaError {
                             msg: format!(
                                 "`{} has {}` provides {} attr arg(s) but the attr declares {}",
@@ -1173,13 +1203,6 @@ impl SymTab {
                             span: h.span,
                         });
                     }
-                    // Resolve the receiver pattern to an HType.  Type-variable
-                    // identifiers introduced by the receiver (e.g. `T` in `*T`)
-                    // are collected so we know which identifiers in the impl's
-                    // assoc-type defs are free variables to be substituted at
-                    // call sites.
-                    let receiver_tyvars = collect_receiver_tyvars(&sym, &h.receiver);
-                    let receiver_pattern = resolve_type_in(&sym, &h.receiver, &receiver_tyvars, &mut errors);
                     // Resolve assoc-type definitions in the impl, with the
                     // receiver's type variables in scope.
                     let mut assoc_type_defs: Vec<(String, HType)> = Vec::new();
@@ -1968,7 +1991,14 @@ pub fn check_attr_shape_ty(
         return;
     }
     for (i, (a, h)) in a_params.iter().zip(h_params.iter()).enumerate() {
-        if !htype_eq(a, h) {
+        // An impl may take a parameter BY VALUE (`T`) where the attr declares it
+        // as a borrow (`&T`).  The call site coerces each operand to the impl's
+        // actual parameter type, so this is sound: a non-owning view (e.g.
+        // `string`) need not be wrapped in an unusable `&string`, and an impl
+        // that takes an owning operand by value opts into consuming it.
+        let ok = htype_eq(a, h)
+            || matches!(a, HType::Ref { inner, .. } if htype_eq(inner, h));
+        if !ok {
             errors.push(SemaError {
                 msg: format!(
                     "method `{}` for `{}`: param {} type `{}` does not match attr `{}` declaration `{}`",
