@@ -6,6 +6,23 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // The parser (recursive descent) and the typeck/codegen tree walks recurse
+    // once per nesting level, so deeply nested input (e.g. a long chain of binary
+    // operators or many nested parentheses) can overflow the default 8 MiB main
+    // stack and abort with no diagnostic.  Run the whole compile on a thread with
+    // a large stack so realistic deep input compiles instead of crashing.  Any
+    // `process::exit` inside `run` still exits the whole process; a panic in `run`
+    // is re-raised here, preserving the existing failure behavior.
+    let worker = std::thread::Builder::new()
+        .stack_size(1024 * 1024 * 1024)
+        .spawn(run)
+        .expect("failed to spawn compiler worker thread");
+    if worker.join().is_err() {
+        std::process::exit(101);
+    }
+}
+
+fn run() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("usage: makac <input.maka>... [-o output] [--emit-c] [--run]");
