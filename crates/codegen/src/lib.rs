@@ -9326,8 +9326,11 @@ impl<'a> Cx<'a> {
                 }
                 let sig = self.sym.func_sig(*callee);
 
-                // Dynamic-dispatch: if the first arg is a dyn (or a reference to one), call through the vtable.
-                if !args.is_empty() {
+                // Dynamic-dispatch: a TRAIT-METHOD call whose receiver is a dyn (or
+                // a reference to one) goes through the vtable.  A free function that
+                // merely takes a dyn first argument (sig.logic is None) is a normal
+                // call - mirrors the method-first/free-fn-fallback resolution in sema.
+                if !args.is_empty() && sig.logic.is_some() {
                     if let Some(_traits) = strip_to_dyn(&args[0].ty) {
                         // We want the underlying Dyn value, not its address. If the expression is
                         // `&mut x`/AddrOfRef of a dyn place, skip the `&`.

@@ -1,0 +1,26 @@
+// A free (non-method) function whose first parameter is a `&dyn T`, called as
+// f(x), must resolve to that free function instead of being hijacked into a
+// vtable method dispatch (it used to error "trait Animal has no method describe").
+// Trait-method dispatch still takes priority: an unqualified call to an actual
+// trait method on a dyn (legs(x)) still resolves to the method (method-first,
+// free-function fallback).
+import std.{String, StringOps, string_from};
+data Dog  { mut String name; int legs; }
+data Bird { mut String name; int legs; }
+logic Animal {
+  int legs(&Dog d)  { return d.legs; }
+  int legs(&Bird b) { return b.legs; }
+}
+int describe(&dyn Animal a) { return Animal.legs(a) + 100; }   // free fn taking a dyn
+
+unit main() {
+  mut int t = 0;
+  for (int i in 0..1000) {
+    Dog  d = { name = string_from("Rex"),    legs = 4 };
+    Bird b = { name = string_from("Tweety"), legs = 2 };
+    t = t + describe(&d as dyn Animal);   // free fn   -> 4 + 100 = 104
+    t = t + describe(&b as dyn Animal);   // free fn   -> 2 + 100 = 102
+    t = t + legs(&d as dyn Animal);       // method    -> 4 (method-first)
+  }
+  log(t);   // (104 + 102 + 4) * 1000 = 210000
+}

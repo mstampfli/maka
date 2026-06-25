@@ -3696,25 +3696,33 @@ impl<'a> TypeChecker<'a> {
                     let s = self.sym.func_sig(*fid).clone();
                     if s.name == name && s.param_tys.len() == probed.len() { Some((*fid, s)) } else { None }
                 });
-                let Some((fid, sig)) = chosen else {
+                // Method-first, free-function fallback.  If the trait has a method
+                // by this name and arity, dispatch through the vtable.  If it does
+                // not, but a free function by this name exists, this is a plain
+                // free-function call that merely takes a dyn first argument (not a
+                // method dispatch) - fall through to normal overload resolution.
+                // Only error when neither a trait method nor a free function exists.
+                if let Some((fid, sig)) = chosen {
+                    // Type-check args (no coercion needed for arg 0 since dyn).
+                    let mut hargs = Vec::new();
+                    for (i, a) in args.iter().enumerate() {
+                        if i == 0 {
+                            hargs.push(probed[0].clone());
+                        } else {
+                            let want = sig.param_tys.get(i).cloned().unwrap_or(HType::Unit);
+                            hargs.push(self.check_expr_coerce(a, &want));
+                        }
+                    }
+                    return HExpr {
+                        kind: HExprKind::Call { callee: fid, args: hargs },
+                        ty: sig.ret.clone(),
+                        span: sp,
+                    };
+                } else if candidates.is_empty() {
                     self.err(format!("trait `{}` has no method `{}` with arity {}", trait_name, name, probed.len()), sp);
                     return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
-                };
-                // Type-check args (no coercion needed for arg 0 since dyn).
-                let mut hargs = Vec::new();
-                for (i, a) in args.iter().enumerate() {
-                    if i == 0 {
-                        hargs.push(probed[0].clone());
-                    } else {
-                        let want = sig.param_tys.get(i).cloned().unwrap_or(HType::Unit);
-                        hargs.push(self.check_expr_coerce(a, &want));
-                    }
                 }
-                return HExpr {
-                    kind: HExprKind::Call { callee: fid, args: hargs },
-                    ty: sig.ret.clone(),
-                    span: sp,
-                };
+                // else: a free function by this name exists - fall through below.
             }
         }
 
