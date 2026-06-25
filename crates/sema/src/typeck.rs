@@ -36,6 +36,11 @@ pub struct TypeChecker<'a> {
     /// double-free).  Provides the target type for coercion so an `alloc` in the
     /// arm picks the right owning kind (`own &` vs `own *`), without rebinding.
     yield_expected: Vec<HType>,
+    /// Depth of enclosing match-arm / if-expression value blocks.  `yield` is only
+    /// meaningful as the result of such a block; when this is 0 we are at a
+    /// function or closure body (a statement context) where a `yield` would be
+    /// silently discarded (returning the zero value), so it is rejected there.
+    in_arm_body: u32,
     /// The expected type of the call expression currently being dispatched, set
     /// by `check_expr` before `check_call`.  Lets a generic call infer a type
     /// parameter that appears only in the return type from its context, e.g.
@@ -287,6 +292,7 @@ impl<'a> TypeChecker<'a> {
             cur_type_params: Vec::new(),
             yield_target: Vec::new(),
             yield_expected: Vec::new(),
+            in_arm_body: 0,
             call_ret_expected: None,
             cur_is_inline: false,
             cur_module: Vec::new(),
@@ -520,6 +526,12 @@ impl<'a> TypeChecker<'a> {
                     let h = self.check_expr_coerce(e, &ty);
                     HStmt::ExprStmt(h)
                 } else {
+                    if self.in_arm_body == 0 {
+                        // No enclosing match-arm / if-expression value block: this is
+                        // a function or closure body, where `yield` would be silently
+                        // discarded and the zero value returned instead.  Reject it.
+                        self.err("`yield` is only valid as the result of a match arm or if-expression value block; use `return` to return a value from a function or closure", *span);
+                    }
                     let h = self.check_expr(e, None);
                     HStmt::ExprStmt(h)
                 }
@@ -4815,7 +4827,9 @@ impl<'a> TypeChecker<'a> {
                     if let Some((t, init)) = target {
                         let yv = self.fresh_local("__yield".to_string(), t.clone(), StorageClass::Stack, true, true, arm.span);
                         self.yield_target.push((yv, t.clone()));
+                        self.in_arm_body += 1;
                         let mut block = self.check_block(b);
+                        self.in_arm_body -= 1;
                         self.yield_target.pop();
                         block.stmts.insert(0, HStmt::Let { local: yv, init, span: arm.span });
                         let value = HExpr { kind: HExprKind::Local(yv), ty: t, span: arm.span };
@@ -4827,7 +4841,9 @@ impl<'a> TypeChecker<'a> {
                         let pushed = if !as_stmt {
                             if let Some(t) = arm_ty.clone() { self.yield_expected.push(t); true } else { false }
                         } else { false };
+                        self.in_arm_body += 1;
                         let mut block = self.check_block(b);
+                        self.in_arm_body -= 1;
                         if pushed { self.yield_expected.pop(); }
                         // Statement-form matches don't extract a value from the
                         // arm body.  Otherwise the trailing yield (lowered to an

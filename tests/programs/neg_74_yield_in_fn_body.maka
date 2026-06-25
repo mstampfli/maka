@@ -1,0 +1,13 @@
+// `yield` is only meaningful as the result of a match-arm or if-expression value
+// block.  Used at the top level of a function (or closure) body it has no result
+// target, so it was silently lowered to a discarded expression statement and the
+// function returned the zero value instead of the yielded one.  That silent
+// miscompile must be a compile error: use `return` to return from a function.
+int f(int c) {
+  if (c > 0) { yield 5; }   // no enclosing value block -> reject (was silent 0)
+  yield 6;
+}
+
+unit main() {
+  log(f(1));
+}
