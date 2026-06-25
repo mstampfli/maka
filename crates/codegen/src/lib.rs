@@ -9823,11 +9823,16 @@ impl<'a> Cx<'a> {
 
     fn stmts_move_binding(&self, stmts: &[HStmt], target: LocalId) -> bool {
         stmts.iter().any(|s| match s {
-            HStmt::Return { value: Some(v), .. } | HStmt::Propagate { value: Some(v), .. } =>
-                self.value_moves_binding(v, target),
+            HStmt::Return { value: Some(v), .. } | HStmt::Propagate { value: Some(v), .. }
+            | HStmt::ExprStmt(v) => self.value_moves_binding(v, target),
+            HStmt::Let { init, .. } => self.value_moves_binding(init, target),
+            HStmt::Assign { value, .. } => self.value_moves_binding(value, target),
             HStmt::If { then_b, else_b, .. } =>
                 self.stmts_move_binding(&then_b.stmts, target)
                     || else_b.as_ref().is_some_and(|b| self.stmts_move_binding(&b.stmts, target)),
+            HStmt::While { body, .. } | HStmt::ForEach { body, .. } =>
+                self.stmts_move_binding(&body.stmts, target),
+            HStmt::ForC { body, .. } => self.stmts_move_binding(&body.stmts, target),
             HStmt::Block(b) | HStmt::Unsafe(b, _) => self.stmts_move_binding(&b.stmts, target),
             _ => false,
         })

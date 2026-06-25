@@ -1,0 +1,20 @@
+// An arm that moves an owning binding in a body STATEMENT (here a let-init that
+// passes the String by value), not just in the arm value or a return, must still
+// null the scrutinee's field so its drop does not double-free.  Regression:
+// stmts_move_binding only inspected return/propagate, missing Let/Assign/ExprStmt.
+import std.{Option, String, StringOps, string_from};
+
+int taker(String s) { return s.length(); }
+
+int via_let(Option<String> o) {
+  return match (o) {
+    Option.Some { value } { int n = taker(value); yield n + 1; },
+    Option.None 0,
+  };
+}
+
+unit main() {
+  mut int t = 0;
+  for (int i in 0..1000) { t = t + via_let(Option.Some { value = string_from("hey") }); }
+  log(t);   // (3 + 1) * 1000 = 4000
+}
