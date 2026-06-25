@@ -1,0 +1,31 @@
+// Pushing or heap-allocating an owning struct field / Vec element moves it; the
+// source slot must be nulled or the source container's drop double-frees it.
+// Regression: the push builtin and alloc (heap value, heap array element) emitted
+// their moved operand via plain emit_expr, bypassing the emit_move_consuming
+// nulling applied at the other consuming positions.
+import std.{Vec, push, String, StringOps, string_from};
+data Pair { String a; String b; }
+
+unit main() {
+  mut int t = 0;
+  for (int i in 0..1000) {
+    // push an owning struct field into a Vec
+    Pair p = { a = string_from("aaa"), b = string_from("bb") };
+    mut Vec<String> w = [];
+    push(&mut w, p.a);                        // move a into w; p still owns b
+    t = t + w[0].length() + p.b.length();     // 3 + 2 = 5
+
+    // push a Vec element into another Vec
+    mut Vec<String> v = [];
+    push(&mut v, string_from("cccc")); push(&mut v, string_from("d"));
+    mut Vec<String> u = [];
+    push(&mut u, v[0]);                        // move v[0] into u; v owns v[1]
+    t = t + u[0].length() + v[1].length();    // 4 + 1 = 5
+
+    // heap-box an owning field directly
+    Pair q = { a = string_from("eeeee"), b = string_from("ff") };
+    own *String boxed = alloc q.a;            // move q.a into the heap box
+    t = t + boxed!.length() + q.b.length();   // 5 + 2 = 7
+  }
+  log(t);   // (5 + 5 + 7) * 1000 = 17000
+}

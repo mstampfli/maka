@@ -8780,7 +8780,9 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 60 {
                     let vp_ty = self.c_type(&args[0].ty);   // Vec_T*
                     let vp = self.emit_expr(f, &args[0]);
-                    let x = self.emit_expr(f, &args[1]);
+                    // The element is moved into the Vec: null an owning field/index
+                    // source so the caller's container drop does not double-free it.
+                    let x = self.emit_move_consuming(f, &args[1]);
                     return format!("(__extension__ ({{ {0} __vp = {1}; if (__vp->len == __vp->cap) {{ __vp->cap = __vp->cap ? __vp->cap * 2 : 4; __vp->data = realloc(__vp->data, __vp->cap * sizeof(*__vp->data)); }} __vp->data[__vp->len++] = ({2}); MAKA_UNIT; }}))", vp_ty, vp, x);
                 }
                 // `pop(v)` -> last element, shrinking the length (panics if empty).
@@ -9458,15 +9460,17 @@ impl<'a> Cx<'a> {
                     let elem_c = self.c_type(elem);
                     if let HExprKind::ArrayLit(elems) = &inner.kind {
                         let stores: String = elems.iter().enumerate()
-                            .map(|(i, el)| { let s = self.emit_expr(f, el); format!("__d[{}] = {}; ", i, s) }).collect();
+                            .map(|(i, el)| { let s = self.emit_move_consuming(f, el); format!("__d[{}] = {}; ", i, s) }).collect();
                         return format!("(__extension__ ({{ {0}* __d = ({0}*)malloc(sizeof({0})*{1}); {2}__d; }}))", elem_c, len, stores);
                     }
                     // Non-literal array value: stage in a temp, then copy element-wise.
-                    let v = self.emit_expr(f, inner);
+                    let v = self.emit_move_consuming(f, inner);
                     return format!("(__extension__ ({{ {0} __s[{1}] = {2}; {0}* __d = ({0}*)malloc(sizeof({0})*{1}); for (size_t __i=0;__i<(size_t){1};__i++) __d[__i]=__s[__i]; __d; }}))", elem_c, len, v);
                 }
                 let inner_c = self.c_type(&inner.ty);
-                let v = self.emit_expr(f, inner);
+                // The value is moved into the heap box: null an owning field/index
+                // source so the caller's container drop does not double-free it.
+                let v = self.emit_move_consuming(f, inner);
                 format!("(__extension__ ({{ {0}* __p = ({0}*)malloc(sizeof({0})); *__p = ({1}); __p; }}))", inner_c, v)
             }
             HExprKind::Free(inner) => {
