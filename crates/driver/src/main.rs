@@ -228,6 +228,9 @@ fn run() {
     for c in &link_c { cc_args.push(c.clone()); }
     // Library flags come AFTER object inputs so ld can resolve symbols in scan order.
     for f in &link_flags { cc_args.push(f.clone()); }
+    // libm: floating-point modulo lowers to fmod, which at low optimization is a
+    // real libm call rather than an inlined builtin.  Harmless when unused.
+    cc_args.push("-lm".into());
     cc_args.push("-o".into());
     cc_args.push(out_bin.clone());
     let status = Command::new(&cc)

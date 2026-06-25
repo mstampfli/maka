@@ -8296,6 +8296,11 @@ impl<'a> Cx<'a> {
     /// identical to the raw op for any non-overflowing value.  Non-arithmetic and
     /// unsigned ops keep the plain form.
     fn emit_arith(&self, l: &str, op: HBinOp, r: &str, lhs_ty: &HType) -> String {
+        // C's `%` is integer-only; floating-point modulo needs fmod.
+        // __builtin_fmod avoids a <math.h>/-lm dependency.
+        if matches!(op, HBinOp::Mod) && is_float_ty(lhs_ty) {
+            return format!("(({0})__builtin_fmod((double)({1}), (double)({2})))", self.c_type(lhs_ty), l, r);
+        }
         if matches!(op, HBinOp::Add | HBinOp::Sub | HBinOp::Mul) && is_signed_int(lhs_ty) {
             let st = self.c_type(lhs_ty);
             let ut = unsigned_ctype(lhs_ty);
