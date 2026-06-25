@@ -1,0 +1,16 @@
+// Borrow provenance across a call, the legal side (cf. neg_71 for the illegal
+// one). Returning the as_str of a &String PARAMETER is sound: the buffer is the
+// caller's data, which outlives the call (the borrow is rooted in a reference
+// parameter, like test 313 but through a call). And a function that returns a
+// static string while merely taking a &String borrows none of its arguments, so
+// calling it on a local is fine too. Neither must be flagged as an escape.
+import std.{String, StringOps, string_from, str_len};
+
+string view(&String s) { return s.as_str(); }   // borrow of a & param: outlives
+string greet(&String s) { return "hi"; }         // returns a static: borrows nothing
+
+unit main() {
+  String s = string_from("hello");
+  log(str_len(view(&s)) as int);     // 5
+  log(str_len(greet(&s)) as int);    // 2
+}

@@ -66,9 +66,10 @@ pub fn analyze_func(
     sym: &SymTab,
     f: &mut HFunc,
     summaries: &[bool],
+    ret_borrows: &[Vec<bool>],
     initial_nonnull: &[LocalId],
 ) -> Result<AnalyzeOk, Vec<SemaError>> {
-    let mut a = Analyzer::new(sym, f, summaries);
+    let mut a = Analyzer::new(sym, f, summaries, ret_borrows);
     for lid in initial_nonnull {
         if let Some(st) = a.state.get_mut(lid.0 as usize) {
             st.known_nonnull = true;
@@ -130,6 +131,113 @@ pub fn compute_return_summaries(sym: &SymTab, funcs: &[HFunc]) -> Vec<bool> {
         if !changed { break; }
     }
     summaries
+}
+
+/// Per-function borrow provenance, indexed by `FuncId.0` (parallel to
+/// `sym.sigs`): for a function whose return type is a borrowed view
+/// (`string` / `&T` / `*T` / `raw *T`), the set of parameter indices its
+/// return value may alias.  Everything else stays all-false.
+///
+/// This is what lets the escape walk follow a borrowed return value back
+/// across a call to the argument it aliases - so `return localString.as_str()`
+/// (a borrow of a local that dies on return) is rejected exactly like the
+/// direct `return &local;`.  Computed by monotone fixpoint: provenance only
+/// grows as nested callees' provenance becomes known, so it converges.
+pub fn compute_return_borrows(sym: &SymTab, funcs: &[HFunc]) -> Vec<Vec<bool>> {
+    let n = sym.sigs.len();
+    let mut borrows: Vec<Vec<bool>> =
+        (0..n).map(|i| vec![false; sym.sigs[i].param_tys.len()]).collect();
+    loop {
+        let mut changed = false;
+        for f in funcs {
+            let id = f.id.0 as usize;
+            if id >= n || !ty_is_borrowed_view(&sym.sigs[id].ret) { continue; }
+            let mut acc = borrows[id].clone();
+            collect_ret_borrows_in_block(&f.body, f, &borrows, &mut acc);
+            if acc != borrows[id] {
+                borrows[id] = acc;
+                changed = true;
+            }
+        }
+        if !changed { break; }
+    }
+    borrows
+}
+
+/// A borrowed (non-owning) view type: returning one aliases data the function
+/// does not own, so the result's lifetime is tied to wherever that data lives.
+/// Owning carriers (`own *T`, `heap T`, value types) transfer ownership and so
+/// never borrow a parameter.
+fn ty_is_borrowed_view(t: &HType) -> bool {
+    matches!(
+        t,
+        HType::Str | HType::Ref { .. } | HType::Ptr { .. } | HType::RawPtr { .. }
+    )
+}
+
+fn collect_ret_borrows_in_block(b: &HBlock, f: &HFunc, borrows: &[Vec<bool>], acc: &mut Vec<bool>) {
+    for s in &b.stmts {
+        collect_ret_borrows_in_stmt(s, f, borrows, acc);
+    }
+}
+
+fn collect_ret_borrows_in_stmt(s: &HStmt, f: &HFunc, borrows: &[Vec<bool>], acc: &mut Vec<bool>) {
+    match s {
+        HStmt::Return { value: Some(v), .. } => params_borrowed_by(v, f, borrows, acc),
+        HStmt::If { then_b, else_b, .. } => {
+            collect_ret_borrows_in_block(then_b, f, borrows, acc);
+            if let Some(eb) = else_b {
+                collect_ret_borrows_in_block(eb, f, borrows, acc);
+            }
+        }
+        HStmt::While { body, .. } | HStmt::ForEach { body, .. } => {
+            collect_ret_borrows_in_block(body, f, borrows, acc)
+        }
+        HStmt::ForC { body, .. } => collect_ret_borrows_in_block(body, f, borrows, acc),
+        HStmt::Block(b) | HStmt::Unsafe(b, _) => collect_ret_borrows_in_block(b, f, borrows, acc),
+        _ => {}
+    }
+}
+
+/// Accumulate the parameter indices that `e` - a value of borrowed-view type
+/// being returned - may alias.  Mirrors the escape walk: a borrow of a
+/// parameter place, the parameter itself passed through, a field/element of
+/// either, the borrowed return of a nested call (followed into the argument it
+/// aliases), or a reinterpret/deref of any of those.  Anything else (a fresh
+/// `alloc`, a string literal, a value the function owns) borrows no parameter.
+fn params_borrowed_by(e: &HExpr, f: &HFunc, borrows: &[Vec<bool>], acc: &mut Vec<bool>) {
+    use HExprKind::*;
+    match &e.kind {
+        AddrOfRef { place, .. } => {
+            if let Some(root) = root_local(place) {
+                if let Some(idx) = f.params.iter().position(|p| *p == root) {
+                    if idx < acc.len() { acc[idx] = true; }
+                }
+            }
+        }
+        Local(id) => {
+            if let Some(idx) = f.params.iter().position(|p| *p == *id) {
+                if idx < acc.len() { acc[idx] = true; }
+            }
+        }
+        Field { base, .. } | Index { base, .. } => params_borrowed_by(base, f, borrows, acc),
+        Call { callee, args } | InlineCall { callee, args } => {
+            let cid = callee.0 as usize;
+            if let Some(cb) = borrows.get(cid) {
+                for (m, &b) in cb.iter().enumerate() {
+                    if b {
+                        if let Some(a) = args.get(m) {
+                            params_borrowed_by(a, f, borrows, acc);
+                        }
+                    }
+                }
+            }
+        }
+        Cast { expr, .. } | CheckedCast { expr, .. } | DerefRef(expr) | Unwrap { expr, .. } => {
+            params_borrowed_by(expr, f, borrows, acc)
+        }
+        _ => {}
+    }
 }
 
 /// Result of walking a block / statement during summary computation.
@@ -436,6 +544,12 @@ struct Analyzer<'a> {
     /// Populated by `compute_return_summaries` before the per-func pass runs.
     /// `expr_nonnull` consults this on `Call` / `InlineCall` arms.
     summaries: &'a [bool],
+    /// Interprocedural borrow-provenance, indexed by `FuncId.0`: for each
+    /// function whose return type is a borrowed view, the set of parameter
+    /// indices its return value may alias.  Populated by
+    /// `compute_return_borrows`.  The escape walk consults this to follow a
+    /// borrowed return back across a call to the argument it aliases.
+    ret_borrows: &'a [Vec<bool>],
     /// Capture-site non-null facts harvested while walking `Closure` exprs:
     /// `(lifted FuncId, LocalId inside the lifted body)` pairs whose
     /// corresponding `env_value` was provably non-null at the capture site.
@@ -446,7 +560,7 @@ struct Analyzer<'a> {
 }
 
 impl<'a> Analyzer<'a> {
-    fn new(sym: &'a SymTab, f: &mut HFunc, summaries: &'a [bool]) -> Self {
+    fn new(sym: &'a SymTab, f: &mut HFunc, summaries: &'a [bool], ret_borrows: &'a [Vec<bool>]) -> Self {
         let n = f.locals.len();
         Self {
             sym,
@@ -455,6 +569,7 @@ impl<'a> Analyzer<'a> {
             errors: Vec::new(),
             warnings: Vec::new(),
             summaries,
+            ret_borrows,
             capture_nonnull: Vec::new(),
         }
     }
@@ -1001,6 +1116,25 @@ impl<'a> Analyzer<'a> {
             Bin { lhs, rhs, .. } => {
                 self.check_no_local_ref_escape(lhs, true);
                 self.check_no_local_ref_escape(rhs, true);
+            }
+            // A call whose borrowed return value aliases one of its arguments
+            // (per `compute_return_borrows`): the result borrows whatever that
+            // argument borrows, so follow into it.  This catches a borrow that
+            // escapes through a call - e.g. `return localString.as_str()`, where
+            // `as_str(&String) -> string` returns a borrow of its receiver, so
+            // the result dangles on a local receiver just like `return &local;`.
+            Call { callee, args } | InlineCall { callee, args } => {
+                let cid = callee.0 as usize;
+                let borrowed: Vec<usize> = self
+                    .ret_borrows
+                    .get(cid)
+                    .map(|cb| cb.iter().enumerate().filter(|(_, &b)| b).map(|(m, _)| m).collect())
+                    .unwrap_or_default();
+                for m in borrowed {
+                    if let Some(a) = args.get(m) {
+                        self.check_no_local_ref_escape(a, nested);
+                    }
+                }
             }
             _ => {}
         }

@@ -1,0 +1,16 @@
+// A borrowed `string` returned through a call that aliases a local. as_str
+// hands back a view of its &String receiver (it borrows param 0), so
+// `return s.as_str()` is `return as_str(&s)` where `&s` roots in a local
+// String freed when the function returns: the caller would observe a
+// use-after-free. The escape checker must follow the borrow across the call
+// (interprocedural borrow provenance) and reject it, exactly as it rejects the
+// direct `return &local;`. Return an own *string (or the String) to transfer
+// ownership instead.
+import std.{String, StringOps, string_from, str_len};
+string view() {
+  String s = string_from("hello");
+  return s.as_str();
+}
+unit main() {
+  log(str_len(view()) as int);
+}

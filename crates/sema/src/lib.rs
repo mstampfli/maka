@@ -529,6 +529,10 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
     // forwarded into the corresponding lifted body so its own pass starts with
     // those captures proven (§6.3 closure-capture flow).
     let summaries = lifetime::compute_return_summaries(&sym, &funcs);
+    // Interprocedural borrow provenance: which parameters each function's
+    // borrowed return value aliases, so the escape pass can follow a borrow
+    // back across a call to the local it would dangle on.
+    let ret_borrows = lifetime::compute_return_borrows(&sym, &funcs);
     // Pre-pass to harvest capture-site non-null facts.  Lifted closure funcs
     // live *earlier* in `funcs[]` than their parent (they're pushed during the
     // parent's type-check, before the parent's own push), so a single forward
@@ -542,7 +546,7 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
     }
     for hf in &mut funcs {
         let initial: Vec<hir::LocalId> = capture_inits.remove(&hf.id.0).unwrap_or_default();
-        match lifetime::analyze_func(&sym, hf, &summaries, &initial) {
+        match lifetime::analyze_func(&sym, hf, &summaries, &ret_borrows, &initial) {
             Ok(ok) => warnings.extend(ok.warnings),
             Err(es) => errors.extend(es),
         }
