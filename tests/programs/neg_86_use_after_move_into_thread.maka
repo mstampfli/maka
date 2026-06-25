@@ -1,0 +1,9 @@
+// Capturing an `own *T` into a thread MOVES it (the thread owns + frees it), so
+// using it after the spawn is a use-after-move.
+data Box { int v; }
+unit main() {
+  own *Box b = alloc Box { v = 1 };
+  *Thread t = thread(unit() [b] { log(b!.v); });
+  join(t);
+  log(b!.v);   // ERROR: use of moved value
+}

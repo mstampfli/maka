@@ -1025,11 +1025,24 @@ impl<'a> Analyzer<'a> {
             HExprKind::AddrOfRef { place, .. } => self.walk_expr(place),
             HExprKind::Field { base, .. } => self.walk_expr(base),
             HExprKind::Index { base, idx } => { self.walk_expr(base); self.walk_expr(idx); }
-            HExprKind::Call { args, .. } => {
+            HExprKind::Call { callee, args } => {
+                let spawn = is_spawn_callee(*callee);
                 for a in args {
                     // Detect move-in for any owning value passed by value.
                     self.walk_expr(a);
                     self.mark_owning_move(a);
+                    // A closure passed to spawn/thread/job MOVES its owning
+                    // captures into the thread, so using them afterwards is a
+                    // use-after-move (the thread now owns and frees them).
+                    if spawn {
+                        if let HExprKind::Closure { env_values, .. } = &a.kind {
+                            for v in env_values {
+                                if ty_owns_heap(self.sym, &v.ty) {
+                                    if let HExprKind::Local(id) = v.kind { self.mark_moved(id, v.span); }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             HExprKind::Cast { expr, .. } => self.walk_expr(expr),
@@ -1845,6 +1858,12 @@ fn hoist_one(e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: &mut Vec<HStmt>) {
 /// Mirrors codegen's `drop_ty_owns`.  Owning pointers short-circuit, so
 /// recursive owning types (`data Node { own *Node next }`) terminate; a `seen`
 /// set guards against any pathological by-value cycle.
+/// Builtin spawn/thread/job/spawn_pool callee ids (a closure arg to one of
+/// these moves its owning captures into the thread).
+fn is_spawn_callee(c: FuncId) -> bool {
+    c.0 == u32::MAX - 3 || c.0 == u32::MAX - 15 || c.0 == u32::MAX - 16 || c.0 == u32::MAX - 37
+}
+
 pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
     fn go(sym: &SymTab, ty: &HType, seen: &mut Vec<u64>) -> bool {
         match ty {
@@ -1932,10 +1951,24 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                 // (handled in the caller).  Field/Unwrap/etc. accesses through a
                 // Heap/OwnPtr local are reads of the inner value, not transfers.
             }
-            HExprKind::Call { args, .. } => {
+            HExprKind::Call { callee, args } => {
+                let spawn = is_spawn_callee(*callee);
                 for a in args {
                     if ty_owns_heap(sym, &a.ty) {
                         if let HExprKind::Local(id) = a.kind { out.insert(id); }
+                    }
+                    // A closure passed to spawn/thread/job MOVES its owning
+                    // captures into the thread (the thread's env owns them and
+                    // frees them via env_drop); mark them moved so the enclosing
+                    // scope no longer frees them (else a double-free).
+                    if spawn {
+                        if let HExprKind::Closure { env_values, .. } = &a.kind {
+                            for v in env_values {
+                                if ty_owns_heap(sym, &v.ty) {
+                                    if let HExprKind::Local(id) = v.kind { out.insert(id); }
+                                }
+                            }
+                        }
                     }
                     moved_locals_in_expr(sym, a, out);
                 }

@@ -1,0 +1,20 @@
+// Regression: capturing an `own *T` into a thread MOVES it into the thread's env
+// (the thread owns it and frees it via env_drop on completion); the enclosing
+// scope no longer frees it, so no double-free and no leak. enum/match so the
+// match_lsan sweep exercises this under ASan. (use-after-move is neg_86.)
+import std.{ Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy };
+data Box { int v; }
+enum Sel { A, B }
+int pick(Sel s) { return match (s) { A 21, B 0, }; }
+unit main() {
+  Atomic<int> acc = atomic_new(0);
+  mut int i = 0;
+  while (i < 3) {
+    own *Box b = alloc Box { v = pick(Sel.A) };
+    *Thread t = thread(unit() [b, acc] { _ = atomic_add(acc, b!.v); });
+    join(t);
+    i = i + 1;
+  }
+  log(atomic_get(acc));    // 3 * 21 = 63
+  atomic_destroy(acc);
+}

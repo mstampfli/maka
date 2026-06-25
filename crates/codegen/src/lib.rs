@@ -1104,10 +1104,13 @@ impl<'a> Cx<'a> {
         self.w("    a->h->done_flag = 1;\n");
         self.w("    pthread_cond_broadcast(&a->h->done_cond);\n");
         self.w("    pthread_mutex_unlock(&a->h->done_mutex);\n");
+        // Free the capture env (running env_drop) BEFORE dropping the runner
+        // ref: the unref can free the Thread (when join/detach already dropped
+        // the other ref), and __maka_free_env reads t->env_drop.
+        self.w("    __maka_free_env(a->h, a->env);\n");
         // Drop the runner-side ref so join/detach can free.  Without this,
         // every thread() leaks a Thread + its mutex/cond.
         self.w("    __maka_thread_unref(a->h);\n");
-        self.w("    __maka_free_env(a->h, a->env);\n");
         self.w("    free(a);\n");
         self.w("    return NULL;\n");
         self.w("}\n");
@@ -2379,10 +2382,11 @@ impl<'a> Cx<'a> {
         self.w("    }\n");
         self.w("}\n");
         // spawn_pool(): spawn a fiber that runs on the background pool.
-        self.w("maka_unit* __maka_spawn_pool(void* code, void* env) {\n");
+        self.w("maka_unit* __maka_spawn_pool(void* code, void* env, void* env_drop) {\n");
         self.w("    __maka_pool_init();\n");
         self.w("    Thread* t = __maka_thread_new();\n");
         self.w("    t->is_fiber = 1;\n");
+        self.w("    t->env_drop = (void(*)(void*))env_drop;\n");
         self.w("    maka_fiber_t* f = (maka_fiber_t*)calloc(1, sizeof(maka_fiber_t));\n");
         self.w("    if (!f) {\n");
         self.w("        atomic_store(&t->is_failed, 1);\n");
@@ -8114,21 +8118,21 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 3 {
                     if let Some(a) = args.first() {
                         let s = self.emit_inline_expr(inline_f, a, tag);
-                        return format!("(Thread*)__maka_spawn_fiber(({}).code, ({}).env, NULL)", s, s);
+                        return format!("(Thread*)__maka_spawn_fiber(({}).code, ({}).env, {})", s, s, self.spawn_env_drop(a));
                     }
                     return "NULL".into();
                 }
                 if callee.0 == u32::MAX - 15 {
                     if let Some(a) = args.first() {
                         let s = self.emit_inline_expr(inline_f, a, tag);
-                        return format!("(Thread*)__maka_spawn_thread(({}).code, ({}).env, NULL)", s, s);
+                        return format!("(Thread*)__maka_spawn_thread(({}).code, ({}).env, {})", s, s, self.spawn_env_drop(a));
                     }
                     return "NULL".into();
                 }
                 if callee.0 == u32::MAX - 16 {
                     if let Some(a) = args.first() {
                         let s = self.emit_inline_expr(inline_f, a, tag);
-                        return format!("(Thread*)__maka_spawn_job(({}).code, ({}).env, NULL)", s, s);
+                        return format!("(Thread*)__maka_spawn_job(({}).code, ({}).env, {})", s, s, self.spawn_env_drop(a));
                     }
                     return "NULL".into();
                 }
@@ -8952,7 +8956,7 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 3 {
                     if let Some(a) = args.first() {
                         let s = self.emit_expr(f, a);
-                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_fiber(__cb.code, __cb.env, NULL); }}))", s);
+                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_fiber(__cb.code, __cb.env, {}); }}))", s, self.spawn_env_drop(a));
                     }
                     return "NULL".into();
                 }
@@ -8960,7 +8964,7 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 15 {
                     if let Some(a) = args.first() {
                         let s = self.emit_expr(f, a);
-                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_thread(__cb.code, __cb.env, NULL); }}))", s);
+                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_thread(__cb.code, __cb.env, {}); }}))", s, self.spawn_env_drop(a));
                     }
                     return "NULL".into();
                 }
@@ -8968,7 +8972,7 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 16 {
                     if let Some(a) = args.first() {
                         let s = self.emit_expr(f, a);
-                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_job(__cb.code, __cb.env, NULL); }}))", s);
+                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_job(__cb.code, __cb.env, {}); }}))", s, self.spawn_env_drop(a));
                     }
                     return "NULL".into();
                 }
@@ -8976,7 +8980,7 @@ impl<'a> Cx<'a> {
                 if callee.0 == u32::MAX - 37 {
                     if let Some(a) = args.first() {
                         let s = self.emit_expr(f, a);
-                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_pool(__cb.code, __cb.env); }}))", s);
+                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_pool(__cb.code, __cb.env, {}); }}))", s, self.spawn_env_drop(a));
                     }
                     return "NULL".into();
                 }
@@ -10136,6 +10140,22 @@ impl<'a> Cx<'a> {
         let _ = inner_c;
         format!("((Dyn_{0}){{ .data = {1}, .vtbl = &{0}_vtbl_for_{2} }})",
                 c_ident(trait_name), data_expr, c_ident(&sname))
+    }
+
+    /// The env's recursive-drop function for a spawn-closure argument, so the
+    /// thread frees any owner MOVED into its capture env - even on cancel, where
+    /// the body never runs.  NULL when the arg is not a literal closure, or its
+    /// env owns no heap (only Shareable / by-value-copied captures, which the env
+    /// must not free).  Paired with the lifetime pass marking those owner
+    /// captures moved, so the enclosing scope no longer frees them.
+    fn spawn_env_drop(&self, a: &HExpr) -> String {
+        if let HExprKind::Closure { env_struct, .. } = &a.kind {
+            let name = self.sym.struct_info(*env_struct).name.clone();
+            if self.drop_owns.contains(&name) {
+                return format!("(void*)__maka_drop_{}", c_ident(&name));
+            }
+        }
+        "NULL".to_string()
     }
 
     /// Saturating float->int conversion (C makes the out-of-range / NaN cases UB).
