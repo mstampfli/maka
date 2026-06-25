@@ -5037,14 +5037,13 @@ impl<'a> TypeChecker<'a> {
             HType::Str => HExprKind::LitStr(String::new()),
             HType::Ptr { .. } | HType::RawPtr { .. } => HExprKind::LitNull,
             HType::Unit => HExprKind::LitUnit,
-            // Owning pointers (own *T / own &T) are codegen'd as deref-assigned heap
-            // boxes, so a synthetic result local does not compose cleanly; keep them
-            // on the trailing-yield path (return None).  Every other composite -
-            // owning VALUES (String / Vec / data structs / enums / arrays) and plain
-            // by-value structs/slices - zeroes to a null-buffer ZeroInit (its drop is
-            // a no-op), letting a value-producing arm route `yield` through a
-            // synthetic local so a nested/conditional `yield` is not discarded.
-            HType::Heap { .. } | HType::OwnPtr { .. } => return None,
+            // Every composite zeroes to a null-buffer ZeroInit whose drop is a no-op:
+            // owning VALUES (String / Vec / data structs / enums / arrays), plain
+            // by-value structs/slices, AND owning POINTERS (own *T / own &T, which
+            // zero to a NULL pointer - both their drop and the free-on-reassign of a
+            // NULL box are null-guarded no-ops).  This lets a value-producing arm of
+            // ANY result type route `yield` through a synthetic result local, so a
+            // nested/conditional `yield` is not silently discarded.
             _ => HExprKind::ZeroInit,
         };
         Some(HExpr { kind, ty: t.clone(), span })

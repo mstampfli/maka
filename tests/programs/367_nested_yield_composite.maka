@@ -2,8 +2,10 @@
 // result local (initialized to ZeroInit), so a `yield` nested in an `if`/`while`
 // inside the arm is honored instead of being silently discarded in favor of a
 // trailing one.  Previously only SCALAR results took the synthetic-local path;
-// composite results (owning String, by-value structs) took a trailing-yield-only
-// path that dropped any nested yield.  Verified ASan/LSan clean.
+// composite results (owning String, by-value structs) and owning POINTERS
+// (own &T / own *T) took a trailing-yield-only path that dropped any nested yield.
+// Owning pointers zero to a NULL slot (drop + free-on-reassign are null-guarded
+// no-ops), so they compose with the synthetic local too.  Verified ASan/LSan clean.
 import std.{String, StringOps, string_from};
 
 // Owning-VALUE result (String): the nested conditional yield must win.
@@ -22,6 +24,13 @@ int p_pick(int c) {
   return p.x + p.y;
 }
 
+// Owning-POINTER result (own &Pt): the nested conditional yield must win, and the
+// synthetic NULL slot must not leak or double-free.
+own &Pt n_pick(int c) {
+  return if (c > 0) { if (c > 100) { yield alloc Pt { x = 7, y = 7 }; } yield alloc Pt { x = 4, y = 4 }; }
+         else { yield alloc Pt { x = 0, y = 0 }; };
+}
+
 unit main() {
   log(s_pick(20));  // "huge" -> 4
   log(s_pick(7));   // "big"  -> 3
@@ -29,4 +38,7 @@ unit main() {
   log(p_pick(200)); // 9+9 -> 18
   log(p_pick(50));  // 1+2 -> 3
   log(p_pick(0));   // 0+0 -> 0
+  log(n_pick(200).x); // 7
+  log(n_pick(50).x);  // 4
+  log(n_pick(0).x);   // 0
 }

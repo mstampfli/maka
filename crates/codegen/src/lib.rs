@@ -8446,6 +8446,15 @@ impl<'a> Cx<'a> {
                     self.wl(&format!("{} {} = {};", ptr_ty, name, s));
                     return;
                 }
+                // ZeroInit owning-pointer slot (the synthetic `__yield` local of a
+                // value-producing arm): a NULL pointer, NOT a malloc'd box.  The
+                // arm's `yield` then rebinds it via drop-on-reassign (freeing the
+                // NULL box is a null-guarded no-op).  Lifting it into a fresh box
+                // would deref a `T*` ZeroInit into a `T` slot (type error / leak).
+                if matches!(&init.kind, HExprKind::ZeroInit) {
+                    self.wl(&format!("{} {} = NULL;", ptr_ty, name));
+                    return;
+                }
                 // New allocation: value expression of type `T` lifted into heap slot.
                 let value_s = self.emit_expr(f, init);
                 let ic = self.c_type(inner);
