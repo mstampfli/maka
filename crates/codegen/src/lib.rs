@@ -7590,12 +7590,26 @@ impl<'a> Cx<'a> {
                 // Variant field bindings, read from the tagged scrutinee temp.
                 if let HArmKind::Variant { enum_id, variant, bindings, .. } = &a.kind {
                     let vinfo = self.sym.enum_info(*enum_id).variants[*variant].clone();
+                    // If the scrutinee is an owning value we will drop later (it is a
+                    // Local appended to the inline body's heap_to_free), an arm that
+                    // MOVES one of its bindings out (e.g. `Ok { value } { return value; }`,
+                    // which becomes `__r = value; goto end;` and so reaches the cleanup)
+                    // must null that field in the original scrutinee, or the cleanup
+                    // drop double-frees the escaped payload.  `value_moves_binding`
+                    // already excludes bindings merely borrowed for a read.
+                    let scrut_owns = matches!(&scrutinee.kind, HExprKind::Local(_))
+                        && self.drop_ty_owns(&scrutinee.ty);
                     for (i, b) in bindings.iter().enumerate() {
                         if let Some(local) = b {
                             let li = &inline_f.locals[local.0 as usize];
+                            let lty = li.ty.clone();
                             let nm = inline_local_name(inline_f, *local, tag);
                             body.push_str(&format!("{} {} = __s_{}.payload.{}.{}; ",
-                                self.c_type(&li.ty), nm, mt, c_ident(&vinfo.name), c_ident(&vinfo.fields[i].name)));
+                                self.c_type(&lty), nm, mt, c_ident(&vinfo.name), c_ident(&vinfo.fields[i].name)));
+                            if scrut_owns && self.drop_ty_owns(&lty) && self.arm_moves_binding(a, *local) {
+                                body.push_str(&format!("{}.payload.{}.{} = ({}){{0}}; ",
+                                    s, c_ident(&vinfo.name), c_ident(&vinfo.fields[i].name), self.c_type(&lty)));
+                            }
                         }
                     }
                 }
@@ -7719,13 +7733,26 @@ impl<'a> Cx<'a> {
         // binding as moved at the InlineCall site, so the outer scope-exit drop
         // is suppressed and the only free happens here, inside the splice.
         for id in &inline_f.body.heap_to_free {
-            let li = &inline_f.locals[id.0 as usize];
             let n = inline_local_name(&inline_f, *id, &tag);
-            let is_vec = matches!(&li.ty, HType::Heap { inner } if matches!(inner.as_ref(), HType::Vec { .. }));
-            if is_vec {
-                out.push_str(&format!("free({}.data); ", n));
-            } else {
-                out.push_str(&format!("free({}); ", n));
+            let ty = inline_f.locals[id.0 as usize].ty.clone();
+            match &ty {
+                // `own &[*]T` / by-value owning Vec: the buffer is a flat malloc.
+                HType::Heap { inner } if matches!(inner.as_ref(), HType::Vec { .. }) => {
+                    out.push_str(&format!("free({}.data); ", n));
+                }
+                // An owning struct/enum value passed in or built here (e.g. the
+                // `Result<String,E>` consumed by try_ok): use the recursive drop
+                // glue, which honors fields nulled out by a move (see the match
+                // scrutinee nulling above) instead of a crude `free` on a struct.
+                HType::Struct(sid) if self.drop_ty_owns(&ty) => {
+                    out.push_str(&format!("__maka_drop_{}(&({})); ",
+                        c_ident(&self.sym.struct_info(*sid).name), n));
+                }
+                HType::Enum(eid) if self.drop_ty_owns(&ty) => {
+                    out.push_str(&format!("__maka_drop_{}(&({})); ",
+                        c_ident(&self.sym.enum_info(*eid).name), n));
+                }
+                _ => out.push_str(&format!("free({}); ", n)),
             }
         }
 
@@ -9721,6 +9748,30 @@ impl<'a> Cx<'a> {
                 arms.iter().any(|a| a.value.as_ref().is_some_and(|v| self.value_moves_binding(v, target))),
             _ => false,
         }
+    }
+
+    /// Does this match arm move `target` (one of its own bindings) out of the
+    /// scrutinee?  Covers an expression-form arm value as well as a statement-form
+    /// `return`/`propagate` that carries the binding away (the inline-body shape:
+    /// `Ok { value } { return value; }`).  Used to null the moved-out field of an
+    /// owning scrutinee so its later drop does not double-free the escaped payload.
+    fn arm_moves_binding(&self, arm: &HMatchArm, target: LocalId) -> bool {
+        if arm.value.as_ref().is_some_and(|v| self.value_moves_binding(v, target)) {
+            return true;
+        }
+        self.stmts_move_binding(&arm.body.stmts, target)
+    }
+
+    fn stmts_move_binding(&self, stmts: &[HStmt], target: LocalId) -> bool {
+        stmts.iter().any(|s| match s {
+            HStmt::Return { value: Some(v), .. } | HStmt::Propagate { value: Some(v), .. } =>
+                self.value_moves_binding(v, target),
+            HStmt::If { then_b, else_b, .. } =>
+                self.stmts_move_binding(&then_b.stmts, target)
+                    || else_b.as_ref().is_some_and(|b| self.stmts_move_binding(&b.stmts, target)),
+            HStmt::Block(b) | HStmt::Unsafe(b, _) => self.stmts_move_binding(&b.stmts, target),
+            _ => false,
+        })
     }
 
     /// When matching an owning enum VALUE held in a place (a Local), an arm that

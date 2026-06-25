@@ -1,0 +1,34 @@
+// try_ok is an inline helper: `propagate` inside its body exits the caller's
+// frame. When the Result carries an OWNING payload (here Result<String,String>),
+// the inlined match moves the bound value/err out of the scrutinee (Ok arm:
+// `return value` becomes an inline return; Err arm: `propagate`). The inline
+// expansion's cleanup must drop the consumed scrutinee with the recursive drop
+// glue, honoring the fields nulled by the move, instead of crude-freeing a
+// struct and double-freeing the escaped buffer. Exercises both the Ok and Err
+// paths, with an owning ok-type here and an owning err-type via parse2.
+import std.{String, StringOps, Result, Try, string_from, try_ok};
+
+Result<String, String> parse(int n) {
+  if (n < 0) { return Result.Err { err = string_from("neg") }; }
+  return Result.Ok { value = string_from("okval") };
+}
+Result<String, String> run(int n) {
+  String s = try_ok(parse(n));
+  return Result.Ok { value = s };
+}
+
+Result<int, String> parse2(int n) {
+  if (n < 0) { return Result.Err { err = string_from("bad") }; }
+  return Result.Ok { value = n * 2 };
+}
+Result<int, String> run2(int n) {
+  int v = try_ok(parse2(n));
+  return Result.Ok { value = v + 1 };
+}
+
+unit main() {
+  log(match (run(5))      { Result.Ok { value } value.length(), Result.Err { err } 0, });          // 5
+  log(match (run(0 - 1))  { Result.Ok { value } value.length(), Result.Err { err } err.length(), }); // 3
+  log(match (run2(5))     { Result.Ok { value } value, Result.Err { err } 0, });                    // 11
+  log(match (run2(0 - 1)) { Result.Ok { value } value, Result.Err { err } err.length(), });         // 3
+}
