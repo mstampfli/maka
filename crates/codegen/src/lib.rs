@@ -7323,7 +7323,9 @@ impl<'a> Cx<'a> {
                     Some(e) if !matches!(e.ty, HType::Unit) => {
                         self.wl("{");
                         self.open();
-                        let s = self.emit_expr(f, e);
+                        // Consuming position: null an owning field/element moved out
+                        // via the return value before dropping the container locals.
+                        let s = self.emit_move_consuming(f, e);
                         self.wl(&format!("{} = {};", self.c_decl(&e.ty, "__ret"), s));
                         for (n, ty) in &drops { self.wl("/* drop on return */"); self.emit_field_drop(n, ty, 0); }
                         self.wl("return __ret;");
@@ -8184,6 +8186,31 @@ impl<'a> Cx<'a> {
     /// Moving an owning value out of a place (`own *T px = c.x;`) invalidates the
     /// source field/element so the owner's drop skips it - no double free.  Only
     /// nulls when the source is genuinely owned (not read through a borrow).
+    /// Emit `e` in a by-value CONSUMING position (call/ctor/return value).  A
+    /// by-value read of an owning struct/array/Vec field-or-element (or an
+    /// own-ptr/heap one) MOVES it out of its container, so capture the value and
+    /// null the source slot in the same expression - otherwise the container's
+    /// later drop double-frees the value now owned by the consumer.  A whole
+    /// local moved this way is tracked by the compile-time moved set; only a
+    /// field/index slot, which a monolithic container drop cannot selectively
+    /// skip, needs the runtime null (the statement-form analogue is
+    /// emit_move_out_null, used for Let/Assign).
+    fn emit_move_consuming(&mut self, f: &HFunc, e: &HExpr) -> String {
+        let s = self.emit_expr(f, e);
+        if !matches!(&e.kind, HExprKind::Field { .. } | HExprKind::Index { .. }) { return s; }
+        if !move_out_owned_place(e) { return s; }
+        let nullv = if matches!(&e.ty, HType::OwnPtr { .. } | HType::Heap { .. }) {
+            "NULL".to_string()
+        } else if self.drop_ty_owns(&e.ty) {
+            format!("({}){{0}}", self.c_type(&e.ty))
+        } else {
+            return s;
+        };
+        let place = self.emit_place(f, e);
+        let ty = self.c_type(&e.ty);
+        format!("(__extension__ ({{ {0} __mc = {1}; {2} = {3}; __mc; }}))", ty, s, place, nullv)
+    }
+
     fn emit_move_out_null(&mut self, f: &HFunc, src: &HExpr) {
         if !matches!(&src.kind, HExprKind::Field { .. } | HExprKind::Index { .. }) { return; }
         if !move_out_owned_place(src) { return; }
@@ -9299,7 +9326,7 @@ impl<'a> Cx<'a> {
                             _ => self.emit_expr(f, &args[0]),
                         };
                         let mut rest: Vec<String> = Vec::new();
-                        for a in &args[1..] { rest.push(self.emit_expr(f, a)); }
+                        for a in &args[1..] { rest.push(self.emit_move_consuming(f, a)); }
                         let rest_s = rest.join(", ");
                         let comma = if rest_s.is_empty() { "" } else { ", " };
                         let call = format!("({0}).vtbl->{1}(({0}).data{2}{3})", recv_s, c_ident(&sig.name), comma, rest_s);
@@ -9313,7 +9340,10 @@ impl<'a> Cx<'a> {
                 } else if sig.name == "main" && sig.logic.is_none() {
                     "maka_main".to_string()
                 } else { c_ident(&sig.c_name) };
-                let arg_s: Vec<String> = args.iter().map(|a| self.emit_expr(f, a)).collect();
+                // Owning field/element args are moved by value: emit_move_consuming
+                // captures the value and nulls the caller's slot so the caller's
+                // later container drop does not double-free it.
+                let arg_s: Vec<String> = args.iter().map(|a| self.emit_move_consuming(f, a)).collect();
                 // A capturing closure LITERAL passed to a consume-only FnPtr param
                 // is a one-shot temp the callee only calls (never stores), so its
                 // malloc'd env can be freed right after the call returns.
@@ -9364,7 +9394,7 @@ impl<'a> Cx<'a> {
                 let info = self.sym.struct_info(*id);
                 let parts: Vec<String> = info.fields.iter().enumerate().map(|(i, f0)| {
                     if let Some((_, fe)) = fields.iter().find(|(j, _)| *j == i) {
-                        let s = self.emit_expr(f, fe);
+                        let s = self.emit_move_consuming(f, fe);
                         format!(".{} = {}", c_ident(&f0.name), s)
                     } else {
                         // pointer default null
@@ -9375,7 +9405,7 @@ impl<'a> Cx<'a> {
                 format!("(({}){{ {} }})", c_ident(&info.name), parts.join(", "))
             }
             HExprKind::ArrayLit(elems) => {
-                let parts: Vec<String> = elems.iter().map(|e| self.emit_expr(f, e)).collect();
+                let parts: Vec<String> = elems.iter().map(|e| self.emit_move_consuming(f, e)).collect();
                 // For an array-typed context: emit `{a, b, c}`
                 // For slice context: we wrap into a Slice_T struct using a compound literal of the array.
                 let eff_ty = e.ty.strip_heap();
@@ -9460,7 +9490,7 @@ impl<'a> Cx<'a> {
                 // Tagged with payload.
                 let parts: Vec<String> = v.fields.iter().enumerate().map(|(i, fi)| {
                     let s = fields.iter().find(|(idx, _)| *idx == i)
-                        .map(|(_, e)| self.emit_expr(f, e))
+                        .map(|(_, e)| self.emit_move_consuming(f, e))
                         .unwrap_or_else(|| "0".into());
                     format!(".{} = {}", c_ident(&fi.name), s)
                 }).collect();

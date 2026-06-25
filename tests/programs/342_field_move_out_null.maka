@@ -1,0 +1,38 @@
+// Moving an owning struct field or Vec element out BY VALUE - passing it to a
+// by-value function, returning it, or placing it into a constructor - must null
+// the source slot, or the container's later drop double-frees the value now
+// owned by the consumer.  Borrowing a field (&p.a) must NOT null it.
+// Regression: emit_move_out_null nulled such moves only for Let/Assign; moves
+// through call arguments, return values, and constructor fields were not nulled,
+// so the container drop double-freed the moved value.
+import std.{Vec, push, Option, String, StringOps, string_from};
+
+data Pair { String a; String b; }
+
+int eat(String s) { return s.length(); }
+String take_a(Pair p) { return p.a; }                                 // move a out via return
+Option<String> wrap_a(Pair p) { return Option.Some { value = p.a }; } // move a into a variant
+
+unit main() {
+  mut int t = 0;
+  for (int i in 0..1000) {
+    // call-argument partial move: move `a`, then borrow `b`
+    Pair p1 = { a = string_from("aaa"), b = string_from("bb") };
+    t = t + eat(p1.a) + p1.b.length();              // 3 + 2 = 5
+
+    // move out via a return value
+    Pair p2 = { a = string_from("cccc"), b = string_from("d") };
+    String got = take_a(p2);
+    t = t + got.length();                           // 4
+
+    // move out into a variant constructor field
+    Pair p3 = { a = string_from("ee"), b = string_from("f") };
+    t = t + match (wrap_a(p3)) { Option.Some { value } value.length(), Option.None 0, };  // 2
+
+    // move a Vec element out (index slot); the Vec still owns the rest
+    mut Vec<String> v = [];
+    push(&mut v, string_from("ggg")); push(&mut v, string_from("h"));
+    t = t + eat(v[0]);                              // 3
+  }
+  log(t);   // (5 + 4 + 2 + 3) * 1000 = 14000
+}
