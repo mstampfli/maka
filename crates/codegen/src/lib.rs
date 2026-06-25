@@ -8045,7 +8045,11 @@ impl<'a> Cx<'a> {
         // covered above; this fallback handles literals and calls.
         match &e.kind {
             HExprKind::LitInt(n) => c_int_lit(*n),
-            HExprKind::LitFloat(v) => format!("(maka_float){}", v),
+            // `{:?}` (not `{}`): Rust's Display renders e.g. 1e30 as the
+            // integer-looking "1000...000", which C parses as an integer literal
+            // that overflows; Debug always emits a `.`/`e` form, round-trip exact
+            // and a valid C double literal.
+            HExprKind::LitFloat(v) => format!("(maka_float){:?}", v),
             HExprKind::LitBool(b) => if *b { "true".into() } else { "false".into() },
             HExprKind::LitChar(c) => format!("(maka_char){}u", *c as u32),
             HExprKind::LitStr(s) => format!("\"{}\"", c_escape(s)),
@@ -8665,7 +8669,11 @@ impl<'a> Cx<'a> {
     fn emit_expr(&mut self, f: &HFunc, e: &HExpr) -> String {
         match &e.kind {
             HExprKind::LitInt(n) => c_int_lit(*n),
-            HExprKind::LitFloat(v) => format!("(maka_float){}", v),
+            // `{:?}` (not `{}`): Rust's Display renders e.g. 1e30 as the
+            // integer-looking "1000...000", which C parses as an integer literal
+            // that overflows; Debug always emits a `.`/`e` form, round-trip exact
+            // and a valid C double literal.
+            HExprKind::LitFloat(v) => format!("(maka_float){:?}", v),
             HExprKind::LitBool(b) => if *b { "true".into() } else { "false".into() },
             HExprKind::LitChar(c) => format!("(maka_char){}u", *c as u32),
             HExprKind::LitStr(s) => format!("\"{}\"", c_escape(s)),
@@ -9908,7 +9916,11 @@ impl<'a> Cx<'a> {
             HExprKind::LitInt(n) => c_int_lit(*n),
             HExprKind::LitBool(b) => if *b { "true".into() } else { "false".into() },
             HExprKind::LitChar(c) => format!("(maka_char){}u", *c as u32),
-            HExprKind::LitFloat(v) => format!("(maka_float){}", v),
+            // `{:?}` (not `{}`): Rust's Display renders e.g. 1e30 as the
+            // integer-looking "1000...000", which C parses as an integer literal
+            // that overflows; Debug always emits a `.`/`e` form, round-trip exact
+            // and a valid C double literal.
+            HExprKind::LitFloat(v) => format!("(maka_float){:?}", v),
             HExprKind::LitNull => "NULL".into(),
             _ => "0".into(),
         }
@@ -9923,7 +9935,11 @@ impl<'a> Cx<'a> {
             HExprKind::LitInt(n) => c_int_lit(*n),
             HExprKind::LitBool(b) => if *b { "true".into() } else { "false".into() },
             HExprKind::LitChar(c) => format!("(maka_char){}u", *c as u32),
-            HExprKind::LitFloat(v) => format!("(maka_float){}", v),
+            // `{:?}` (not `{}`): Rust's Display renders e.g. 1e30 as the
+            // integer-looking "1000...000", which C parses as an integer literal
+            // that overflows; Debug always emits a `.`/`e` form, round-trip exact
+            // and a valid C double literal.
+            HExprKind::LitFloat(v) => format!("(maka_float){:?}", v),
             HExprKind::LitStr(s) => format!("{:?}", s),
             HExprKind::LitNull => "NULL".into(),
             HExprKind::LitUnit => "MAKA_UNIT".into(),

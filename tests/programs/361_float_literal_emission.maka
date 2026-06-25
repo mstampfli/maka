@@ -1,0 +1,11 @@
+// Regression: float literals must emit as C DOUBLE literals. Rust's Display
+// renders e.g. 1e30 as the integer-looking "1000...000", which C parses as an
+// integer literal that overflows -> wrong value; `{:?}` emits a `.`/`e` form.
+unit main() {
+  log((2.0) as int);          // 2
+  log((1000000.0) as int);    // 1000000
+  log((1.0e15) as int);       // 1000000000000000
+  // beyond C's integer-literal range: must be the real 1e30 (saturates to
+  // INT64_MAX); a mangled literal would not.
+  log((1.0e30) as int);       // 9223372036854775807
+}
