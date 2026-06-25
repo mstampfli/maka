@@ -1,0 +1,31 @@
+// A `yield` nested in an `if`/`while` terminates its value-block in ALL forms,
+// not just a plain (switch) match arm: also inside an inline-fn match body and
+// inside an if-expression branch.  (Companion to 336, which covers the switch
+// match.)
+import std.{Option};
+
+inline int pick(Option<int> o) {
+  return match (o) {
+    Option.Some { value } { if (value > 5) { yield value * 10; } yield 7; },
+    Option.None { yield 0; },
+  };
+}
+
+int band(int v) {
+  int r = if (v > 0) {
+    if (v > 100) { yield 3; }
+    yield 1;
+  } else {
+    yield 0;
+  };
+  return r;
+}
+
+unit main() {
+  log(pick(Option.Some { value = 10 }));   // 100
+  log(pick(Option.Some { value = 2 }));    // 7
+  log(pick(Option.None));                  // 0
+  log(band(200));                          // 3
+  log(band(50));                           // 1
+  log(band(0 - 5));                        // 0
+}

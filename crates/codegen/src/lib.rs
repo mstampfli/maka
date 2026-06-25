@@ -7637,9 +7637,11 @@ impl<'a> Cx<'a> {
                     let li = &inline_f.locals[local.0 as usize];
                     body.push_str(&format!("{} {} = __s_{}; ", self.c_type(&li.ty), inline_local_name(inline_f, local, tag), mt));
                 }
+                let yexit_lbl = self.yield_exit_begin(inline_f, a);
                 for st in &a.body.stmts {
                     body.push_str(&self.emit_inline_stmt(inline_f, st, tag, &fn_ret));
                 }
+                self.yield_exit_end(yexit_lbl, &mut body);
                 if let Some(v) = &a.value {
                     let vs = self.emit_inline_expr(inline_f, v, tag);
                     if needs_value { body.push_str(&format!("__rm_{} = ({}); ", mt, vs)); }
@@ -7800,7 +7802,13 @@ impl<'a> Cx<'a> {
             HStmt::Assign { op, place, value, .. } => {
                 let p = self.emit_inline_place(inline_f, place, tag);
                 let v = self.emit_inline_expr(inline_f, value, tag);
-                format!("{} {} {}; ", p, assign_op_c(*op), v)
+                // A `yield` assigns an arm's synthetic `__yield` local; terminate
+                // the arm so a yield nested in an if/while wins (mirrors emit_stmt).
+                let goto = if let HExprKind::Local(id) = place.kind {
+                    self.yield_exit.iter().rev().find(|(yv, _)| *yv == id)
+                        .map(|(_, l)| format!("goto {}; ", l)).unwrap_or_default()
+                } else { String::new() };
+                format!("{} {} {}; {}", p, assign_op_c(*op), v, goto)
             }
             HStmt::ExprStmt(e) => {
                 let v = self.emit_inline_expr(inline_f, e, tag);
@@ -9484,6 +9492,31 @@ impl<'a> Cx<'a> {
         Some(eid)
     }
 
+    // If `arm` produces its value through a synthetic `__yield` local, register an
+    // end label and push it so a `yield` nested in the arm body (inside an
+    // `if`/`while`) jumps here, terminating the arm, instead of falling through to
+    // a later `yield` that would overwrite it.  Returns the label to emit after the
+    // body via `yield_exit_end`.  `f` is the function whose locals `arm.value`
+    // refers to (the inline callee for inline matches).
+    fn yield_exit_begin(&mut self, f: &HFunc, arm: &HMatchArm) -> Option<String> {
+        if let Some(HExpr { kind: HExprKind::Local(yv), .. }) = &arm.value {
+            if f.locals[yv.0 as usize].name == "__yield" {
+                self.yield_label_seq += 1;
+                let lbl = format!("__yend_{}", self.yield_label_seq);
+                self.yield_exit.push((*yv, lbl.clone()));
+                return Some(lbl);
+            }
+        }
+        None
+    }
+
+    fn yield_exit_end(&mut self, lbl: Option<String>, body: &mut String) {
+        if let Some(lbl) = lbl {
+            body.push_str(&format!("{}: ; ", lbl));
+            self.yield_exit.pop();
+        }
+    }
+
     fn emit_match_switch(&mut self, f: &HFunc, scrutinee: &HExpr, arms: &[HMatchArm], result_ty: &HType, eid: EnumId) -> String {
         let mut s = self.emit_expr(f, scrutinee);
         let mut scrut_c = self.c_type(&scrutinee.ty);
@@ -9526,17 +9559,7 @@ impl<'a> Cx<'a> {
             }
             // Value-producing arm via a synthetic `__yield` local: register an end
             // label so a `yield` nested in the body terminates the arm.
-            let yexit_lbl = match &a.value {
-                Some(HExpr { kind: HExprKind::Local(yv), .. })
-                    if f.locals[yv.0 as usize].name == "__yield" =>
-                {
-                    self.yield_label_seq += 1;
-                    let lbl = format!("__yend_{}", self.yield_label_seq);
-                    self.yield_exit.push((*yv, lbl.clone()));
-                    Some(lbl)
-                }
-                _ => None,
-            };
+            let yexit_lbl = self.yield_exit_begin(f, a);
             for stmt in &a.body.stmts {
                 let prev_len = self.out.len();
                 self.emit_stmt(f, stmt);
@@ -9544,10 +9567,7 @@ impl<'a> Cx<'a> {
                 self.out.truncate(prev_len);
                 body.push_str(&emitted);
             }
-            if let Some(lbl) = &yexit_lbl {
-                body.push_str(&format!("{}: ; ", lbl));
-                self.yield_exit.pop();
-            }
+            self.yield_exit_end(yexit_lbl, &mut body);
             if let Some(v) = &a.value {
                 // Null any owning payload field this arm moves out, so the
                 // scrutinee's drop does not double-free the escaped box.
@@ -9638,6 +9658,7 @@ impl<'a> Cx<'a> {
             if let Some(g) = body_guard {
                 body.push_str(&format!("if ({}) {{ ", g));
             }
+            let yexit_lbl = self.yield_exit_begin(f, a);
             for stmt in &a.body.stmts {
                 let prev_len = self.out.len();
                 self.emit_stmt(f, stmt);
@@ -9645,6 +9666,7 @@ impl<'a> Cx<'a> {
                 self.out.truncate(prev_len);
                 body.push_str(&emitted);
             }
+            self.yield_exit_end(yexit_lbl, &mut body);
             if let Some(v) = &a.value {
                 // Null any owning payload field this arm moves out (only once the
                 // arm and its guard have committed), so the scrutinee's drop does
