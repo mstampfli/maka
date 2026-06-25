@@ -468,7 +468,24 @@ impl<'a> TypeChecker<'a> {
             }
             ast::Stmt::Return(e, span) => {
                 let ret_ty = self.cur_ret.clone();
-                let v = e.as_ref().map(|e| self.check_expr_coerce(e, &ret_ty));
+                let v = e.as_ref().map(|e| {
+                    let h = self.check_expr(e, Some(&ret_ty));
+                    // Returning an owned string (`own *string` / `own &string`)
+                    // coerced down to a borrowed `string` is always unsound: the
+                    // owned buffer is freed when the function returns, whether it
+                    // is a named local, a temporary, or an owning parameter, so
+                    // the caller would observe a dangling string. Require an
+                    // ownership-transferring return type instead.
+                    let owned_str = h.ty.is_owned_string()
+                        || matches!(&h.ty, HType::Heap { inner } if matches!(**inner, HType::Str));
+                    if matches!(ret_ty, HType::Str) && owned_str {
+                        self.err(
+                            "returning an owned string as a borrowed `string` would dangle: the owned buffer is freed when the function returns. Declare the return type as `own *string` to transfer ownership".to_string(),
+                            h.span,
+                        );
+                    }
+                    self.coerce(h, &ret_ty)
+                });
                 // Lambda-escape rule: a capturing lambda returned by value escapes its
                 // creating scope, which would dangle. Force the user to allocate it.
                 if let Some(hv) = &v {

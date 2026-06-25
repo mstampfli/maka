@@ -1,0 +1,10 @@
+// Returning an owned string (`own *string`) as a borrowed `string` would
+// dangle: `s` owns its buffer and is freed when `view` returns, so the caller
+// would observe a use-after-free. The function must declare its return type as
+// `own *string` to transfer ownership instead. (Applies equally to an owned
+// local or a concat temporary coerced down to `string`.)
+string view(own *string s) { return s; }
+unit main() {
+  own *string o = "hi" + "!";
+  log(view(o));
+}
