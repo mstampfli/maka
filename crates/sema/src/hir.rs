@@ -610,6 +610,13 @@ pub enum HExprKind {
     LitStr(String),
     LitNull,
     LitUnit,
+    /// A typed all-zero value (`(T){0}`): NULL pointers, empty owning composites
+    /// (a String/Vec/struct with null buffers).  Used to initialize the synthetic
+    /// `__yield` result local of a value-producing match arm so a `yield` nested in
+    /// an `if`/`while` can assign it.  Dropping a ZeroInit owning value is a no-op
+    /// (it frees only null buffers), so the first `yield`'s free-on-reassign is
+    /// safe.  A leaf with no sub-expressions and no moves.
+    ZeroInit,
     Local(LocalId),
     /// reference to a top-level enum variant value
     EnumVariant(EnumId, usize),

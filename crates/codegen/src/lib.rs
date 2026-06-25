@@ -9670,6 +9670,16 @@ impl<'a> Cx<'a> {
                 };
                 format!("((Slice_{0}){{ .ptr = (({1})), .len = {2} }})", elem, bs, len)
             }
+            // Typed all-zero value: NULL for any pointer-shaped type, an all-zero
+            // compound literal (null buffers) for an owning composite or scalar.
+            HExprKind::ZeroInit => {
+                let ct = self.c_type(&e.ty);
+                match &e.ty {
+                    HType::Ptr { .. } | HType::RawPtr { .. } | HType::OwnPtr { .. } | HType::Heap { .. } =>
+                        format!("(({})0)", ct),
+                    _ => format!("(({}){{0}})", ct),
+                }
+            }
         }
     }
 
@@ -10512,7 +10522,7 @@ fn expr_mutates_local(e: &HExpr, iv: u32) -> bool {
         // No sub-expressions: cannot mutate anything.
         HExprKind::LitInt(_) | HExprKind::LitFloat(_) | HExprKind::LitBool(_)
         | HExprKind::LitChar(_) | HExprKind::LitStr(_) | HExprKind::LitNull
-        | HExprKind::LitUnit | HExprKind::Local(_) | HExprKind::EnumVariant(_, _)
+        | HExprKind::LitUnit | HExprKind::ZeroInit | HExprKind::Local(_) | HExprKind::EnumVariant(_, _)
         | HExprKind::FnRef(_) | HExprKind::GlobalRef(_) => false,
     }
 }

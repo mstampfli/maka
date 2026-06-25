@@ -1,0 +1,32 @@
+// A value-producing match/if-expression arm routes `yield` through a synthetic
+// result local (initialized to ZeroInit), so a `yield` nested in an `if`/`while`
+// inside the arm is honored instead of being silently discarded in favor of a
+// trailing one.  Previously only SCALAR results took the synthetic-local path;
+// composite results (owning String, by-value structs) took a trailing-yield-only
+// path that dropped any nested yield.  Verified ASan/LSan clean.
+import std.{String, StringOps, string_from};
+
+// Owning-VALUE result (String): the nested conditional yield must win.
+int s_pick(int c) {
+  String s = if (c > 5) { if (c > 10) { yield string_from("huge"); } yield string_from("big"); }
+             else { yield string_from("small"); };
+  return s.length();
+}
+
+data Pt { int x; int y; }
+
+// Non-owning by-value struct result: the nested conditional yield must win.
+int p_pick(int c) {
+  Pt p = if (c > 0) { if (c > 100) { yield Pt { x = 9, y = 9 }; } yield Pt { x = 1, y = 2 }; }
+         else { yield Pt { x = 0, y = 0 }; };
+  return p.x + p.y;
+}
+
+unit main() {
+  log(s_pick(20));  // "huge" -> 4
+  log(s_pick(7));   // "big"  -> 3
+  log(s_pick(1));   // "small" -> 5
+  log(p_pick(200)); // 9+9 -> 18
+  log(p_pick(50));  // 1+2 -> 3
+  log(p_pick(0));   // 0+0 -> 0
+}

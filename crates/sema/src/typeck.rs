@@ -4828,19 +4828,18 @@ impl<'a> TypeChecker<'a> {
                     (block, Some(h))
                 }
                 ast::ArmBody::Block(b) => {
-                    // When the arm's result type is known (from a prior arm or
-                    // the surrounding context) and is a plain non-owning value,
-                    // route `yield` through a synthetic result local.  This
-                    // captures yields nested inside `if`/`while`/block statements,
-                    // not just a trailing `yield` (which `extract_yield_value`
-                    // alone handles).  Owning results keep the old path: a
-                    // synthetic local would be freed at arm scope *and* flow out
-                    // as the value (double free), since a bare-local arm value is
-                    // not tracked as a move.
+                    // When the arm's result type is known (from a prior arm or the
+                    // surrounding context), route `yield` through a synthetic result
+                    // local initialized to ZeroInit.  This captures yields nested
+                    // inside `if`/`while`/block statements, not just a trailing
+                    // `yield`.  Owning results use this path too: the synthetic local
+                    // flows out as the arm value, which the lifetime pass now tracks
+                    // as a move (visit_matches_in_expr excludes it from the arm
+                    // body's drop set), so there is no double free; and the
+                    // free-on-reassign of its ZeroInit start value is a no-op.
                     let arm_ty = result_ty.clone().or_else(|| expected.cloned());
                     let target = if as_stmt { None } else {
                         arm_ty.as_ref()
-                            .filter(|t| !crate::lifetime::ty_owns_heap(self.sym, t))
                             .and_then(|t| self.zero_expr(t, arm.span).map(|z| (t.clone(), z)))
                     };
                     if let Some((t, init)) = target {
@@ -5037,7 +5036,16 @@ impl<'a> TypeChecker<'a> {
             HType::Char => HExprKind::LitChar('\0'),
             HType::Str => HExprKind::LitStr(String::new()),
             HType::Ptr { .. } | HType::RawPtr { .. } => HExprKind::LitNull,
-            _ => return None,
+            HType::Unit => HExprKind::LitUnit,
+            // Owning pointers (own *T / own &T) are codegen'd as deref-assigned heap
+            // boxes, so a synthetic result local does not compose cleanly; keep them
+            // on the trailing-yield path (return None).  Every other composite -
+            // owning VALUES (String / Vec / data structs / enums / arrays) and plain
+            // by-value structs/slices - zeroes to a null-buffer ZeroInit (its drop is
+            // a no-op), letting a value-producing arm route `yield` through a
+            // synthetic local so a nested/conditional `yield` is not discarded.
+            HType::Heap { .. } | HType::OwnPtr { .. } => return None,
+            _ => HExprKind::ZeroInit,
         };
         Some(HExpr { kind, ty: t.clone(), span })
     }
