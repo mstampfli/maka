@@ -1,0 +1,39 @@
+// A `yield` inside a nested `if` / `while` TERMINATES the match arm: it sets the
+// arm's value and exits, rather than falling through to a later `yield` that
+// would overwrite it.  (Regression: nested yields used to be lowered to a bare
+// assignment with no jump, so the last `yield` reached always won.)
+import std.{Option};
+
+int classify(Option<int> o) {
+  return match (o) {
+    Option.Some { value } {
+      if (value > 100) { yield 3; }
+      if (value > 10)  { yield 2; }
+      yield 1;
+    },
+    Option.None { yield 0; },
+  };
+}
+
+int first_match(Option<int> o) {
+  return match (o) {
+    Option.Some { value } {
+      mut int i = 0;
+      while (i < 10) {
+        if (i == value) { yield i * 11; }   // yield must break out of the while
+        i = i + 1;
+      }
+      yield -1;
+    },
+    Option.None { yield -2; },
+  };
+}
+
+unit main() {
+  log(classify(Option.Some { value = 200 }));   // 3
+  log(classify(Option.Some { value = 50 }));    // 2
+  log(classify(Option.Some { value = 5 }));     // 1
+  log(classify(Option.None));                   // 0
+  log(first_match(Option.Some { value = 4 }));  // 44
+  log(first_match(Option.Some { value = 99 })); // -1
+}

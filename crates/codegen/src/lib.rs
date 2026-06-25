@@ -86,6 +86,14 @@ struct Cx<'a> {
     /// with different type args (e.g. try_ok's Result<T,E>.Err into the caller's
     /// Result<U,E>).
     cur_c_func_ret: HType,
+    /// Stack of (synthetic `__yield` local, C end-label) for the value-producing
+    /// match arms currently being emitted.  A `yield` lowers to an assignment of
+    /// that local; assigning it must ALSO jump to the arm's end label so a `yield`
+    /// nested in an `if`/`while` terminates the arm instead of falling through to a
+    /// later `yield` that overwrites it.  Innermost arm is last.
+    yield_exit: Vec<(LocalId, String)>,
+    /// Monotonic counter for unique `yield`-arm end labels.
+    yield_label_seq: u32,
     /// Freestanding mode — emit a minimal libc-free prologue and route the
     /// allocator / panic / log / atomic-runtime hooks to user-provided
     /// extern symbols (`__maka_alloc`, `__maka_free`, `__maka_panic`,
@@ -111,6 +119,8 @@ impl<'a> Cx<'a> {
             inline_call_seq: 0,
             inline_ret_stack: Vec::new(),
             cur_c_func_ret: HType::Unit,
+            yield_exit: Vec::new(),
+            yield_label_seq: 0,
             noted_aggregates: Default::default(),
             freestanding: false,
         }
@@ -7284,7 +7294,17 @@ impl<'a> Cx<'a> {
     fn emit_stmt(&mut self, f: &HFunc, s: &HStmt) {
         match s {
             HStmt::Let { local, init, .. } => self.emit_let(f, *local, init),
-            HStmt::Assign { op, place, value, .. } => self.emit_assign(f, *op, place, value),
+            HStmt::Assign { op, place, value, .. } => {
+                self.emit_assign(f, *op, place, value);
+                // A `yield` lowers to an assignment of an arm's synthetic `__yield`
+                // local; terminate the arm so a yield nested in an `if`/`while`
+                // wins instead of falling through to a later `yield`.
+                if let HExprKind::Local(id) = place.kind {
+                    let lbl = self.yield_exit.iter().rev()
+                        .find(|(yv, _)| *yv == id).map(|(_, l)| l.clone());
+                    if let Some(lbl) = lbl { self.wl(&format!("goto {};", lbl)); }
+                }
+            }
             HStmt::ExprStmt(e) => {
                 let s = self.emit_expr(f, e);
                 self.wl(&format!("(void)({});", s));
@@ -9504,12 +9524,29 @@ impl<'a> Cx<'a> {
                 let li = &f.locals[local.0 as usize];
                 body.push_str(&format!("{} {} = __s; ", self.c_type(&li.ty), local_name(local, &li.name)));
             }
+            // Value-producing arm via a synthetic `__yield` local: register an end
+            // label so a `yield` nested in the body terminates the arm.
+            let yexit_lbl = match &a.value {
+                Some(HExpr { kind: HExprKind::Local(yv), .. })
+                    if f.locals[yv.0 as usize].name == "__yield" =>
+                {
+                    self.yield_label_seq += 1;
+                    let lbl = format!("__yend_{}", self.yield_label_seq);
+                    self.yield_exit.push((*yv, lbl.clone()));
+                    Some(lbl)
+                }
+                _ => None,
+            };
             for stmt in &a.body.stmts {
                 let prev_len = self.out.len();
                 self.emit_stmt(f, stmt);
                 let emitted = self.out[prev_len..].to_string();
                 self.out.truncate(prev_len);
                 body.push_str(&emitted);
+            }
+            if let Some(lbl) = &yexit_lbl {
+                body.push_str(&format!("{}: ; ", lbl));
+                self.yield_exit.pop();
             }
             if let Some(v) = &a.value {
                 // Null any owning payload field this arm moves out, so the
