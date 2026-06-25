@@ -317,6 +317,10 @@ impl<'a> Cx<'a> {
         // divisor is C undefined behaviour (a hardware trap), so panic cleanly
         // instead.  Type-preserving so the division keeps its operand width.
         self.w("#define maka_check_div(d) (__extension__ ({ __typeof__(d) __mdz = (d); if (__mdz == 0) maka_panic(\"divide by zero\"); __mdz; }))\n");
+        // Signed division/modulo: panic on /0 AND on the MIN/-1 overflow (C UB),
+        // the same way zero and shift overflow panic.  `mn` is the type minimum.
+        self.w("#define maka_divs(a, b, mn) (__extension__ ({ __typeof__(a) __dva = (a); __typeof__(b) __dvb = (b); if (__dvb == 0) maka_panic(\"divide by zero\"); if (__dva == (mn) && __dvb == -1) maka_panic(\"division overflow\"); __dva / __dvb; }))\n");
+        self.w("#define maka_mods(a, b, mn) (__extension__ ({ __typeof__(a) __dma = (a); __typeof__(b) __dmb = (b); if (__dmb == 0) maka_panic(\"divide by zero\"); if (__dma == (mn) && __dmb == -1) maka_panic(\"division overflow\"); __dma % __dmb; }))\n");
         self.w("#define maka_check_shift(n, w) (__extension__ ({ __typeof__(n) __msh = (n); if ((uint64_t)(__msh) >= (uint64_t)(w)) maka_panic(\"shift amount out of range\"); __msh; }))\n");
         // Atomic intrinsics — `__atomic_*` are compiler builtins (gcc/clang
         // emit them inline, no libc).  The runtime helpers that wrap them
@@ -442,6 +446,10 @@ impl<'a> Cx<'a> {
         // so codegen emits a raw `(*p)` and never needs a runtime null check.
         self.w("static inline maka_int maka_check_idx(maka_int i, maka_int len, const char* msg){ if(i<0||i>=len) maka_panic(msg); return i; }\n");
         self.w("#define maka_check_div(d) (__extension__ ({ __typeof__(d) __mdz = (d); if (__mdz == 0) maka_panic(\"divide by zero\"); __mdz; }))\n");
+        // Signed division/modulo: panic on /0 AND on the MIN/-1 overflow (C UB),
+        // the same way zero and shift overflow panic.  `mn` is the type minimum.
+        self.w("#define maka_divs(a, b, mn) (__extension__ ({ __typeof__(a) __dva = (a); __typeof__(b) __dvb = (b); if (__dvb == 0) maka_panic(\"divide by zero\"); if (__dva == (mn) && __dvb == -1) maka_panic(\"division overflow\"); __dva / __dvb; }))\n");
+        self.w("#define maka_mods(a, b, mn) (__extension__ ({ __typeof__(a) __dma = (a); __typeof__(b) __dmb = (b); if (__dmb == 0) maka_panic(\"divide by zero\"); if (__dma == (mn) && __dmb == -1) maka_panic(\"division overflow\"); __dma % __dmb; }))\n");
         self.w("#define maka_check_shift(n, w) (__extension__ ({ __typeof__(n) __msh = (n); if ((uint64_t)(__msh) >= (uint64_t)(w)) maka_panic(\"shift amount out of range\"); __msh; }))\n");
         // log helpers
         self.w("static void maka_log_int(maka_int v) { printf(\"%lld\\n\", (long long)v); }\n");
@@ -7941,7 +7949,7 @@ impl<'a> Cx<'a> {
                 let l = self.emit_inline_expr(inline_f, lhs, tag);
                 let r = self.emit_inline_expr(inline_f, rhs, tag);
                 if needs_div_guard(*op, &lhs.ty, rhs) {
-                    return format!("(({}) {} maka_check_div({}))", l, binop_c(*op), r);
+                    return self.emit_div(&l, *op, &r, &lhs.ty);
                 }
                 if matches!(op, HBinOp::Shl | HBinOp::Shr) {
                     return self.emit_shift(&l, *op, &r, &lhs.ty);
@@ -8251,6 +8259,19 @@ impl<'a> Cx<'a> {
         } else {
             format!("(({0})(({1}) {2} {3}))", st, l, binop_c(op), checked)
         }
+    }
+
+    /// Emit an integer `/` or `%` with full well-definedness.  Both have two
+    /// undefined cases in C: a zero divisor and the signed `MIN / -1` overflow.
+    /// A signed op routes through maka_divs/maka_mods (panic on either, like
+    /// shift overflow); an unsigned op (which cannot overflow) keeps the cheaper
+    /// divide-by-zero-only guard.
+    fn emit_div(&self, l: &str, op: HBinOp, r: &str, lhs_ty: &HType) -> String {
+        if is_signed_int(lhs_ty) {
+            let mac = if matches!(op, HBinOp::Mod) { "maka_mods" } else { "maka_divs" };
+            return format!("{}({}, {}, {})", mac, l, r, signed_min_lit(lhs_ty));
+        }
+        format!("(({}) {} maka_check_div({}))", l, binop_c(op), r)
     }
 
     fn emit_move_consuming(&mut self, f: &HFunc, e: &HExpr) -> String {
@@ -8738,7 +8759,7 @@ impl<'a> Cx<'a> {
                     }
                 }
                 if needs_div_guard(*op, &lhs.ty, rhs) {
-                    return format!("(({}) {} maka_check_div({}))", l, opc, r);
+                    return self.emit_div(&l, *op, &r, &lhs.ty);
                 }
                 if matches!(op, HBinOp::Shl | HBinOp::Shr) {
                     return self.emit_shift(&l, *op, &r, &lhs.ty);
@@ -10380,6 +10401,18 @@ fn is_signed_int(ty: &HType) -> bool {
     matches!(ty, HType::Int) || matches!(ty, HType::SizedInt { signed: true, .. })
 }
 
+/// The minimum value of a signed integer type as a C literal, used by maka_divs
+/// / maka_mods to detect the `MIN / -1` overflow.  Written without the bare
+/// `INT*_MIN` token (which C would parse as `-(literal)`, itself overflowing).
+fn signed_min_lit(ty: &HType) -> String {
+    match shift_width(ty) {
+        8 => "(-128)".to_string(),
+        16 => "(-32768)".to_string(),
+        32 => "(-2147483647 - 1)".to_string(),
+        _ => "(-9223372036854775807LL - 1)".to_string(),
+    }
+}
+
 /// Same-width unsigned C type, used to perform a signed left shift in the
 /// unsigned domain before reinterpreting the bits back.
 fn unsigned_ctype(ty: &HType) -> String {
@@ -10394,9 +10427,14 @@ fn unsigned_ctype(ty: &HType) -> String {
 
 /// literal non-zero divisor is provably safe so the check is elided.
 fn needs_div_guard(op: HBinOp, lhs_ty: &HType, rhs: &HExpr) -> bool {
-    matches!(op, HBinOp::Div | HBinOp::Mod)
-        && matches!(lhs_ty, HType::Int | HType::SizedInt { .. } | HType::Char)
-        && !matches!(&rhs.kind, HExprKind::LitInt(n) if *n != 0)
+    if !matches!(op, HBinOp::Div | HBinOp::Mod) { return false; }
+    if !matches!(lhs_ty, HType::Int | HType::SizedInt { .. } | HType::Char) { return false; }
+    // A divisor that is a known nonzero literal cannot be /0; but a literal `-1`
+    // can still overflow a signed `MIN`, so it still needs the guard.
+    match &rhs.kind {
+        HExprKind::LitInt(n) => *n == 0 || (*n == -1 && is_signed_int(lhs_ty)),
+        _ => true,
+    }
 }
 
 /// Emit an i64 literal as valid C.  Every value spells fine as `<n>LL` except

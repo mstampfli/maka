@@ -1,0 +1,15 @@
+// Regression: signed / and % route through maka_divs/maka_mods, which panic on a
+// zero divisor AND on the MIN/-1 overflow (both C UB), like shift overflow. This
+// verifies ordinary results - including negative operands and the just-below-
+// overflow case - are unaffected by the added guard. (The panic paths are
+// verified out of band with UBSan.)
+unit main() {
+  log(17 / 5);          // 3
+  log(0 - 17 / 5);      // -3
+  log(17 % 5);          // 2
+  log(0 - 17 % 5);      // -2
+  int big = -9223372036854775807 - 1;   // INT64_MIN
+  log(big / 2);         // -4611686018427387904
+  int near = big + 1;   // INT64_MIN + 1
+  log(near / -1);       // 9223372036854775807 (= INT64_MAX, no overflow)
+}
