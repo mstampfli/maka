@@ -2072,6 +2072,16 @@ fn collect_closure_cands(b: &HBlock, locals: &[LocalInfo], out: &mut std::collec
 
 /// Mark a candidate closure local as escaped if it appears anywhere other than as
 /// the callee of an indirect call (i.e. anything but `f(...)`).
+///
+/// Exception (borrow, not escape): capturing a candidate `c` into the env of
+/// ANOTHER candidate closure `d` (`let d = ...[c]...;`) does not escape `c` on
+/// its own - `d`'s env merely holds a pointer to `c`'s env, and `d` is freeable
+/// only if it itself does not escape.  Since `c` is in scope wherever `d` is
+/// declared, `c`'s env always outlives `d`'s, so freeing `c` at its own scope is
+/// sound.  We record `c -> d` as a deferred edge and let `c` escape only if `d`
+/// transitively escapes (fixpoint below).  This is what lets a non-escaping
+/// nested closure (`outer` capturing `inner`) free both envs at scope exit
+/// instead of leaking `inner`'s.
 fn mark_closure_escapes_block(b: &HBlock, cands: &std::collections::HashSet<LocalId>, escaped: &mut std::collections::HashSet<LocalId>) {
     fn ex(e: &HExpr, cands: &std::collections::HashSet<LocalId>, escaped: &mut std::collections::HashSet<LocalId>) {
         match &e.kind {
@@ -2105,30 +2115,64 @@ fn mark_closure_escapes_block(b: &HBlock, cands: &std::collections::HashSet<Loca
         }
     }
     // Exhaustive statement walk: every expression position must be scanned, or a
-    // missed use would leave an escaped closure wrongly freeable.
-    fn scan_stmt(s: &HStmt, cands: &std::collections::HashSet<LocalId>, escaped: &mut std::collections::HashSet<LocalId>) {
+    // missed use would leave an escaped closure wrongly freeable.  `edges`
+    // collects deferred `c -> d` capture borrows (see the function doc).
+    fn scan_stmt(
+        s: &HStmt,
+        cands: &std::collections::HashSet<LocalId>,
+        escaped: &mut std::collections::HashSet<LocalId>,
+        edges: &mut Vec<(LocalId, LocalId)>,
+    ) {
         match s {
-            HStmt::Let { init, .. } => ex(init, cands, escaped),
+            HStmt::Let { local, init, .. } => {
+                // `let d = ...[c]...;` where both d and c are candidate closures:
+                // record c -> d as a deferred borrow instead of escaping c.  Any
+                // non-candidate capture or nested expr in the env still escapes
+                // normally via ex().
+                if cands.contains(local) {
+                    if let HExprKind::Closure { env_values, .. } = &init.kind {
+                        for v in env_values {
+                            if let HExprKind::Local(c) = &v.kind {
+                                if cands.contains(c) { edges.push((*c, *local)); continue; }
+                            }
+                            ex(v, cands, escaped);
+                        }
+                        return;
+                    }
+                }
+                ex(init, cands, escaped);
+            }
             HStmt::Assign { place, value, .. } => { ex(place, cands, escaped); ex(value, cands, escaped); }
             HStmt::ExprStmt(e) => ex(e, cands, escaped),
             HStmt::Return { value, .. } => { if let Some(v) = value { ex(v, cands, escaped); } }
             HStmt::Propagate { value, .. } => { if let Some(v) = value { ex(v, cands, escaped); } }
             HStmt::If { cond, then_b, else_b, .. } => {
                 ex(cond, cands, escaped);
-                for st in &then_b.stmts { scan_stmt(st, cands, escaped); }
-                if let Some(b) = else_b { for st in &b.stmts { scan_stmt(st, cands, escaped); } }
+                for st in &then_b.stmts { scan_stmt(st, cands, escaped, edges); }
+                if let Some(b) = else_b { for st in &b.stmts { scan_stmt(st, cands, escaped, edges); } }
             }
-            HStmt::While { cond, body, .. } => { ex(cond, cands, escaped); for st in &body.stmts { scan_stmt(st, cands, escaped); } }
-            HStmt::Block(b) | HStmt::Unsafe(b, _) => { for st in &b.stmts { scan_stmt(st, cands, escaped); } }
+            HStmt::While { cond, body, .. } => { ex(cond, cands, escaped); for st in &body.stmts { scan_stmt(st, cands, escaped, edges); } }
+            HStmt::Block(b) | HStmt::Unsafe(b, _) => { for st in &b.stmts { scan_stmt(st, cands, escaped, edges); } }
             HStmt::ForC { init, cond, step, body, .. } => {
-                scan_stmt(init, cands, escaped); ex(cond, cands, escaped); scan_stmt(step, cands, escaped);
-                for st in &body.stmts { scan_stmt(st, cands, escaped); }
+                scan_stmt(init, cands, escaped, edges); ex(cond, cands, escaped); scan_stmt(step, cands, escaped, edges);
+                for st in &body.stmts { scan_stmt(st, cands, escaped, edges); }
             }
-            HStmt::ForEach { src, body, .. } => { ex(src, cands, escaped); for st in &body.stmts { scan_stmt(st, cands, escaped); } }
+            HStmt::ForEach { src, body, .. } => { ex(src, cands, escaped); for st in &body.stmts { scan_stmt(st, cands, escaped, edges); } }
             HStmt::Break { .. } | HStmt::Continue { .. } => {}
         }
     }
-    for s in &b.stmts { scan_stmt(s, cands, escaped); }
+    let mut edges: Vec<(LocalId, LocalId)> = Vec::new();
+    for s in &b.stmts { scan_stmt(s, cands, escaped, &mut edges); }
+    // Fixpoint: a deferred capture `c -> d` escapes `c` only if `d` escapes.
+    // Iterate until stable so chains (outer captures middle captures inner)
+    // propagate fully.
+    loop {
+        let mut changed = false;
+        for (c, d) in &edges {
+            if escaped.contains(d) && !escaped.contains(c) { escaped.insert(*c); changed = true; }
+        }
+        if !changed { break; }
+    }
 }
 
 /// Add freeable closure locals to the heap_to_free of the block that declares them.

@@ -1,0 +1,24 @@
+// Regression (#5): a non-escaping closure captured into ANOTHER non-escaping,
+// co-scoped closure must have its malloc'd capture env freed at scope exit, not
+// leaked.  `outer` captures `inner` (a closure that itself owns a heap capture).
+// The escape analysis used to mark `inner` as escaped simply because it appears
+// in `outer`'s env, dropping it from the freeable set, so `inner`'s env (and the
+// owner it holds) leaked.  Capturing into a freeable sibling is a borrow, not an
+// escape: `inner`'s env outlives `outer`'s, so both are freed at scope exit.
+// Verified leak-clean under ASan via the match_lsan sweep (this file has
+// `enum`/`match`).
+data Box { int v; }
+enum Run { Go }
+
+int pick(Run r) {
+  return match (r) {
+    Go 21,
+  };
+}
+
+unit main() {
+  own *Box b = alloc Box { v = pick(Run.Go) };
+  unit() inner = unit() [b] { log(b!.v); };
+  unit() outer = unit() [inner] { inner(); };
+  outer();   // frees outer's env, inner's env, and b - no leak, no double-free
+}
