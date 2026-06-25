@@ -1,0 +1,5 @@
+// Two enum variants sharing a discriminant collide in the generated switch
+// (a C "duplicate case value") and make match dispatch ambiguous, so it must be
+// a compile error, reported clearly instead of leaking out as a C error.
+enum E { A = 5, B = 5 }
+unit main() { log(E.A as int); }

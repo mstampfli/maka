@@ -646,8 +646,19 @@ impl SymTab {
                     // Pass 1: record variant names/tags; fields resolved in Pass 2 once all structs are known.
                     let mut variants = Vec::new();
                     let mut next = 0i64;
+                    // Two variants sharing a discriminant collide in the generated
+                    // `switch` (a `duplicate case value` C error) and make match
+                    // dispatch ambiguous, so reject it here with a clear message.
+                    let mut seen_tags: Vec<(i64, String)> = Vec::new();
                     for v in &e.variants {
                         let tag = v.explicit_value.unwrap_or(next);
+                        if let Some((_, prev)) = seen_tags.iter().find(|(t, _)| *t == tag) {
+                            errors.push(SemaError {
+                                msg: format!("duplicate discriminant {} for variant `{}` of enum `{}`: already used by variant `{}`; each variant needs a distinct tag", tag, v.name, e.name, prev),
+                                span: v.span,
+                            });
+                        }
+                        seen_tags.push((tag, v.name.clone()));
                         variants.push(VariantInfo {
                             name: v.name.clone(),
                             tag,
