@@ -1,0 +1,6 @@
+// An undefined type in an attr method declaration must be a compile error, the
+// same as undefined types in any other signature position.  It used to be
+// silently accepted (the attr method signature types were never resolved), which
+// also made a stray `Self` quietly degrade to `int`.
+attr Foo { Bogus bar(&_ self); }
+unit main() { log(0); }

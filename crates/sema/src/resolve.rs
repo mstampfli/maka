@@ -410,15 +410,18 @@ pub fn resolve_type_in(
             // `data` type (a growable string), defined in std.maka like any
             // other user type.
             other => {
+                // Tyvars first: an attr declaration validates its method types
+                // with `_` (the implementing-type placeholder) listed as a tyvar,
+                // so `_` is accepted there while still being rejected elsewhere.
+                if type_params.iter().any(|tp| tp == other) {
+                    return HType::TyVar(other.to_string());
+                }
                 if other == "_" {
                     errors.push(SemaError {
                         msg: "`_` placeholder type is only valid inside `attr` / `has` blocks — it refers to the implementing type".into(),
                         span: *sp,
                     });
                     return HType::Int;
-                }
-                if type_params.iter().any(|tp| tp == other) {
-                    return HType::TyVar(other.to_string());
                 }
                 if let Some((id, _)) = sym.struct_by_name(other) {
                     HType::Struct(id)
@@ -1080,6 +1083,23 @@ impl SymTab {
                         decl: f.clone(),
                         has_default: !f.body.stmts.is_empty(),
                     }).collect();
+                    // Validate the declared method signature types now (the method
+                    // bodies are kept raw and resolved per `has` impl, but the
+                    // signature types were never checked, so an undefined type in an
+                    // attr declaration was silently accepted instead of reported).
+                    // `_` (the implementing-type placeholder) and the attr's own
+                    // type params are in scope here.
+                    {
+                        // In scope: `_`, the attr's type params, and its associated
+                        // type names (which methods may use as return/param types).
+                        let mut decl_tps: Vec<String> = vec!["_".to_string()];
+                        decl_tps.extend(a.type_params.iter().cloned());
+                        decl_tps.extend(a.assoc_types.iter().map(|d| d.name.clone()));
+                        for f in &a.funcs {
+                            for p in &f.params { let _ = resolve_type_in(&sym, &p.ty, &decl_tps, &mut errors); }
+                            let _ = resolve_type_in(&sym, &f.ret, &decl_tps, &mut errors);
+                        }
+                    }
                     // Reject duplicate method names within the attr decl.
                     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                     for m in &methods {
