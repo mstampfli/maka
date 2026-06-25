@@ -1,0 +1,48 @@
+// Regression (#1): path-sensitive drop elaboration for conditional moves.  An
+// owning value (String) moved on only SOME paths of an `if` must be freed
+// exactly once on every path - compensated on the path that did NOT move it,
+// and NOT double-freed via a synthesized drop on a branch that DIVERGES
+// (return/break/continue).  A diverging branch frees its own locals at its
+// exit, so the join after the `if` must exclude it.  This is the shape that the
+// stdlib `hm_put` hit (`if (eq) { slot = val; return; }` with no else): the old
+// naive elaboration synthesized an else that dropped `val`, double-freeing it
+// when it was later moved into the table.  Verified leak/double-free clean under
+// ASan via the match_lsan sweep (this file has `enum`/`match`).
+import std.{String, StringOps, string_from};
+
+enum Mode { On, Off }
+
+bool is_on(Mode m) {
+  return match (m) {
+    On true,
+    Off false,
+  };
+}
+
+unit eat(String s) { }   // consumes s; drops it at its own scope exit
+
+// move-then-return: the divergence pattern.  `then` consumes x and returns;
+// the fall-through path must drop x at scope exit, NOT a synth drop in `then`.
+unit f_return(Mode m) {
+  String x = string_from("aa");
+  if (is_on(m)) { eat(x); return; }
+}
+
+// move-in-then-only: no else, so the else path must compensate-drop x.
+unit f_then(Mode m) {
+  String x = string_from("bb");
+  if (is_on(m)) { eat(x); }
+}
+
+// move-in-both: x consumed on every path, no scope-exit drop, no leak.
+unit f_both(Mode m) {
+  String x = string_from("cc");
+  if (is_on(m)) { eat(x); } else { eat(x); }
+}
+
+unit main() {
+  f_return(Mode.On); f_return(Mode.Off);
+  f_then(Mode.On); f_then(Mode.Off);
+  f_both(Mode.On); f_both(Mode.Off);
+  log(42);
+}

@@ -1814,7 +1814,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
         }
     }
 
-    fn visit_block(sym: &SymTab, locals: &[LocalInfo], b: &mut HBlock, scope_chain: &mut Vec<Vec<LocalId>>, loop_start: Option<usize>, inherited: &std::collections::HashSet<LocalId>) {
+    fn visit_block(sym: &SymTab, locals: &[LocalInfo], b: &mut HBlock, scope_chain: &mut Vec<Vec<LocalId>>, loop_start: Option<usize>, inherited: &std::collections::HashSet<LocalId>) -> (std::collections::HashSet<LocalId>, bool) {
         scope_chain.push(Vec::new());
         // Track moves up to each position in the block.  Start from the moves
         // already in effect at block entry (made by enclosing statements), so a
@@ -1822,6 +1822,13 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
         // already moved out (e.g. an owning temporary push'd into a Vec before a
         // loop, then an early return inside that loop - that would double-free).
         let mut moved: std::collections::HashSet<LocalId> = inherited.clone();
+        // Whether control can fall through the END of this block.  A block
+        // DIVERGES (cannot fall through) once it hits a return/break/continue or
+        // an `if` whose every arm diverges.  A diverging branch never reaches the
+        // join after an enclosing `if`, so its escaped moves must not propagate
+        // there nor force a compensating drop in a sibling branch - that branch
+        // already freed its own locals at its divergent exit.
+        let mut diverges = false;
         for s in &mut b.stmts {
             match s {
                 HStmt::Let { local, init, .. } => {
@@ -1875,14 +1882,72 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                         }
                     }
                     *heap_drops = drops;
+                    diverges = true;
                 }
                 HStmt::If { then_b, else_b, .. } => {
-                    visit_block(sym, locals, then_b, scope_chain, loop_start, &moved);
-                    if let Some(b) = else_b { visit_block(sym, locals, b, scope_chain, loop_start, &moved); }
+                    let (then_esc, then_div) = visit_block(sym, locals, then_b, scope_chain, loop_start, &moved);
+                    let (else_esc, else_div) = match else_b {
+                        Some(eb) => visit_block(sym, locals, eb, scope_chain, loop_start, &moved),
+                        None => (std::collections::HashSet::new(), false),
+                    };
+                    // Drop elaboration over the paths that actually FALL THROUGH
+                    // to the join after the `if`.  A diverging branch is excluded:
+                    // it already freed its own locals at its return/break/continue,
+                    // so its moves neither propagate past the if nor force a
+                    // compensating drop in the sibling.
+                    match (then_div, else_div) {
+                        // Both diverge: nothing reaches the join.
+                        (true, true) => {}
+                        // Only one branch reaches the join; its moves are simply
+                        // the post-if moves, no compensation needed.
+                        (true, false) => { for id in else_esc { moved.insert(id); } }
+                        (false, true) => { for id in then_esc { moved.insert(id); } }
+                        // Both fall through.  A local consumed on EVERY path
+                        // becomes moved for the parent (no scope-exit drop); a
+                        // local consumed on only SOME paths gets a compensating
+                        // drop on the paths that did NOT consume it (synthesizing
+                        // an else if there is none), so every path frees it exactly
+                        // once and the parent's later drop never double-frees it.
+                        (false, false) => {
+                            let mut union: Vec<LocalId> = then_esc.iter().chain(else_esc.iter()).copied().collect();
+                            union.sort_by_key(|id| id.0);
+                            union.dedup();
+                            for id in union {
+                                let in_then = then_esc.contains(&id);
+                                let in_else = else_esc.contains(&id);
+                                if !(in_then && in_else) {
+                                    if !in_then { then_b.heap_to_free.push(id); }
+                                    if !in_else {
+                                        let eb = else_b.get_or_insert_with(|| HBlock {
+                                            stmts: Vec::new(),
+                                            heap_to_free: Vec::new(),
+                                            ptr_nulls: Vec::new(),
+                                            span: then_b.span,
+                                        });
+                                        eb.heap_to_free.push(id);
+                                    }
+                                }
+                                moved.insert(id);
+                            }
+                        }
+                    }
+                    // The `if` diverges only if EVERY arm does (an absent else
+                    // falls through, so else_div is false there).
+                    if then_div && else_div { diverges = true; }
                 }
-                HStmt::While { body, .. } => visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved),
-                HStmt::Block(b) => visit_block(sym, locals, b, scope_chain, loop_start, &moved),
-                HStmt::Unsafe(b, _) => visit_block(sym, locals, b, scope_chain, loop_start, &moved),
+                HStmt::While { body, .. } => { let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved); }
+                // An unconditional nested block always runs, so its escaped moves
+                // are moves for the parent too, and its divergence is the parent's.
+                HStmt::Block(b) => {
+                    let (esc, div) = visit_block(sym, locals, b, scope_chain, loop_start, &moved);
+                    for id in esc { moved.insert(id); }
+                    if div { diverges = true; }
+                }
+                HStmt::Unsafe(b, _) => {
+                    let (esc, div) = visit_block(sym, locals, b, scope_chain, loop_start, &moved);
+                    for id in esc { moved.insert(id); }
+                    if div { diverges = true; }
+                }
                 HStmt::Break { heap_drops, .. } | HStmt::Continue { heap_drops, .. } => {
                     // Free owning locals declared inside the enclosing loop before
                     // the jump leaves the loop-body scope chain (same idea as the
@@ -1897,9 +1962,10 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                         }
                         *heap_drops = drops;
                     }
+                    diverges = true;
                 }
-                HStmt::ForC { body, .. } => visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved),
-                HStmt::ForEach { body, .. } => visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved),
+                HStmt::ForC { body, .. } => { let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved); }
+                HStmt::ForEach { body, .. } => { let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved); }
                 HStmt::Propagate { value: Some(v), .. } => {
                     moved_locals_in_expr(sym, v, &mut moved);
                 }
@@ -1908,17 +1974,27 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
         }
         // Fill heap_to_free: locals declared in this scope, in reverse order, skipping moved.
         let scope = scope_chain.pop().unwrap_or_default();
+        let scope_set: std::collections::HashSet<LocalId> = scope.iter().copied().collect();
         let mut to_free = Vec::new();
         for id in scope.iter().rev() {
             if moved.contains(id) { continue; }
             to_free.push(*id);
         }
         b.heap_to_free = to_free;
+        // Moves of locals NOT declared in this block escape to the enclosing
+        // scope so the caller can reconcile them: a value moved in only some
+        // branches of an `if` needs a compensating drop on the paths that did
+        // not move it, and a value moved in an unconditional nested block is
+        // simply moved for the parent too.  Paired with `diverges` so the caller
+        // knows whether this block reaches the join after it.
+        let escaped: std::collections::HashSet<LocalId> =
+            moved.difference(inherited).copied().filter(|id| !scope_set.contains(id)).collect();
+        (escaped, diverges)
     }
 
     let mut chain = Vec::new();
     let locals = f.locals.clone();
-    visit_block(sym, &locals, &mut f.body, &mut chain, None, &std::collections::HashSet::new());
+    let _ = visit_block(sym, &locals, &mut f.body, &mut chain, None, &std::collections::HashSet::new());
 
     // Append owning parameters to the body's heap_to_free so they auto-free at
     // function scope-exit — unless they were transferred out somewhere in the
