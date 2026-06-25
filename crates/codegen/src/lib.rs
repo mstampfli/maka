@@ -7717,6 +7717,9 @@ impl<'a> Cx<'a> {
                     if needs_value { body.push_str(&format!("__rm_{} = ({}); ", mt, vs)); }
                     else { body.push_str(&format!("(void)({}); ", vs)); }
                 }
+                // Drop owning locals declared in the inline arm body (tagged names).
+                let cu = self.arm_body_cleanup(inline_f, &a.body, Some(tag));
+                body.push_str(&cu);
                 body.push_str("} break; ");
             }
             body.push_str("} ");
@@ -9787,6 +9790,9 @@ impl<'a> Cx<'a> {
                 if needs_value { body.push_str(&format!("__r = ({}); ", vs)); }
                 else { body.push_str(&format!("(void)({}); ", vs)); }
             }
+            // Drop owning locals declared in the arm body (after the value).
+            let cu = self.arm_body_cleanup(f, &a.body, None);
+            body.push_str(&cu);
             body.push_str("} break; ");
         }
         body.push_str("} ");
@@ -9796,6 +9802,34 @@ impl<'a> Cx<'a> {
         if needs_value { body.push_str("__r; "); } else { body.push_str("MAKA_UNIT; "); }
         body.push_str("})");
         body
+    }
+
+    /// Scope-exit drops for a match-arm body, captured as a C string.  A match
+    /// (and its `if`/`if-expr` sugar) is emitted into a `body` String, so an arm
+    /// body's drops cannot be written straight to `self.out` like emit_block does -
+    /// they are captured the same way the arm-body statements are.  The arm body is
+    /// a real lexical scope (its heap_to_free is filled by the lifetime pass's
+    /// visit_matches_in_expr), and these drops MUST run AFTER the arm value is
+    /// evaluated (the value may read these locals) and only on the matched arm.
+    /// `tag` is `Some` for an inline expansion (tagged local names) and `None`
+    /// otherwise.
+    fn arm_body_cleanup(&mut self, f: &HFunc, b: &HBlock, tag: Option<&str>) -> String {
+        if b.heap_to_free.is_empty() { return String::new(); }
+        let prev = self.out.len();
+        for id in &b.heap_to_free {
+            let (n, ty) = {
+                let li = &f.locals[id.0 as usize];
+                let n = match tag {
+                    Some(t) => inline_local_name(f, *id, t),
+                    None => local_name(*id, &li.name),
+                };
+                (n, li.ty.clone())
+            };
+            self.emit_field_drop(&n, &ty, 0);
+        }
+        let s = self.out[prev..].to_string();
+        self.out.truncate(prev);
+        s
     }
 
     fn emit_match(&mut self, f: &HFunc, scrutinee: &HExpr, arms: &[HMatchArm], result_ty: &HType) -> String {
@@ -9887,6 +9921,10 @@ impl<'a> Cx<'a> {
                 if needs_value { body.push_str(&format!("__r = ({}); ", vs)); }
                 else { body.push_str(&format!("(void)({}); ", vs)); }
             }
+            // Drop owning locals declared in the arm body (after the value, which
+            // may read them; before the break, so only the matched arm runs them).
+            let cu = self.arm_body_cleanup(f, &a.body, None);
+            body.push_str(&cu);
             // Close any open guard `if`, with `break;` so a matched arm exits.
             // If we put guard into the arm body, we must NOT break unconditionally
             // outside it.  This must mirror exactly when a body-guard `if` was

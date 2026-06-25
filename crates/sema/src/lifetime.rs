@@ -1749,9 +1749,21 @@ fn hoist_in_expr(sym: &SymTab, e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: 
             // The scrutinee-as-a-whole owning temp is handled by the match's own
             // __s copy + field-nulling, so this only touches nested temps.
             hoist_in_expr(sym, scrutinee, locals, pre);
-            // Arm bodies are real statement blocks; their conditional values are
-            // left to their own scopes.
-            for arm in arms.iter_mut() { hoist_block_temps(sym, &mut arm.body, locals); }
+            for arm in arms.iter_mut() {
+                hoist_block_temps(sym, &mut arm.body, locals);
+                // The arm `value` (how `if`/`match`-as-value and `yield` lower)
+                // runs AFTER the body, so hoist its rvalue operand temporaries into
+                // the END of the arm body - not the outer `pre`, which would
+                // evaluate them unconditionally before the match.  Without this an
+                // `&`-taking overload with rvalue operands inside the yielded value
+                // (`yield string_from("a") + string_from("b")`) emits `&(rvalue)`,
+                // not a valid C lvalue.  The arm body is a drop scope (see
+                // visit_matches_in_expr in fill_heap_drops), so these owning temps
+                // are freed at arm exit rather than leaking.
+                if let Some(v) = &mut arm.value {
+                    hoist_in_expr(sym, v, locals, &mut arm.body.stmts);
+                }
+            }
         }
         // Inline splices and closures capture/move their operands; leave them.
         _ => {}
@@ -2131,6 +2143,73 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
         }
     }
 
+    // A `match` (and its `if`/`if-expr` sugar) lowers to an expression, so its arm
+    // bodies live INSIDE an expression rather than as child statement blocks - the
+    // statement walk in visit_block / for_each_child_block never reaches them, so
+    // owning locals declared in an arm body (including operand temporaries hoisted
+    // into it for an `&`-taking yield) would never be scheduled for drop and would
+    // leak.  This walks every expression position (mirroring moved_locals_in_expr
+    // so no nesting is missed) and, for each Match arm body, runs visit_block to
+    // fill its heap_to_free as a real nested scope.  A local moved OUT by the arm
+    // value (`yield s`) runs after the body and is excluded so it is not also
+    // dropped here (which would double-free its new owner).
+    fn visit_matches_in_expr(sym: &SymTab, locals: &[LocalInfo], e: &mut HExpr, scope_chain: &mut Vec<Vec<LocalId>>, loop_start: Option<usize>, inherited: &std::collections::HashSet<LocalId>) {
+        match &mut e.kind {
+            HExprKind::Match { scrutinee, arms, .. } => {
+                visit_matches_in_expr(sym, locals, scrutinee, scope_chain, loop_start, inherited);
+                for a in arms.iter_mut() {
+                    if let Some(g) = &mut a.guard {
+                        visit_matches_in_expr(sym, locals, g, scope_chain, loop_start, inherited);
+                    }
+                    let _ = visit_block(sym, locals, &mut a.body, scope_chain, loop_start, inherited);
+                    if let Some(v) = &mut a.value {
+                        let mut vmoved = std::collections::HashSet::new();
+                        moved_locals_in_expr(sym, v, &mut vmoved);
+                        if ty_owns_heap(sym, &v.ty) {
+                            if let HExprKind::Local(id) = v.kind { vmoved.insert(id); }
+                        }
+                        if !vmoved.is_empty() {
+                            a.body.heap_to_free.retain(|id| !vmoved.contains(id));
+                        }
+                        visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, inherited);
+                    }
+                }
+            }
+            HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } => {
+                for a in args { visit_matches_in_expr(sym, locals, a, scope_chain, loop_start, inherited); }
+            }
+            HExprKind::CallIndirect { callee, args } => {
+                visit_matches_in_expr(sym, locals, callee, scope_chain, loop_start, inherited);
+                for a in args { visit_matches_in_expr(sym, locals, a, scope_chain, loop_start, inherited); }
+            }
+            HExprKind::Bin { lhs, rhs, .. } => {
+                visit_matches_in_expr(sym, locals, lhs, scope_chain, loop_start, inherited);
+                visit_matches_in_expr(sym, locals, rhs, scope_chain, loop_start, inherited);
+            }
+            HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. }
+            | HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. }
+            | HExprKind::DropWrite(expr) => visit_matches_in_expr(sym, locals, expr, scope_chain, loop_start, inherited),
+            HExprKind::AddrOfRef { place, .. } => visit_matches_in_expr(sym, locals, place, scope_chain, loop_start, inherited),
+            HExprKind::Field { base, .. } | HExprKind::ArrayToSlice { base, .. } => visit_matches_in_expr(sym, locals, base, scope_chain, loop_start, inherited),
+            HExprKind::Index { base, idx } => {
+                visit_matches_in_expr(sym, locals, base, scope_chain, loop_start, inherited);
+                visit_matches_in_expr(sym, locals, idx, scope_chain, loop_start, inherited);
+            }
+            HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner) | HExprKind::Free(inner)
+            | HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => visit_matches_in_expr(sym, locals, inner, scope_chain, loop_start, inherited),
+            HExprKind::Closure { env_values, .. } => {
+                for v in env_values { visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, inherited); }
+            }
+            HExprKind::VariantCtor { fields, .. } | HExprKind::Struct { fields, .. } => {
+                for (_, fe) in fields { visit_matches_in_expr(sym, locals, fe, scope_chain, loop_start, inherited); }
+            }
+            HExprKind::ArrayLit(es) => {
+                for e2 in es { visit_matches_in_expr(sym, locals, e2, scope_chain, loop_start, inherited); }
+            }
+            _ => {}
+        }
+    }
+
     fn visit_block(sym: &SymTab, locals: &[LocalInfo], b: &mut HBlock, scope_chain: &mut Vec<Vec<LocalId>>, loop_start: Option<usize>, inherited: &std::collections::HashSet<LocalId>) -> (std::collections::HashSet<LocalId>, bool) {
         scope_chain.push(Vec::new());
         // Track moves up to each position in the block.  Start from the moves
@@ -2151,6 +2230,8 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                 HStmt::Let { local, init, .. } => {
                     // Check init for moves
                     moved_locals_in_expr(sym, init, &mut moved);
+                    // Fill drops for any match-expr arm bodies inside the init.
+                    visit_matches_in_expr(sym, locals, init, scope_chain, loop_start, &moved);
                     // A direct-Local init of an owning type transfers ownership.
                     if ty_owns_heap(sym, &init.ty) {
                         if let HExprKind::Local(id) = init.kind { moved.insert(id); }
@@ -2169,6 +2250,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                 }
                 HStmt::Assign { place, value, drop_old, .. } => {
                     moved_locals_in_expr(sym, value, &mut moved);
+                    visit_matches_in_expr(sym, locals, value, scope_chain, loop_start, &moved);
                     if ty_owns_heap(sym, &value.ty) {
                         if let HExprKind::Local(id) = value.kind { moved.insert(id); }
                     }
@@ -2187,6 +2269,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                 }
                 HStmt::ExprStmt(e) => {
                     moved_locals_in_expr(sym, e, &mut moved);
+                    visit_matches_in_expr(sym, locals, e, scope_chain, loop_start, &moved);
                 }
                 HStmt::Return { value, heap_drops, .. } => {
                     // The set of heap locals to drop at return = union of all scopes minus the return value.
@@ -2198,6 +2281,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                             }
                         }
                         moved_locals_in_expr(sym, v, &mut moved);
+                        visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, &moved);
                     }
                     let mut drops = Vec::new();
                     for scope in scope_chain.iter() {
@@ -2209,7 +2293,8 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     *heap_drops = drops;
                     diverges = true;
                 }
-                HStmt::If { then_b, else_b, .. } => {
+                HStmt::If { cond, then_b, else_b, .. } => {
+                    visit_matches_in_expr(sym, locals, cond, scope_chain, loop_start, &moved);
                     let (then_esc, then_div) = visit_block(sym, locals, then_b, scope_chain, loop_start, &moved);
                     let (else_esc, else_div) = match else_b {
                         Some(eb) => visit_block(sym, locals, eb, scope_chain, loop_start, &moved),
@@ -2260,7 +2345,10 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     // falls through, so else_div is false there).
                     if then_div && else_div { diverges = true; }
                 }
-                HStmt::While { body, .. } => { let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved); }
+                HStmt::While { cond, body, .. } => {
+                    visit_matches_in_expr(sym, locals, cond, scope_chain, loop_start, &moved);
+                    let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved);
+                }
                 // An unconditional nested block always runs, so its escaped moves
                 // are moves for the parent too, and its divergence is the parent's.
                 HStmt::Block(b) => {
@@ -2289,10 +2377,17 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     }
                     diverges = true;
                 }
-                HStmt::ForC { body, .. } => { let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved); }
-                HStmt::ForEach { body, .. } => { let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved); }
+                HStmt::ForC { cond, body, .. } => {
+                    visit_matches_in_expr(sym, locals, cond, scope_chain, loop_start, &moved);
+                    let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved);
+                }
+                HStmt::ForEach { src, body, .. } => {
+                    visit_matches_in_expr(sym, locals, src, scope_chain, loop_start, &moved);
+                    let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved);
+                }
                 HStmt::Propagate { value: Some(v), .. } => {
                     moved_locals_in_expr(sym, v, &mut moved);
+                    visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, &moved);
                 }
                 HStmt::Propagate { value: None, .. } => {}
             }

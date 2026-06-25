@@ -1,0 +1,44 @@
+// Match-expr / if-expr arm bodies are real drop scopes: an owning local declared
+// in an arm body and NOT moved out must be freed at arm exit (it previously
+// leaked - arm bodies live inside an expression, so the drop pass never visited
+// them), while one moved out via the arm's `yield` must NOT be double-freed.
+// Also covers an `&`-taking overload with rvalue operands in a yielded value
+// (`string_from("a") + string_from("b")`): the operand temporaries are hoisted
+// into the arm body (otherwise `&(rvalue)` is not a valid C lvalue) and so are
+// freed there.  Verified leak/double-free clean under ASan + the match LSan sweep.
+import std.{String, StringOps, string_from};
+
+enum Cmd { Go, Stop }
+
+// if-expr taken arm declares an owning local that is never used (would leak), and
+// yields a concat of two rvalue Strings (operand temps hoisted into the arm).
+int with_dead_local(int c) {
+  String s = if (c > 0) { String dead = string_from("scratch"); yield string_from("big") + string_from("!"); }
+             else { yield string_from("small"); };
+  return s.length();
+}
+
+// An owning local declared in an arm and moved out via `yield`: transfers
+// ownership to the binding, no double-free at arm exit.
+int moved_out(int c) {
+  String s = if (c > 0) { String t = string_from("moved"); yield t; }
+             else { yield string_from("x"); };
+  return s.length();
+}
+
+// Enum switch-form match arm body with an owning local not moved out.
+int classify(Cmd c) {
+  return match (c) {
+    Cmd.Go { String dead = string_from("leak?"); yield 1; }
+    Cmd.Stop { yield 2; }
+  };
+}
+
+unit main() {
+  log(with_dead_local(1));  // "big!" -> 4
+  log(with_dead_local(0));  // "small" -> 5
+  log(moved_out(1));        // "moved" -> 5
+  log(moved_out(0));        // "x" -> 1
+  log(classify(Cmd.Go));    // 1
+  log(classify(Cmd.Stop));  // 2
+}
