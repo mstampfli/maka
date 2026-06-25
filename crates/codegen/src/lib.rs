@@ -80,6 +80,12 @@ struct Cx<'a> {
     /// so a `match` nested in an inline body can lower a `return` in an arm to the
     /// right `__r_<tag>` assignment.  Innermost expansion is last.
     inline_ret_stack: Vec<HType>,
+    /// Return type of the C function currently being emitted.  A `propagate`
+    /// spliced from an inline body lowers to a bare `return` of THIS function, so
+    /// its value must match this type even when the inline helper was monomorphized
+    /// with different type args (e.g. try_ok's Result<T,E>.Err into the caller's
+    /// Result<U,E>).
+    cur_c_func_ret: HType,
     /// Freestanding mode — emit a minimal libc-free prologue and route the
     /// allocator / panic / log / atomic-runtime hooks to user-provided
     /// extern symbols (`__maka_alloc`, `__maka_free`, `__maka_panic`,
@@ -104,6 +110,7 @@ impl<'a> Cx<'a> {
             bounded_vars: Vec::new(),
             inline_call_seq: 0,
             inline_ret_stack: Vec::new(),
+            cur_c_func_ret: HType::Unit,
             noted_aggregates: Default::default(),
             freestanding: false,
         }
@@ -7211,6 +7218,7 @@ impl<'a> Cx<'a> {
     fn emit_func(&mut self, f: &HFunc) {
         // inline functions are spliced at each call site; no standalone C function emitted.
         if self.sym.func_sig(f.id).is_inline { return; }
+        self.cur_c_func_ret = self.sym.func_sig(f.id).ret.clone();
         let sig = self.func_signature(f);
         self.wl(&format!("{} {{", sig));
         self.open();
@@ -7613,6 +7621,40 @@ impl<'a> Cx<'a> {
         body
     }
 
+    /// Emit a spliced `propagate` value.  The value becomes a bare `return` of the
+    /// enclosing C function (`cur_c_func_ret`).  When the inline helper was
+    /// monomorphized with its own type args, the value may be a DIFFERENT
+    /// instantiation of the same enum template than the caller's return type (e.g.
+    /// try_ok's `Result<T,E>.Err` propagated into the caller's `Result<U,E>`): the
+    /// constructed variant's data is identical, but the C struct type differs and
+    /// the variant layouts may differ, so re-emit the variant against the caller's
+    /// enum instead of returning the mismatched type.
+    fn emit_inline_propagate_value(&mut self, inline_f: &HFunc, v: &HExpr, tag: &str) -> String {
+        let target = self.cur_c_func_ret.clone();
+        if !type_eq(&v.ty, &target) {
+            if let (HExprKind::VariantCtor { variant, fields, .. }, HType::Enum(teid)) = (&v.kind, &target) {
+                let tinfo = self.sym.enum_info(*teid).clone();
+                if let Some(tv) = tinfo.variants.get(*variant) {
+                    if tv.fields.is_empty() {
+                        if tinfo.is_simple() {
+                            return format!("{}__{}", c_ident(&tinfo.name), c_ident(&tv.name));
+                        }
+                        return format!("(({}){{ .tag = {} }})", c_ident(&tinfo.name), tv.tag);
+                    }
+                    let parts: Vec<String> = tv.fields.iter().enumerate().map(|(i, fi)| {
+                        let s = fields.iter().find(|(idx, _)| *idx == i)
+                            .map(|(_, e)| self.emit_inline_expr(inline_f, e, tag))
+                            .unwrap_or_else(|| "0".into());
+                        format!(".{} = {}", c_ident(&fi.name), s)
+                    }).collect();
+                    return format!("(({}){{ .tag = {}, .payload.{} = {{ {} }} }})",
+                        c_ident(&tinfo.name), tv.tag, c_ident(&tv.name), parts.join(", "));
+                }
+            }
+        }
+        self.emit_inline_expr(inline_f, v, tag)
+    }
+
     fn emit_inline_expansion(&mut self, caller_f: &HFunc, callee: FuncId, args: &[HExpr], result_ty: &HType) -> String {
         // Find the inline HFunc by id.
         let inline_f = match self.sym.funcs.iter().find(|hf| hf.id == callee).cloned() {
@@ -7730,7 +7772,7 @@ impl<'a> Cx<'a> {
             }
             HStmt::Propagate { value, .. } => match value {
                 Some(v) => {
-                    let s = self.emit_inline_expr(inline_f, v, tag);
+                    let s = self.emit_inline_propagate_value(inline_f, v, tag);
                     format!("return {}; ", s)
                 }
                 None => "return; ".into(),

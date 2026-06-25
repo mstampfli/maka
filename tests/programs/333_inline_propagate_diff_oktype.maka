@@ -1,0 +1,15 @@
+// try_ok / inline `propagate` of a Result.Err whose Result ok-type differs from
+// the caller's return ok-type (the common error-chaining case): the propagated
+// Err is re-packed into the caller's Result instantiation, not returned as the
+// helper's (a different C type, possibly different layout). Was invalid C.
+import std.{Result, Try, try_ok};
+Result<bool, int> step1(int n) { if (n < 0) { return Result.Err { err = 9 }; } return Result.Ok { value = true }; }
+Result<int, int> run(int n) {
+  bool b = try_ok(step1(n));     // helper ok-type is bool; caller returns Result<int,int>
+  if (b) { return Result.Ok { value = 1 }; }
+  return Result.Ok { value = 2 };
+}
+unit main() {
+  log(match (run(5))     { Result.Ok { value } value, Result.Err { err } (0 - err), });  // 1
+  log(match (run(0 - 1)) { Result.Ok { value } value, Result.Err { err } (0 - err), });  // -9
+}
