@@ -1,0 +1,40 @@
+// Regression: a `propagate` inside an inlined helper (here try_ok) early-returns
+// the CALLER's C frame, so it must free the caller's owning locals that are live
+// at the call site - otherwise they leak (the inline's own scope-exit drops only
+// cover the inline's frame, not the caller's).  A caller local MOVED before the
+// propagating call must NOT be dropped (it is already gone -> double free).
+// Verified leak/double-free clean under ASan + the match LSan sweep.
+import std.{String, StringOps, Result, Try, string_from, try_ok};
+
+int eat(String s) { return s.length(); }
+
+Result<int, String> parse(int n) {
+  if (n < 0) { return Result.Err { err = string_from("err") }; }
+  return Result.Ok { value = n };
+}
+
+// `scratch` is live across the try_ok; on the Err path the propagate must free it.
+Result<int, String> live_across(int n) {
+  String scratch = string_from("LIVE");
+  int v = try_ok(parse(n));
+  return Result.Ok { value = v + scratch.length() };
+}
+
+// `gone` is moved before the try_ok; the propagate must NOT double-free it.
+Result<int, String> moved_before(int n) {
+  String gone = string_from("GONE");
+  int used = eat(gone);            // moves `gone`
+  int v = try_ok(parse(n));
+  return Result.Ok { value = v + used };
+}
+
+int unwrap(Result<int, String> r) {
+  return match (r) { Result.Ok { value } value, Result.Err { err } err.length() as int };
+}
+
+unit main() {
+  log(unwrap(live_across(5)));      // Ok: 5 + 4 = 9
+  log(unwrap(live_across(0 - 1)));  // Err: propagate frees scratch -> "err" = 3
+  log(unwrap(moved_before(5)));     // Ok: 5 + 4 = 9
+  log(unwrap(moved_before(0 - 1))); // Err: gone already moved, not double-freed -> 3
+}

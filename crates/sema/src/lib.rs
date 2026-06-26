@@ -835,7 +835,7 @@ fn collect_inline_callees_stmt(sym: &SymTab, s: &HStmt, out: &mut Vec<u32>) {
 }
 fn collect_inline_callees_expr(sym: &SymTab, e: &HExpr, out: &mut Vec<u32>) {
     match &e.kind {
-        HExprKind::Call { callee, args } | HExprKind::InlineCall { callee, args } => {
+        HExprKind::Call { callee, args } | HExprKind::InlineCall { callee, args, .. } => {
             if (callee.0 as usize) < sym.sigs.len() && sym.func_sig(*callee).is_inline {
                 out.push(callee.0);
             }
@@ -944,7 +944,7 @@ fn rewrite_placeholders(f: &mut HFunc, mapping: &[u32]) {
                 rw_expr(callee, mapping);
                 for a in args { rw_expr(a, mapping); }
             }
-            HExprKind::InlineCall { callee, args } => {
+            HExprKind::InlineCall { callee, args, .. } => {
                 let v = callee.0;
                 if v <= PLACEHOLDER_FID_BASE && v + (mapping.len() as u32) > PLACEHOLDER_FID_BASE {
                     let idx = (PLACEHOLDER_FID_BASE - v) as usize;

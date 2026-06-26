@@ -4111,7 +4111,7 @@ impl<'a> TypeChecker<'a> {
         let kind = if is_inline && final_fid.0 < u32::MAX - 1024 {
             // The propagate-vs-caller-return check happens as a post-pass in `analyze()`
             // because the inline function's HFunc may not yet be in `sym.funcs` here.
-            HExprKind::InlineCall { callee: final_fid, args: hargs }
+            HExprKind::InlineCall { callee: final_fid, args: hargs, propagate_drops: Vec::new() }
         } else {
             HExprKind::Call { callee: final_fid, args: hargs }
         };

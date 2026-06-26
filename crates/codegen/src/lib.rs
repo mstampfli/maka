@@ -80,6 +80,10 @@ struct Cx<'a> {
     /// so a `match` nested in an inline body can lower a `return` in an arm to the
     /// right `__r_<tag>` assignment.  Innermost expansion is last.
     inline_ret_stack: Vec<HType>,
+    /// Per-active-inline-expansion stack of the CALLER's owning locals (resolved C
+    /// name + type) live at the call site.  A `propagate` inside the expansion
+    /// early-returns the caller, so it frees these first or they leak.
+    inline_propagate_drops: Vec<Vec<(String, HType)>>,
     /// Return type of the C function currently being emitted.  A `propagate`
     /// spliced from an inline body lowers to a bare `return` of THIS function, so
     /// its value must match this type even when the inline helper was monomorphized
@@ -118,6 +122,7 @@ impl<'a> Cx<'a> {
             bounded_vars: Vec::new(),
             inline_call_seq: 0,
             inline_ret_stack: Vec::new(),
+            inline_propagate_drops: Vec::new(),
             cur_c_func_ret: HType::Unit,
             yield_exit: Vec::new(),
             yield_label_seq: 0,
@@ -7770,11 +7775,11 @@ impl<'a> Cx<'a> {
         self.emit_inline_expr(inline_f, v, tag)
     }
 
-    fn emit_inline_expansion(&mut self, caller_f: &HFunc, callee: FuncId, args: &[HExpr], result_ty: &HType) -> String {
+    fn emit_inline_expansion(&mut self, caller_f: &HFunc, callee: FuncId, args: &[HExpr], result_ty: &HType, prop_drops: Vec<(String, HType)>) -> String {
         // Top-level expansion: args live in the caller's C function, so render
         // them with the ordinary emitter.
         let arg_strs: Vec<String> = args.iter().map(|a| self.emit_expr(caller_f, a)).collect();
-        self.emit_inline_expansion_args(callee, &arg_strs, result_ty)
+        self.emit_inline_expansion_args(callee, &arg_strs, result_ty, prop_drops)
     }
 
     /// Inline expansion given PRE-RENDERED argument strings.  Splitting argument
@@ -7783,7 +7788,7 @@ impl<'a> Cx<'a> {
     /// inline's tagged scope (via `emit_inline_expr`), while a top-level call
     /// renders them in the caller's scope (via `emit_expr`).  The nested call
     /// still gets its own fresh `tag` for its locals, so names never collide.
-    fn emit_inline_expansion_args(&mut self, callee: FuncId, arg_strs: &[String], result_ty: &HType) -> String {
+    fn emit_inline_expansion_args(&mut self, callee: FuncId, arg_strs: &[String], result_ty: &HType, prop_drops: Vec<(String, HType)>) -> String {
         // Find the inline HFunc by id.
         let inline_f = match self.sym.funcs.iter().find(|hf| hf.id == callee).cloned() {
             Some(hf) => hf,
@@ -7834,9 +7839,11 @@ impl<'a> Cx<'a> {
         // semantics of `return` are independent of any surrounding loops.
         out.push_str("do { ");
         self.inline_ret_stack.push(result_ty.clone());
+        self.inline_propagate_drops.push(prop_drops);
         for stmt in &inline_f.body.stmts {
             out.push_str(&self.emit_inline_stmt(&inline_f, stmt, &tag, result_ty));
         }
+        self.inline_propagate_drops.pop();
         self.inline_ret_stack.pop();
         out.push_str("} while (0); ");
         out.push_str(&format!("end_{}: ; ", tag));
@@ -7916,13 +7923,26 @@ impl<'a> Cx<'a> {
                 s.push_str(&format!("goto end_{}; ", tag));
                 s
             }
-            HStmt::Propagate { value, .. } => match value {
-                Some(v) => {
-                    let s = self.emit_inline_propagate_value(inline_f, v, tag);
-                    format!("return {}; ", s)
+            HStmt::Propagate { value, .. } => {
+                // A `propagate` early-returns the CALLER's C frame, so free the
+                // caller's owning locals live at the inline-call site first (else
+                // they leak - the inline's own scope drops don't cover them).
+                let dc = self.capture_drops(&self.inline_propagate_drops.last().cloned().unwrap_or_default());
+                match value {
+                    Some(v) => {
+                        let s = self.emit_inline_propagate_value(inline_f, v, tag);
+                        if dc.is_empty() {
+                            format!("return {}; ", s)
+                        } else {
+                            // Evaluate the propagated value BEFORE the drops, in case
+                            // it reads one of them, then drop, then return.
+                            let rt = self.c_type(&self.cur_c_func_ret.clone());
+                            format!("{{ {} __pv = {}; {}return __pv; }} ", rt, s, dc)
+                        }
+                    }
+                    None => format!("{}return; ", dc),
                 }
-                None => "return; ".into(),
-            },
+            }
             HStmt::If { cond, then_b, else_b, .. } => {
                 let cs = self.emit_inline_expr(inline_f, cond, tag);
                 let mut s = format!("if ({}) {{ ", cs);
@@ -8054,11 +8074,17 @@ impl<'a> Cx<'a> {
             // scope; the nested expansion then takes its own fresh tag.  Without
             // this the args would fall through to the untagged emitter and emit
             // undeclared `a_0`-style names.
-            HExprKind::InlineCall { callee, args } => {
+            HExprKind::InlineCall { callee, args, propagate_drops } => {
                 let arg_strs: Vec<String> = args.iter()
                     .map(|a| self.emit_inline_expr(inline_f, a, tag))
                     .collect();
-                self.emit_inline_expansion_args(*callee, &arg_strs, &e.ty)
+                // Nested inline call: the caller's locals here are the OUTER inline's
+                // tagged locals, so resolve the propagate drops in that tagged scope.
+                let pd: Vec<(String, HType)> = propagate_drops.iter().map(|id| {
+                    let li = &inline_f.locals[id.0 as usize];
+                    (inline_local_name(inline_f, *id, tag), li.ty.clone())
+                }).collect();
+                self.emit_inline_expansion_args(*callee, &arg_strs, &e.ty, pd)
             }
             // Everything else: fall back to ordinary emit_expr but with a dummy HFunc that holds
             // the inline locals so name lookups resolve. For simplicity, use the inline_f directly.
@@ -8753,8 +8779,12 @@ impl<'a> Cx<'a> {
                     format!("(__extension__ ({{ Callable_{0} __c = ({1}); __c.code({2}); }}))", key, c, all_args)
                 }
             }
-            HExprKind::InlineCall { callee, args } => {
-                self.emit_inline_expansion(f, *callee, args, &e.ty)
+            HExprKind::InlineCall { callee, args, propagate_drops } => {
+                let pd: Vec<(String, HType)> = propagate_drops.iter().map(|id| {
+                    let li = &f.locals[id.0 as usize];
+                    (local_name(*id, &li.name), li.ty.clone())
+                }).collect();
+                self.emit_inline_expansion(f, *callee, args, &e.ty, pd)
             }
             HExprKind::Transfer(inner) => self.emit_expr(f, inner),
             HExprKind::EnumTag(inner) => {
@@ -9827,6 +9857,17 @@ impl<'a> Cx<'a> {
         if needs_value { body.push_str("__r; "); } else { body.push_str("MAKA_UNIT; "); }
         body.push_str("})");
         body
+    }
+
+    /// Emit drops for a resolved (c_name, type) list, captured as a C string
+    /// (callers that build C into a `String` rather than self.out use this).
+    fn capture_drops(&mut self, drops: &[(String, HType)]) -> String {
+        if drops.is_empty() { return String::new(); }
+        let prev = self.out.len();
+        for (n, ty) in drops { self.emit_field_drop(n, ty, 0); }
+        let s = self.out[prev..].to_string();
+        self.out.truncate(prev);
+        s
     }
 
     /// Scope-exit drops for a match-arm body, captured as a C string.  A match

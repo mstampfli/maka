@@ -253,7 +253,7 @@ fn params_borrowed_by(e: &HExpr, f: &HFunc, borrows: &[Vec<bool>], acc: &mut Vec
             }
         }
         Field { base, .. } | Index { base, .. } => params_borrowed_by(base, f, borrows, acc),
-        Call { callee, args } | InlineCall { callee, args } => {
+        Call { callee, args } | InlineCall { callee, args, .. } => {
             let cid = callee.0 as usize;
             if let Some(cb) = borrows.get(cid) {
                 for (m, &b) in cb.iter().enumerate() {
@@ -1217,7 +1217,7 @@ impl<'a> Analyzer<'a> {
             // escapes through a call - e.g. `return localString.as_str()`, where
             // `as_str(&String) -> string` returns a borrow of its receiver, so
             // the result dangles on a local receiver just like `return &local;`.
-            Call { callee, args } | InlineCall { callee, args } => {
+            Call { callee, args } | InlineCall { callee, args, .. } => {
                 let cid = callee.0 as usize;
                 let borrowed: Vec<usize> = self
                     .ret_borrows
@@ -2175,7 +2175,22 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     }
                 }
             }
-            HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } => {
+            HExprKind::Call { args, .. } => {
+                for a in args { visit_matches_in_expr(sym, locals, a, scope_chain, loop_start, inherited); }
+            }
+            HExprKind::InlineCall { args, propagate_drops, .. } => {
+                // A `propagate` inside the inlined body early-returns the CALLER's C
+                // frame, so it must free the caller's owning locals live here - the
+                // same set a `return` at this point drops (all in-scope owning locals
+                // minus those already moved).  scope_chain holds only owning locals.
+                let mut drops = Vec::new();
+                for scope in scope_chain.iter() {
+                    for id in scope.iter().rev() {
+                        if inherited.contains(id) { continue; }
+                        drops.push(*id);
+                    }
+                }
+                *propagate_drops = drops;
                 for a in args { visit_matches_in_expr(sym, locals, a, scope_chain, loop_start, inherited); }
             }
             HExprKind::CallIndirect { callee, args } => {
