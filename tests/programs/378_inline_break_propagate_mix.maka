@@ -1,0 +1,39 @@
+// An inline using BOTH a `break` (targets the caller's loop) and a `propagate`
+// (returns the caller), in one body, each with an owning frame local: the two
+// threaded drop mechanisms (loop_jump_drops for the break, propagate_drops for the
+// propagate) coexist without leaking or double-freeing.  Verified ASan/LSan clean.
+import std.{String, StringOps, Result, Try, string_from, try_ok};
+
+Result<int, String> parse(int n) {
+  if (n < 0) { return Result.Err { err = string_from("e") }; }
+  return Result.Ok { value = n };
+}
+
+inline int step(int i, int breakAt, int failAt) {
+  String s = string_from("STEP");           // inline frame owning local
+  if (i == breakAt) { break; }              // break -> caller's loop
+  int v = try_ok(parse(i - failAt));        // i < failAt -> Err -> propagate the caller
+  return v + s.length();
+}
+
+Result<int, String> run(int breakAt, int failAt) {
+  String pre = string_from("PRE");
+  mut int total = 0;
+  for (int i in 0..10) {
+    String c = string_from("LP");
+    total = total + step(i, breakAt, failAt) + c.length();
+  }
+  return Result.Ok { value = total + pre.length() };
+}
+
+int unwrap(Result<int, String> r) {
+  return match (r) { Result.Ok { value } value, Result.Err { err } 0 - (err.length() as int) };
+}
+
+unit main() {
+  // break at i=5, never fail: i=0..4 -> (i + len("STEP")=4) + len("LP")=2 -> i+7 -> 7+8+9+10+11=45,
+  // then break; run returns Ok{45 + len("PRE")=3} = 48.
+  log(unwrap(run(5, 0 - 1)));   // 48
+  // never break (breakAt=99), propagate at i=0 (parse(-3)=Err): run returns Err"e" -> -1.
+  log(unwrap(run(99, 3)));      // -1
+}
