@@ -10672,9 +10672,29 @@ fn expr_contains_local(e: &HExpr, id: u32) -> bool {
         HExprKind::ArrayLit(es) => es.iter().any(|e| expr_contains_local(e, id)),
         HExprKind::Closure { env_values, .. } => env_values.iter().any(|v| expr_contains_local(v, id)),
         HExprKind::Transfer(inner) => expr_contains_local(inner, id),
+        // Arm BODIES too: a match RHS that reads the reassigned place in an arm body
+        // (e.g. `x = match c { 0 { ...x!.v...; yield ... } }`) DOES use the place, so
+        // the drop-on-reassign must not free the old value before the RHS runs.
         HExprKind::Match { scrutinee, arms, .. } => expr_contains_local(scrutinee, id)
             || arms.iter().any(|a| a.guard.as_ref().map_or(false, |g| expr_contains_local(g, id))
+                || block_contains_local(&a.body, id)
                 || a.value.as_ref().map_or(false, |v| expr_contains_local(v, id))),
+        _ => false,
+    }
+}
+
+fn block_contains_local(b: &HBlock, id: u32) -> bool { b.stmts.iter().any(|s| stmt_contains_local(s, id)) }
+fn stmt_contains_local(s: &HStmt, id: u32) -> bool {
+    match s {
+        HStmt::Let { init, .. } => expr_contains_local(init, id),
+        HStmt::Assign { place, value, .. } => expr_contains_local(place, id) || expr_contains_local(value, id),
+        HStmt::ExprStmt(e) => expr_contains_local(e, id),
+        HStmt::Return { value: Some(v), .. } | HStmt::Propagate { value: Some(v), .. } => expr_contains_local(v, id),
+        HStmt::If { cond, then_b, else_b, .. } => expr_contains_local(cond, id) || block_contains_local(then_b, id) || else_b.as_ref().is_some_and(|b| block_contains_local(b, id)),
+        HStmt::While { cond, body, .. } => expr_contains_local(cond, id) || block_contains_local(body, id),
+        HStmt::ForC { init, cond, step, body, .. } => stmt_contains_local(init, id) || expr_contains_local(cond, id) || stmt_contains_local(step, id) || block_contains_local(body, id),
+        HStmt::ForEach { src, body, .. } => expr_contains_local(src, id) || block_contains_local(body, id),
+        HStmt::Block(b) | HStmt::Unsafe(b, _) => block_contains_local(b, id),
         _ => false,
     }
 }

@@ -1,0 +1,34 @@
+// Regression: reassigning an owning local with a match RHS that reads the old value
+// in an ARM BODY must not free the old value before the RHS is evaluated.
+// expr_contains_local skipped match arm bodies, so the drop-on-reassign chose
+// "drop old, then assign" and the arm's deref of the old box was a use-after-free.
+// Now it detects the arm-body use and uses the temp-dance (compute the RHS into a
+// temp, THEN drop the old value).  The move-in-arm case stays correct (the lifetime
+// move-propagation sets drop_old=false, so no double-free).  Verified ASan clean.
+data Box { int v; }
+int eat(own *Box b) { if (b != null) { return b!.v; } return 0; }
+
+// borrow-in-arm: reads x!.v to derive the new box; old x must survive the RHS.
+int run_borrow(int c) {
+  mut own *Box x = alloc Box { v = 5 };
+  x = match (c) { 0 { int n = x!.v; yield alloc Box { v = n + 100 }; } else { yield alloc Box { v = 0 }; } };
+  mut int r = 0;
+  if (x != null) { r = x!.v; }
+  return r;
+}
+
+// move-in-arm: consumes x; the reassign must not double-free.
+int run_move(int c) {
+  mut own *Box x = alloc Box { v = 7 };
+  mut int used = 0;
+  x = match (c) { 0 { used = eat(x); yield alloc Box { v = used + 1 }; } else { yield alloc Box { v = 0 }; } };
+  mut int r = 0;
+  if (x != null) { r = x!.v; }
+  return r;
+}
+
+unit main() {
+  mut int t = 0;
+  for (int i in 0..1000) { t = t + run_borrow(0) + run_move(0); }   // (105 + 8) * 1000
+  log(t);   // 113000
+}
