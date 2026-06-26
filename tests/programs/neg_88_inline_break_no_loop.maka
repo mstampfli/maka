@@ -1,0 +1,8 @@
+// An inline fn whose body `break`s/`continue`s out to an enclosing loop is a loop
+// fragment: it is only valid spliced into a loop.  Calling it outside any loop must
+// be rejected (otherwise the spliced break becomes a C break with no loop to target).
+inline int step(int i) { return match (i) { 0 { break; } else { yield 1; } }; }
+
+unit main() {
+  log(step(5));   // called outside any loop -> rejected
+}

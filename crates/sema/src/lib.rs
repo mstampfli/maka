@@ -519,6 +519,9 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
     detect_inline_recursion(&sym, &funcs, &mut errors);
     // Validate every `propagate X;` against the *caller's* return type at each InlineCall site.
     check_inline_propagate_compat(&sym, &funcs, &mut errors);
+    // An inline whose body has a `break`/`continue` targeting an enclosing loop must
+    // only be called from inside a loop; reject calling it at loop depth 0.
+    check_inline_loop_jumps(&sym, &funcs, &mut errors);
 
     // Interprocedural pass — runs after every function (including instantiations)
     // is fully lowered.  First compute "never returns null" summaries by fixpoint
@@ -756,6 +759,113 @@ fn check_inline_propagate_compat(sym: &SymTab, funcs: &[HFunc], errors: &mut Vec
             }
             HExprKind::Closure { env_values, .. } => for v in env_values { check_propagate_in_expr(v, ret, errs, call_span, funcs, visited); },
             HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => check_propagate_in_expr(inner, ret, errs, call_span, funcs, visited),
+            _ => {}
+        }
+    }
+}
+
+/// Does this inline body contain a `break`/`continue` that targets an enclosing
+/// loop (i.e. one NOT inside a loop within the inline)?  Such a jump is only valid
+/// when the inline is spliced into a caller's loop.  Recurses into if/block/unsafe
+/// and match-arm bodies (a jump there targets the enclosing loop) but NOT into a
+/// nested loop's body (its breaks are that loop's).  Closures are separate
+/// functions, so their captured exprs are scanned but not their bodies.
+fn inline_jumps_out_block(b: &HBlock) -> bool { b.stmts.iter().any(inline_jumps_out_stmt) }
+fn inline_jumps_out_stmt(s: &HStmt) -> bool {
+    match s {
+        HStmt::Break { .. } | HStmt::Continue { .. } => true,
+        HStmt::If { cond, then_b, else_b, .. } => inline_jumps_out_expr(cond) || inline_jumps_out_block(then_b) || else_b.as_ref().is_some_and(inline_jumps_out_block),
+        HStmt::Block(b) | HStmt::Unsafe(b, _) => inline_jumps_out_block(b),
+        HStmt::While { cond, .. } | HStmt::ForC { cond, .. } => inline_jumps_out_expr(cond),
+        HStmt::ForEach { src, .. } => inline_jumps_out_expr(src),
+        HStmt::Let { init, .. } => inline_jumps_out_expr(init),
+        HStmt::Assign { place, value, .. } => inline_jumps_out_expr(place) || inline_jumps_out_expr(value),
+        HStmt::ExprStmt(e) => inline_jumps_out_expr(e),
+        HStmt::Return { value, .. } | HStmt::Propagate { value, .. } => value.as_ref().is_some_and(inline_jumps_out_expr),
+    }
+}
+fn inline_jumps_out_expr(e: &HExpr) -> bool {
+    match &e.kind {
+        HExprKind::Match { scrutinee, arms, .. } => inline_jumps_out_expr(scrutinee) || arms.iter().any(|a|
+            a.guard.as_ref().is_some_and(inline_jumps_out_expr) || inline_jumps_out_block(&a.body) || a.value.as_ref().is_some_and(inline_jumps_out_expr)),
+        HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } => args.iter().any(inline_jumps_out_expr),
+        HExprKind::CallIndirect { callee, args } => inline_jumps_out_expr(callee) || args.iter().any(inline_jumps_out_expr),
+        HExprKind::Bin { lhs, rhs, .. } => inline_jumps_out_expr(lhs) || inline_jumps_out_expr(rhs),
+        HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } | HExprKind::Cast { expr, .. }
+        | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
+        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr) | HExprKind::SliceLen(expr)
+        | HExprKind::EnumTag(expr) | HExprKind::Transfer(expr) | HExprKind::ArrayToSlice { base: expr, .. }
+        | HExprKind::AddrOfRef { place: expr, .. } | HExprKind::Field { base: expr, .. } => inline_jumps_out_expr(expr),
+        HExprKind::Index { base, idx } => inline_jumps_out_expr(base) || inline_jumps_out_expr(idx),
+        HExprKind::Closure { env_values, .. } => env_values.iter().any(inline_jumps_out_expr),
+        HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => fields.iter().any(|(_, fe)| inline_jumps_out_expr(fe)),
+        HExprKind::ArrayLit(es) => es.iter().any(inline_jumps_out_expr),
+        _ => false,
+    }
+}
+
+/// An inline whose body break/continues out to an enclosing loop is a loop fragment:
+/// it is only valid spliced into a loop.  Reject calling it at loop depth 0 in a
+/// (non-inline) caller, with a clear message at the call site - otherwise the
+/// spliced jump becomes a C `break`/`continue` with no enclosing loop (an opaque
+/// backend error).  Inline callers are skipped: a jump there just propagates to
+/// THEIR caller, and is checked when the chain bottoms out at a non-inline call.
+fn check_inline_loop_jumps(sym: &SymTab, funcs: &[HFunc], errors: &mut Vec<SemaError>) {
+    for caller in funcs {
+        if sym.func_sig(caller.id).is_inline { continue; }
+        wblock(&caller.body, 0, funcs, errors);
+    }
+    fn wblock(b: &HBlock, depth: usize, funcs: &[HFunc], errors: &mut Vec<SemaError>) {
+        for s in &b.stmts { wstmt(s, depth, funcs, errors); }
+    }
+    fn wstmt(s: &HStmt, depth: usize, funcs: &[HFunc], errors: &mut Vec<SemaError>) {
+        match s {
+            HStmt::Let { init, .. } => wexpr(init, depth, funcs, errors),
+            HStmt::Assign { place, value, .. } => { wexpr(place, depth, funcs, errors); wexpr(value, depth, funcs, errors); }
+            HStmt::ExprStmt(e) => wexpr(e, depth, funcs, errors),
+            HStmt::Return { value: Some(v), .. } | HStmt::Propagate { value: Some(v), .. } => wexpr(v, depth, funcs, errors),
+            HStmt::If { cond, then_b, else_b, .. } => { wexpr(cond, depth, funcs, errors); wblock(then_b, depth, funcs, errors); if let Some(b) = else_b { wblock(b, depth, funcs, errors); } }
+            HStmt::While { cond, body, .. } => { wexpr(cond, depth, funcs, errors); wblock(body, depth + 1, funcs, errors); }
+            HStmt::ForC { init, cond, step, body, .. } => { wstmt(init, depth, funcs, errors); wexpr(cond, depth, funcs, errors); wstmt(step, depth, funcs, errors); wblock(body, depth + 1, funcs, errors); }
+            HStmt::ForEach { src, body, .. } => { wexpr(src, depth, funcs, errors); wblock(body, depth + 1, funcs, errors); }
+            HStmt::Block(b) | HStmt::Unsafe(b, _) => wblock(b, depth, funcs, errors),
+            _ => {}
+        }
+    }
+    fn wexpr(e: &HExpr, depth: usize, funcs: &[HFunc], errors: &mut Vec<SemaError>) {
+        if let HExprKind::InlineCall { callee, .. } = &e.kind {
+            if depth == 0 {
+                if let Some(inline_f) = funcs.iter().find(|hf| hf.id == *callee) {
+                    if inline_jumps_out_block(&inline_f.body) {
+                        errors.push(SemaError {
+                            msg: "this inline function uses a `break`/`continue` that targets an enclosing loop, but it is called outside any loop here; call it inside a `for`/`while`, or make the break/continue stay within a loop inside the inline".to_string(),
+                            span: e.span,
+                        });
+                    }
+                }
+            }
+        }
+        match &e.kind {
+            HExprKind::Match { scrutinee, arms, .. } => {
+                wexpr(scrutinee, depth, funcs, errors);
+                for a in arms {
+                    if let Some(g) = &a.guard { wexpr(g, depth, funcs, errors); }
+                    wblock(&a.body, depth, funcs, errors);
+                    if let Some(v) = &a.value { wexpr(v, depth, funcs, errors); }
+                }
+            }
+            HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } => for a in args { wexpr(a, depth, funcs, errors); },
+            HExprKind::CallIndirect { callee, args } => { wexpr(callee, depth, funcs, errors); for a in args { wexpr(a, depth, funcs, errors); } }
+            HExprKind::Bin { lhs, rhs, .. } => { wexpr(lhs, depth, funcs, errors); wexpr(rhs, depth, funcs, errors); }
+            HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } | HExprKind::Cast { expr, .. }
+            | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
+            | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr) | HExprKind::SliceLen(expr)
+            | HExprKind::EnumTag(expr) | HExprKind::Transfer(expr) | HExprKind::ArrayToSlice { base: expr, .. }
+            | HExprKind::AddrOfRef { place: expr, .. } | HExprKind::Field { base: expr, .. } => wexpr(expr, depth, funcs, errors),
+            HExprKind::Index { base, idx } => { wexpr(base, depth, funcs, errors); wexpr(idx, depth, funcs, errors); }
+            HExprKind::Closure { env_values, .. } => for v in env_values { wexpr(v, depth, funcs, errors); },
+            HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields { wexpr(fe, depth, funcs, errors); },
+            HExprKind::ArrayLit(es) => for ee in es { wexpr(ee, depth, funcs, errors); },
             _ => {}
         }
     }
