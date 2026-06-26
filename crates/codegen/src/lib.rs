@@ -6305,8 +6305,14 @@ impl<'a> Cx<'a> {
         // Owned substring: a freshly-malloc'd copy of s[start .. start+len].
         // Returns `char*` so Maka can own/free it (the borrowed
         // `__maka_rt_str_substring` would leak it inside a Vec<String>).
-        self.w("char* __maka_rt_substr_owned(const char* s, int64_t start, int64_t len) {\n");
-        self.w("    if (start < 0) start = 0; if (len < 0) len = 0;\n");
+        // `slen` is the caller-known source length (callers already have it, so we
+        // avoid an O(n) strlen here).  start/len are clamped into [0, slen] so an
+        // out-of-range request copies only valid bytes instead of reading past the
+        // buffer (safe by construction, never an OOB read).
+        self.w("char* __maka_rt_substr_owned(const char* s, int64_t start, int64_t len, int64_t slen) {\n");
+        self.w("    if (slen < 0) slen = 0;\n");
+        self.w("    if (start < 0) start = 0; if (start > slen) start = slen;\n");
+        self.w("    if (len < 0) len = 0; if (start + len > slen) len = slen - start;\n");
         self.w("    char* r = (char*)malloc((size_t)len + 1);\n");
         self.w("    for (int64_t k = 0; k < len; k++) r[k] = s[start + k];\n");
         self.w("    r[len] = 0; return (char*)r;\n");
@@ -6326,7 +6332,7 @@ impl<'a> Cx<'a> {
         // Byte at index `i` of a string (0..len-1), or -1 out of range.  Gives
         // Maka byte-level read access to strings (which aren't indexable).
         self.w("int64_t __maka_rt_str_byte(const char* s, int64_t i) {\n");
-        self.w("    if (i < 0) return -1;\n");
+        self.w("    if (i < 0 || (uint64_t)i >= strlen(s)) return -1;\n");
         self.w("    return (int64_t)(unsigned char)s[i];\n");
         self.w("}\n");
         self.w("int64_t __maka_rt_file_sync(int64_t fd) {\n");

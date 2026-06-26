@@ -539,7 +539,7 @@ extern "__maka_rt_str_byte"      int    __rt_str_byte  (string s, int i);
 extern "__maka_rt_str_hash"      int    __rt_str_hash  (string s);
 // Owned substring - the C side mallocs, so the result is an owned own *string that
 // auto-frees (the borrowed `str_substring` would leak it inside a Vec<own *string>).
-extern "__maka_rt_substr_owned"  own *string __rt_substr    (string s, int start, int len);
+extern "__maka_rt_substr_owned"  own *string __rt_substr    (string s, int start, int len, int slen);
 
 // Byte at index `i` of a string (0..len-1), or -1 if out of range.  Strings
 // are not indexable with `s[i]`; this is the byte-level read accessor.
@@ -565,13 +565,13 @@ pub Vec<own *string> split_lines(string text) {
     mut int start = 0;
     mut int i = 0;
     while (i < n) {
-        if (str_byte(text, i) == 10) {       // '\n'
-            push(out, __rt_substr(text, start, i - start));
+        if (text[i] as int == 10) {          // '\n' - O(1) bounds-safe index (i < n)
+            push(out, __rt_substr(text, start, i - start, n));
             start = i + 1;
         }
         i = i + 1;
     }
-    if (start < n) { push(out, __rt_substr(text, start, n - start)); }
+    if (start < n) { push(out, __rt_substr(text, start, n - start, n)); }
     return out;
 }
 
@@ -583,7 +583,7 @@ pub Vec<own *string> read_lines(string path) {
 }
 
 // An owned copy of a string (heap own *string that auto-frees).
-pub own *string str_dup(string s) { return __rt_substr(s, 0, str_len(s) as int); }
+pub own *string str_dup(string s) { int n = str_len(s) as int; return __rt_substr(s, 0, n, n); }
 
 // =====================================================================
 // String - a growable, owned string.  Pure Maka.

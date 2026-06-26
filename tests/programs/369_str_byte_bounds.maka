@@ -1,0 +1,20 @@
+// Regression: str_byte(s, i) must return -1 for an out-of-range index, not read
+// past the buffer.  The C primitive checked only i < 0, not i >= length, so
+// str_byte on a heap string with a large index was an OOB heap read (ASan:
+// heap-buffer-overflow).  Now bounds-checked.  split_lines scans via O(1) indexed
+// access (text[i]) rather than str_byte, so its per-char cost stays O(1) while the
+// public str_byte gained its bounds check; this also exercises that refactor.
+import std.{str_byte, str_dup, str_len, split_lines};
+
+unit main() {
+  own *string s = str_dup("hi");    // heap-allocated "hi\0"
+  log(str_byte(s!, 0));             // 104 'h'
+  log(str_byte(s!, 1));             // 105 'i'
+  log(str_byte(s!, 2));             // -1: index == length, out of range
+  log(str_byte(s!, 1000));          // -1: was an OOB heap read past the buffer
+  log(str_byte(s!, -1));            // -1: negative
+  log(str_byte("", 0));             // -1: empty string
+
+  Vec<own *string> ls = split_lines("a\nbb\n\nccc\n");
+  log(ls.len as int);              // 4: "a","bb","","ccc" (trailing newline -> no empty final line)
+}
