@@ -7734,6 +7734,59 @@ impl<'a> Cx<'a> {
                 body.push_str("} break; ");
             }
             body.push_str("} ");
+        } else {
+            // Non-enum scrutinee (bool / int / literal / null): an if-chain, like
+            // emit_match but in the inline (tagged-name) context.  Without this the
+            // arms were never emitted and the match yielded its {0} default - an
+            // inline fn whose body is a non-enum match returned garbage.  Arms
+            // terminate with a label+goto so a user break/continue inside an arm
+            // still targets the enclosing loop.
+            self.yield_label_seq += 1;
+            let mend = format!("__mend_{}", self.yield_label_seq);
+            let sref = format!("__s_{}", mt);
+            for a in arms {
+                let pred = match &a.kind {
+                    HArmKind::Else => "1".to_string(),
+                    HArmKind::Null => format!("({} == NULL)", sref),
+                    HArmKind::Lit(e) => format!("({} == {})", sref, self.literal_str(e)),
+                    _ => "1".to_string(),
+                };
+                let guard = a.guard.as_ref().map(|g| self.emit_inline_expr(inline_f, g, tag));
+                let mut bindings = String::new();
+                if let Some(local) = a.scrut_binding {
+                    let li = &inline_f.locals[local.0 as usize];
+                    bindings.push_str(&format!("{} {} = {}; ", self.c_type(&li.ty), inline_local_name(inline_f, local, tag), sref));
+                }
+                let needs_body_guard = a.scrut_binding.is_some();
+                let (pred_combined, body_guard) = if needs_body_guard && guard.is_some() {
+                    (pred, guard)
+                } else {
+                    let combined = match (pred, guard) {
+                        (p, Some(g)) if p == "1" => format!("({})", g),
+                        (p, Some(g)) => format!("(({}) && ({}))", p, g),
+                        (p, None) => p,
+                    };
+                    (combined, None)
+                };
+                body.push_str(&format!("if ({}) {{ {}", pred_combined, bindings));
+                if let Some(g) = &body_guard { body.push_str(&format!("if ({}) {{ ", g)); }
+                let yexit_lbl = self.yield_exit_begin(inline_f, a);
+                for st in &a.body.stmts { body.push_str(&self.emit_inline_stmt(inline_f, st, tag, &fn_ret)); }
+                self.yield_exit_end(yexit_lbl, &mut body);
+                if let Some(v) = &a.value {
+                    let vs = self.emit_inline_expr(inline_f, v, tag);
+                    if needs_value { body.push_str(&format!("__rm_{} = ({}); ", mt, vs)); }
+                    else { body.push_str(&format!("(void)({}); ", vs)); }
+                }
+                let cu = self.arm_body_cleanup(inline_f, &a.body, Some(tag));
+                body.push_str(&cu);
+                if body_guard.is_some() {
+                    body.push_str(&format!(" goto {}; }} }} ", mend));
+                } else {
+                    body.push_str(&format!(" goto {}; }} ", mend));
+                }
+            }
+            body.push_str(&format!("{}: ; ", mend));
         }
         if needs_value { body.push_str(&format!("__rm_{}; ", mt)); }
         else { body.push_str("MAKA_UNIT; "); }

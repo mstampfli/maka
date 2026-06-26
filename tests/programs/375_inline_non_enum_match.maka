@@ -1,0 +1,22 @@
+// Regression: an inline fn whose body is a NON-ENUM match (bool / int / literal
+// scrutinee) returned its {0} default - emit_inline_match only emitted the enum
+// `switch` form, so a non-enum match produced no arms at all (e.g. classify(0)
+// returned 0 instead of 100).  It now has an if-chain path (tagged names,
+// label+goto), matching emit_match.  Verified ASan/LSan clean.
+import std.{String, StringOps, string_from};
+
+inline int classify(int n) {
+  return match (n == 0) { true { yield 100; } else { yield 200; } };
+}
+
+inline int pick(int n) {
+  return match (n) { 0 { yield 10; } 1 { yield 20; } else { String s = string_from("def"); yield s.length(); } };
+}
+
+unit main() {
+  log(classify(0));   // 100
+  log(classify(5));   // 200
+  log(pick(0));       // 10
+  log(pick(1));       // 20
+  log(pick(9));       // "def".length() = 3
+}
