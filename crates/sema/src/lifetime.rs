@@ -2702,19 +2702,89 @@ fn add_closure_drops_to_returns(
 }
 
 /// Run `g` on each immediate child block of a statement (read-only).
+// A `match`/`if`-expr arm BODY is a real child block, but it lives inside an
+// EXPRESSION, so the statement-level cases below would miss it.  These yield every
+// match-arm body reachable through a statement's expressions so block-walking
+// passes (closure-capture collection, freeable-closure drops, the cross-thread
+// borrow check) also descend into arm bodies - otherwise e.g. a closure declared
+// in an arm body never gets its env freed (leak).
+fn each_arm_body_in_expr(e: &HExpr, g: &mut dyn FnMut(&HBlock)) {
+    match &e.kind {
+        HExprKind::Match { scrutinee, arms, .. } => {
+            each_arm_body_in_expr(scrutinee, g);
+            for a in arms {
+                if let Some(gd) = &a.guard { each_arm_body_in_expr(gd, g); }
+                g(&a.body);
+                if let Some(v) = &a.value { each_arm_body_in_expr(v, g); }
+            }
+        }
+        HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } => { for a in args { each_arm_body_in_expr(a, g); } }
+        HExprKind::CallIndirect { callee, args } => { each_arm_body_in_expr(callee, g); for a in args { each_arm_body_in_expr(a, g); } }
+        HExprKind::Bin { lhs, rhs, .. } => { each_arm_body_in_expr(lhs, g); each_arm_body_in_expr(rhs, g); }
+        HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } | HExprKind::Cast { expr, .. }
+        | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) => each_arm_body_in_expr(expr, g),
+        HExprKind::AddrOfRef { place, .. } => each_arm_body_in_expr(place, g),
+        HExprKind::Field { base, .. } | HExprKind::ArrayToSlice { base, .. } => each_arm_body_in_expr(base, g),
+        HExprKind::Index { base, idx } => { each_arm_body_in_expr(base, g); each_arm_body_in_expr(idx, g); }
+        HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner) | HExprKind::Free(inner)
+        | HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => each_arm_body_in_expr(inner, g),
+        HExprKind::Closure { env_values, .. } => { for v in env_values { each_arm_body_in_expr(v, g); } }
+        HExprKind::VariantCtor { fields, .. } | HExprKind::Struct { fields, .. } => { for (_, fe) in fields { each_arm_body_in_expr(fe, g); } }
+        HExprKind::ArrayLit(es) => { for e2 in es { each_arm_body_in_expr(e2, g); } }
+        _ => {}
+    }
+}
+fn each_arm_body_in_expr_mut(e: &mut HExpr, g: &mut dyn FnMut(&mut HBlock)) {
+    match &mut e.kind {
+        HExprKind::Match { scrutinee, arms, .. } => {
+            each_arm_body_in_expr_mut(scrutinee, g);
+            for a in arms.iter_mut() {
+                if let Some(gd) = &mut a.guard { each_arm_body_in_expr_mut(gd, g); }
+                g(&mut a.body);
+                if let Some(v) = &mut a.value { each_arm_body_in_expr_mut(v, g); }
+            }
+        }
+        HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } => { for a in args { each_arm_body_in_expr_mut(a, g); } }
+        HExprKind::CallIndirect { callee, args } => { each_arm_body_in_expr_mut(callee, g); for a in args { each_arm_body_in_expr_mut(a, g); } }
+        HExprKind::Bin { lhs, rhs, .. } => { each_arm_body_in_expr_mut(lhs, g); each_arm_body_in_expr_mut(rhs, g); }
+        HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } | HExprKind::Cast { expr, .. }
+        | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) => each_arm_body_in_expr_mut(expr, g),
+        HExprKind::AddrOfRef { place, .. } => each_arm_body_in_expr_mut(place, g),
+        HExprKind::Field { base, .. } | HExprKind::ArrayToSlice { base, .. } => each_arm_body_in_expr_mut(base, g),
+        HExprKind::Index { base, idx } => { each_arm_body_in_expr_mut(base, g); each_arm_body_in_expr_mut(idx, g); }
+        HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner) | HExprKind::Free(inner)
+        | HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => each_arm_body_in_expr_mut(inner, g),
+        HExprKind::Closure { env_values, .. } => { for v in env_values { each_arm_body_in_expr_mut(v, g); } }
+        HExprKind::VariantCtor { fields, .. } | HExprKind::Struct { fields, .. } => { for (_, fe) in fields { each_arm_body_in_expr_mut(fe, g); } }
+        HExprKind::ArrayLit(es) => { for e2 in es { each_arm_body_in_expr_mut(e2, g); } }
+        _ => {}
+    }
+}
 fn for_each_child_block(s: &HStmt, g: &mut dyn FnMut(&HBlock)) {
     match s {
-        HStmt::If { then_b, else_b, .. } => { g(then_b); if let Some(b) = else_b { g(b); } }
-        HStmt::While { body, .. } | HStmt::Block(body) | HStmt::Unsafe(body, _)
-        | HStmt::ForC { body, .. } | HStmt::ForEach { body, .. } => g(body),
+        HStmt::If { cond, then_b, else_b, .. } => { each_arm_body_in_expr(cond, g); g(then_b); if let Some(b) = else_b { g(b); } }
+        HStmt::While { cond, body, .. } => { each_arm_body_in_expr(cond, g); g(body); }
+        HStmt::Block(body) | HStmt::Unsafe(body, _) => g(body),
+        HStmt::ForC { cond, body, .. } => { each_arm_body_in_expr(cond, g); g(body); }
+        HStmt::ForEach { src, body, .. } => { each_arm_body_in_expr(src, g); g(body); }
+        HStmt::Let { init, .. } => each_arm_body_in_expr(init, g),
+        HStmt::Assign { place, value, .. } => { each_arm_body_in_expr(place, g); each_arm_body_in_expr(value, g); }
+        HStmt::ExprStmt(e) => each_arm_body_in_expr(e, g),
+        HStmt::Return { value: Some(v), .. } | HStmt::Propagate { value: Some(v), .. } => each_arm_body_in_expr(v, g),
         _ => {}
     }
 }
 fn for_each_child_block_mut(s: &mut HStmt, g: &mut dyn FnMut(&mut HBlock)) {
     match s {
-        HStmt::If { then_b, else_b, .. } => { g(then_b); if let Some(b) = else_b { g(b); } }
-        HStmt::While { body, .. } | HStmt::Block(body) | HStmt::Unsafe(body, _)
-        | HStmt::ForC { body, .. } | HStmt::ForEach { body, .. } => g(body),
+        HStmt::If { cond, then_b, else_b, .. } => { each_arm_body_in_expr_mut(cond, g); g(then_b); if let Some(b) = else_b { g(b); } }
+        HStmt::While { cond, body, .. } => { each_arm_body_in_expr_mut(cond, g); g(body); }
+        HStmt::Block(body) | HStmt::Unsafe(body, _) => g(body),
+        HStmt::ForC { cond, body, .. } => { each_arm_body_in_expr_mut(cond, g); g(body); }
+        HStmt::ForEach { src, body, .. } => { each_arm_body_in_expr_mut(src, g); g(body); }
+        HStmt::Let { init, .. } => each_arm_body_in_expr_mut(init, g),
+        HStmt::Assign { place, value, .. } => { each_arm_body_in_expr_mut(place, g); each_arm_body_in_expr_mut(value, g); }
+        HStmt::ExprStmt(e) => each_arm_body_in_expr_mut(e, g),
+        HStmt::Return { value: Some(v), .. } | HStmt::Propagate { value: Some(v), .. } => each_arm_body_in_expr_mut(v, g),
         _ => {}
     }
 }

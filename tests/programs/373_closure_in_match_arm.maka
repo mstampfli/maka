@@ -1,0 +1,26 @@
+// Regression: a closure declared INSIDE a match-arm body must have its captured env
+// freed at arm exit.  The freeable-closure passes walk blocks via for_each_child_block,
+// which descended only into statement-level child blocks (if/while/for) and never a
+// match/if-expr arm body (a block that lives inside an expression), so a closure
+// declared in an arm body leaked its env.  Verified ASan/LSan clean.
+import std.{String, StringOps, string_from};
+
+int run(int c) {
+  mut int r = 0;
+  match (c) {
+    0 {
+      String cap = string_from("ARM-CAP");                 // owning capture
+      int(int) f = int(int x) [cap] x + cap.length();      // closure declared in the arm body
+      r = f(3) + f(4);
+    }
+    else { r = 1; }
+  };
+  return r;
+}
+
+unit main() {
+  mut int t = 0;
+  for (int i in 0..1000) { t = t + run(0); }   // env must be freed every iteration
+  log(t);        // (3+7)+(4+7) = 21 per call -> 21000
+  log(run(9));   // else -> 1
+}
