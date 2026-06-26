@@ -84,6 +84,10 @@ struct Cx<'a> {
     /// name + type) live at the call site.  A `propagate` inside the expansion
     /// early-returns the caller, so it frees these first or they leak.
     inline_propagate_drops: Vec<Vec<(String, HType)>>,
+    /// Like `inline_propagate_drops` but for a `break`/`continue` spliced from the
+    /// inline that targets the caller's loop: the caller's loop-body owning locals
+    /// to free before the jump (the jump skips the loop body's scope-exit drops).
+    inline_loop_drops: Vec<Vec<(String, HType)>>,
     /// Return type of the C function currently being emitted.  A `propagate`
     /// spliced from an inline body lowers to a bare `return` of THIS function, so
     /// its value must match this type even when the inline helper was monomorphized
@@ -123,6 +127,7 @@ impl<'a> Cx<'a> {
             inline_call_seq: 0,
             inline_ret_stack: Vec::new(),
             inline_propagate_drops: Vec::new(),
+            inline_loop_drops: Vec::new(),
             cur_c_func_ret: HType::Unit,
             yield_exit: Vec::new(),
             yield_label_seq: 0,
@@ -7654,11 +7659,83 @@ impl<'a> Cx<'a> {
     /// Expand an `inline` call as a GCC statement-expression. The body's `return X` becomes
     /// `__result = X; break;` (exiting a do-while), and `propagate X` becomes a real C `return X;`
     /// from the *outer* function (the C function that contains this expansion).
+    /// The C predicate for an inline match arm, over the tagged scrutinee temp
+    /// `__s_<mt>` (referred to as `sref`).  Mirrors `match_predicate` but for the
+    /// inline naming.  Handles enum variants (tag + optional payload lit-checks),
+    /// `else`, `null`, and literal arms.
+    fn inline_arm_pred(&self, a: &HMatchArm, sref: &str) -> String {
+        match &a.kind {
+            HArmKind::Else => "1".to_string(),
+            HArmKind::Null => format!("({} == NULL)", sref),
+            HArmKind::Lit(e) => format!("({} == {})", sref, self.literal_str(e)),
+            HArmKind::Variant { variant, lit_checks, enum_id, .. } => {
+                let info = self.sym.enum_info(*enum_id);
+                let v = &info.variants[*variant];
+                let tag_expr = if info.is_simple() { sref.to_string() } else { format!("{}.tag", sref) };
+                let mut parts = vec![format!("({} == {})", tag_expr, v.tag)];
+                for (i, c) in lit_checks.iter().enumerate() {
+                    if let Some(ce) = c {
+                        parts.push(format!("({}.payload.{}.{} == {})", sref, c_ident(&v.name), c_ident(&v.fields[i].name), self.literal_str(ce)));
+                    }
+                }
+                format!("({})", parts.join(" && "))
+            }
+        }
+    }
+
+    /// Bind an inline match arm's variant payload fields and scrut binding from the
+    /// tagged scrutinee temp `__s_<mt>` (`s` is the emitted scrutinee place, nulled
+    /// where a binding is moved out so the scrutinee's drop does not double-free).
+    /// Shared by the switch and if-chain forms.
+    fn emit_inline_arm_bindings(&mut self, inline_f: &HFunc, a: &HMatchArm, scrutinee: &HExpr, s: &str, mt: &str, tag: &str) -> String {
+        let mut out = String::new();
+        if let HArmKind::Variant { enum_id, variant, bindings, .. } = &a.kind {
+            let vinfo = self.sym.enum_info(*enum_id).variants[*variant].clone();
+            let scrut_owns = matches!(&scrutinee.kind, HExprKind::Local(_)) && self.drop_ty_owns(&scrutinee.ty);
+            for (i, b) in bindings.iter().enumerate() {
+                if let Some(local) = b {
+                    let lty = inline_f.locals[local.0 as usize].ty.clone();
+                    let nm = inline_local_name(inline_f, *local, tag);
+                    out.push_str(&format!("{} {} = __s_{}.payload.{}.{}; ",
+                        self.c_type(&lty), nm, mt, c_ident(&vinfo.name), c_ident(&vinfo.fields[i].name)));
+                    if scrut_owns && self.drop_ty_owns(&lty) && self.arm_moves_binding(a, *local) {
+                        out.push_str(&format!("{}.payload.{}.{} = ({}){{0}}; ",
+                            s, c_ident(&vinfo.name), c_ident(&vinfo.fields[i].name), self.c_type(&lty)));
+                    }
+                }
+            }
+        }
+        if let Some(local) = a.scrut_binding {
+            let li = &inline_f.locals[local.0 as usize];
+            out.push_str(&format!("{} {} = __s_{}; ", self.c_type(&li.ty), inline_local_name(inline_f, local, tag), mt));
+        }
+        out
+    }
+
+    /// Emit an inline match arm's body, value assignment, and scope-exit drops
+    /// (shared by the switch and if-chain forms).  `mt`/`fn_ret` thread the result
+    /// temp and the enclosing expansion's return type for `return` inside the arm.
+    fn emit_inline_arm_body(&mut self, inline_f: &HFunc, a: &HMatchArm, mt: &str, tag: &str, needs_value: bool, fn_ret: &HType) -> String {
+        let mut out = String::new();
+        let yexit_lbl = self.yield_exit_begin(inline_f, a);
+        for st in &a.body.stmts { out.push_str(&self.emit_inline_stmt(inline_f, st, tag, fn_ret)); }
+        self.yield_exit_end(yexit_lbl, &mut out);
+        if let Some(v) = &a.value {
+            let vs = self.emit_inline_expr(inline_f, v, tag);
+            if needs_value { out.push_str(&format!("__rm_{} = ({}); ", mt, vs)); }
+            else { out.push_str(&format!("(void)({}); ", vs)); }
+        }
+        out.push_str(&self.arm_body_cleanup(inline_f, &a.body, Some(tag)));
+        out
+    }
+
     /// Emit a `match` that appears inside an inline body, renaming locals with the
-    /// expansion `tag` and routing arm bodies through `emit_inline_stmt` (so an
-    /// arm `return` / `propagate` lowers against the enclosing expansion).  Only
-    /// the enum-tag switch shape is handled; that covers the stdlib `Try`/`Result`
-    /// helpers that motivate generic inlines.
+    /// expansion `tag` and routing arm bodies through `emit_inline_stmt` (so an arm
+    /// `return` / `propagate` / `break` / `continue` lowers against the enclosing
+    /// expansion / caller loop).  Uses a `switch` for a pure enum-tag dispatch, and
+    /// an if-chain (label + goto, so a user break/continue targets the caller's
+    /// loop, not the dispatch) for everything else - guards, lit-checks, non-enum
+    /// scrutinees, or any arm that itself contains a break/continue.
     fn emit_inline_match(&mut self, inline_f: &HFunc, scrutinee: &HExpr, arms: &[HMatchArm], match_result_ty: &HType, tag: &str) -> String {
         self.inline_call_seq += 1;
         let mt = format!("{}_{}", tag, self.inline_call_seq);
@@ -7666,19 +7743,22 @@ impl<'a> Cx<'a> {
         let scrut_c = self.c_type(&scrutinee.ty);
         let needs_value = !matches!(match_result_ty, HType::Unit);
         let res_c = self.c_type(match_result_ty);
-        // The arm-body result type for `return` is the enclosing inline expansion's.
         let fn_ret = self.inline_ret_stack.last().cloned().unwrap_or(HType::Unit);
         let mut body = String::new();
         body.push_str("__extension__ ({ ");
         body.push_str(&format!("{} __s_{} = {}; ", scrut_c, mt, s));
         if needs_value { body.push_str(&format!("{} __rm_{} = {{0}}; ", res_c, mt)); }
-        let eid = self.match_as_switch(&scrutinee.ty, arms);
-        if let Some(eid) = eid {
-            let tag_expr = if self.sym.enum_info(eid).is_simple() {
-                format!("__s_{}", mt)
-            } else {
-                format!("__s_{}.tag", mt)
-            };
+
+        // A switch captures `break`, so an arm containing a (caller-targeting)
+        // break/continue must use the if-chain even for a pure enum dispatch.
+        let arms_jump = arms.iter().any(|a|
+            a.guard.as_ref().is_some_and(expr_has_break_continue)
+            || block_has_break_continue(&a.body)
+            || a.value.as_ref().is_some_and(expr_has_break_continue));
+        let switch_eid = if arms_jump { None } else { self.match_as_switch(&scrutinee.ty, arms) };
+
+        if let Some(eid) = switch_eid {
+            let tag_expr = if self.sym.enum_info(eid).is_simple() { format!("__s_{}", mt) } else { format!("__s_{}.tag", mt) };
             body.push_str(&format!("switch ({}) {{ ", tag_expr));
             for a in arms {
                 match &a.kind {
@@ -7688,76 +7768,26 @@ impl<'a> Cx<'a> {
                     }
                     _ => body.push_str("default: { "),
                 }
-                // Variant field bindings, read from the tagged scrutinee temp.
-                if let HArmKind::Variant { enum_id, variant, bindings, .. } = &a.kind {
-                    let vinfo = self.sym.enum_info(*enum_id).variants[*variant].clone();
-                    // If the scrutinee is an owning value we will drop later (it is a
-                    // Local appended to the inline body's heap_to_free), an arm that
-                    // MOVES one of its bindings out (e.g. `Ok { value } { return value; }`,
-                    // which becomes `__r = value; goto end;` and so reaches the cleanup)
-                    // must null that field in the original scrutinee, or the cleanup
-                    // drop double-frees the escaped payload.  `value_moves_binding`
-                    // already excludes bindings merely borrowed for a read.
-                    let scrut_owns = matches!(&scrutinee.kind, HExprKind::Local(_))
-                        && self.drop_ty_owns(&scrutinee.ty);
-                    for (i, b) in bindings.iter().enumerate() {
-                        if let Some(local) = b {
-                            let li = &inline_f.locals[local.0 as usize];
-                            let lty = li.ty.clone();
-                            let nm = inline_local_name(inline_f, *local, tag);
-                            body.push_str(&format!("{} {} = __s_{}.payload.{}.{}; ",
-                                self.c_type(&lty), nm, mt, c_ident(&vinfo.name), c_ident(&vinfo.fields[i].name)));
-                            if scrut_owns && self.drop_ty_owns(&lty) && self.arm_moves_binding(a, *local) {
-                                body.push_str(&format!("{}.payload.{}.{} = ({}){{0}}; ",
-                                    s, c_ident(&vinfo.name), c_ident(&vinfo.fields[i].name), self.c_type(&lty)));
-                            }
-                        }
-                    }
-                }
-                if let Some(local) = a.scrut_binding {
-                    let li = &inline_f.locals[local.0 as usize];
-                    body.push_str(&format!("{} {} = __s_{}; ", self.c_type(&li.ty), inline_local_name(inline_f, local, tag), mt));
-                }
-                let yexit_lbl = self.yield_exit_begin(inline_f, a);
-                for st in &a.body.stmts {
-                    body.push_str(&self.emit_inline_stmt(inline_f, st, tag, &fn_ret));
-                }
-                self.yield_exit_end(yexit_lbl, &mut body);
-                if let Some(v) = &a.value {
-                    let vs = self.emit_inline_expr(inline_f, v, tag);
-                    if needs_value { body.push_str(&format!("__rm_{} = ({}); ", mt, vs)); }
-                    else { body.push_str(&format!("(void)({}); ", vs)); }
-                }
-                // Drop owning locals declared in the inline arm body (tagged names).
-                let cu = self.arm_body_cleanup(inline_f, &a.body, Some(tag));
-                body.push_str(&cu);
+                body.push_str(&self.emit_inline_arm_bindings(inline_f, a, scrutinee, &s, &mt, tag));
+                body.push_str(&self.emit_inline_arm_body(inline_f, a, &mt, tag, needs_value, &fn_ret));
                 body.push_str("} break; ");
             }
             body.push_str("} ");
         } else {
-            // Non-enum scrutinee (bool / int / literal / null): an if-chain, like
-            // emit_match but in the inline (tagged-name) context.  Without this the
-            // arms were never emitted and the match yielded its {0} default - an
-            // inline fn whose body is a non-enum match returned garbage.  Arms
-            // terminate with a label+goto so a user break/continue inside an arm
-            // still targets the enclosing loop.
+            // If-chain: handles non-enum scrutinees, guards, lit-checks, AND any arm
+            // containing a break/continue (the switch would swallow it).  Arms
+            // terminate with goto, so a user break/continue falls through to the
+            // caller's loop.
             self.yield_label_seq += 1;
             let mend = format!("__mend_{}", self.yield_label_seq);
             let sref = format!("__s_{}", mt);
             for a in arms {
-                let pred = match &a.kind {
-                    HArmKind::Else => "1".to_string(),
-                    HArmKind::Null => format!("({} == NULL)", sref),
-                    HArmKind::Lit(e) => format!("({} == {})", sref, self.literal_str(e)),
-                    _ => "1".to_string(),
-                };
+                let pred = self.inline_arm_pred(a, &sref);
                 let guard = a.guard.as_ref().map(|g| self.emit_inline_expr(inline_f, g, tag));
-                let mut bindings = String::new();
-                if let Some(local) = a.scrut_binding {
-                    let li = &inline_f.locals[local.0 as usize];
-                    bindings.push_str(&format!("{} {} = {}; ", self.c_type(&li.ty), inline_local_name(inline_f, local, tag), sref));
-                }
-                let needs_body_guard = a.scrut_binding.is_some();
+                let bindings = self.emit_inline_arm_bindings(inline_f, a, scrutinee, &s, &mt, tag);
+                // A variant or scrut-bound arm's guard must run AFTER bindings (which
+                // it may read), so place it inside the arm body, not in the predicate.
+                let needs_body_guard = a.scrut_binding.is_some() || matches!(&a.kind, HArmKind::Variant { .. });
                 let (pred_combined, body_guard) = if needs_body_guard && guard.is_some() {
                     (pred, guard)
                 } else {
@@ -7770,16 +7800,7 @@ impl<'a> Cx<'a> {
                 };
                 body.push_str(&format!("if ({}) {{ {}", pred_combined, bindings));
                 if let Some(g) = &body_guard { body.push_str(&format!("if ({}) {{ ", g)); }
-                let yexit_lbl = self.yield_exit_begin(inline_f, a);
-                for st in &a.body.stmts { body.push_str(&self.emit_inline_stmt(inline_f, st, tag, &fn_ret)); }
-                self.yield_exit_end(yexit_lbl, &mut body);
-                if let Some(v) = &a.value {
-                    let vs = self.emit_inline_expr(inline_f, v, tag);
-                    if needs_value { body.push_str(&format!("__rm_{} = ({}); ", mt, vs)); }
-                    else { body.push_str(&format!("(void)({}); ", vs)); }
-                }
-                let cu = self.arm_body_cleanup(inline_f, &a.body, Some(tag));
-                body.push_str(&cu);
+                body.push_str(&self.emit_inline_arm_body(inline_f, a, &mt, tag, needs_value, &fn_ret));
                 if body_guard.is_some() {
                     body.push_str(&format!(" goto {}; }} }} ", mend));
                 } else {
@@ -7828,11 +7849,11 @@ impl<'a> Cx<'a> {
         self.emit_inline_expr(inline_f, v, tag)
     }
 
-    fn emit_inline_expansion(&mut self, caller_f: &HFunc, callee: FuncId, args: &[HExpr], result_ty: &HType, prop_drops: Vec<(String, HType)>) -> String {
+    fn emit_inline_expansion(&mut self, caller_f: &HFunc, callee: FuncId, args: &[HExpr], result_ty: &HType, prop_drops: Vec<(String, HType)>, loop_drops: Vec<(String, HType)>) -> String {
         // Top-level expansion: args live in the caller's C function, so render
         // them with the ordinary emitter.
         let arg_strs: Vec<String> = args.iter().map(|a| self.emit_expr(caller_f, a)).collect();
-        self.emit_inline_expansion_args(callee, &arg_strs, result_ty, prop_drops)
+        self.emit_inline_expansion_args(callee, &arg_strs, result_ty, prop_drops, loop_drops)
     }
 
     /// Inline expansion given PRE-RENDERED argument strings.  Splitting argument
@@ -7841,7 +7862,7 @@ impl<'a> Cx<'a> {
     /// inline's tagged scope (via `emit_inline_expr`), while a top-level call
     /// renders them in the caller's scope (via `emit_expr`).  The nested call
     /// still gets its own fresh `tag` for its locals, so names never collide.
-    fn emit_inline_expansion_args(&mut self, callee: FuncId, arg_strs: &[String], result_ty: &HType, prop_drops: Vec<(String, HType)>) -> String {
+    fn emit_inline_expansion_args(&mut self, callee: FuncId, arg_strs: &[String], result_ty: &HType, prop_drops: Vec<(String, HType)>, loop_drops: Vec<(String, HType)>) -> String {
         // Find the inline HFunc by id.
         let inline_f = match self.sym.funcs.iter().find(|hf| hf.id == callee).cloned() {
             Some(hf) => hf,
@@ -7886,19 +7907,23 @@ impl<'a> Cx<'a> {
             }
         }
 
-        // Emit the body with rewrites.  Using `do/while(0)` + `break;` for `return`
-        // would silently exit a user-written loop instead of the inline expansion when
-        // `return` fires from inside a `while`/`for`.  Use a labeled goto so the
-        // semantics of `return` are independent of any surrounding loops.
-        out.push_str("do { ");
+        // Emit the body in a PLAIN block, not `do { ... } while (0)`.  `return`
+        // already exits via `goto end_<tag>`, so the do/while wrapper is dead weight -
+        // and being a C loop it would CAPTURE a user `break`/`continue` written in the
+        // inline body (which is meant to target the caller's loop), silently exiting
+        // the match/expansion instead.  A plain block lets such a jump fall through to
+        // the real enclosing loop; codegen emits its drops at the jump (below).
+        out.push_str("{ ");
         self.inline_ret_stack.push(result_ty.clone());
         self.inline_propagate_drops.push(prop_drops);
+        self.inline_loop_drops.push(loop_drops);
         for stmt in &inline_f.body.stmts {
             out.push_str(&self.emit_inline_stmt(&inline_f, stmt, &tag, result_ty));
         }
+        self.inline_loop_drops.pop();
         self.inline_propagate_drops.pop();
         self.inline_ret_stack.pop();
-        out.push_str("} while (0); ");
+        out.push_str("} ");
         out.push_str(&format!("end_{}: ; ", tag));
 
         // Auto-free any heap/own locals the inline owns.  Ownership transferred
@@ -8032,8 +8057,24 @@ impl<'a> Cx<'a> {
                 s.push_str("} ");
                 s
             }
-            HStmt::Break { .. } => "break; ".into(),
-            HStmt::Continue { .. } => "continue; ".into(),
+            HStmt::Break { heap_drops, .. } | HStmt::Continue { heap_drops, .. } => {
+                // A break/continue spliced from an inline body.  If it targets a loop
+                // WITHIN the inline, heap_drops/inline_loop_drops are empty and this is
+                // a plain jump.  If it is a caller-targeting jump (no inline-internal
+                // loop), free the inline's own owning locals live here (heap_drops, set
+                // return-like by the lifetime pass) PLUS the caller's loop-body owning
+                // locals (threaded from the call site) - the jump skips both frames'
+                // scope-exit drops.
+                let inline_drops: Vec<(String, HType)> = heap_drops.iter().map(|id| {
+                    let li = &inline_f.locals[id.0 as usize];
+                    (inline_local_name(inline_f, *id, tag), li.ty.clone())
+                }).collect();
+                let mut dc = self.capture_drops(&inline_drops);
+                let caller_loop = self.inline_loop_drops.last().cloned().unwrap_or_default();
+                dc.push_str(&self.capture_drops(&caller_loop));
+                let kw = if matches!(s, HStmt::Break { .. }) { "break" } else { "continue" };
+                format!("{}{}; ", dc, kw)
+            }
             HStmt::ForC { init, cond, step, body, .. } => {
                 let mut s = self.emit_inline_stmt(inline_f, init, tag, result_ty);
                 let cs = self.emit_inline_expr(inline_f, cond, tag);
@@ -8132,17 +8173,21 @@ impl<'a> Cx<'a> {
             // scope; the nested expansion then takes its own fresh tag.  Without
             // this the args would fall through to the untagged emitter and emit
             // undeclared `a_0`-style names.
-            HExprKind::InlineCall { callee, args, propagate_drops } => {
+            HExprKind::InlineCall { callee, args, propagate_drops, loop_jump_drops } => {
                 let arg_strs: Vec<String> = args.iter()
                     .map(|a| self.emit_inline_expr(inline_f, a, tag))
                     .collect();
                 // Nested inline call: the caller's locals here are the OUTER inline's
-                // tagged locals, so resolve the propagate drops in that tagged scope.
+                // tagged locals, so resolve both drop sets in that tagged scope.
                 let pd: Vec<(String, HType)> = propagate_drops.iter().map(|id| {
                     let li = &inline_f.locals[id.0 as usize];
                     (inline_local_name(inline_f, *id, tag), li.ty.clone())
                 }).collect();
-                self.emit_inline_expansion_args(*callee, &arg_strs, &e.ty, pd)
+                let ld: Vec<(String, HType)> = loop_jump_drops.iter().map(|id| {
+                    let li = &inline_f.locals[id.0 as usize];
+                    (inline_local_name(inline_f, *id, tag), li.ty.clone())
+                }).collect();
+                self.emit_inline_expansion_args(*callee, &arg_strs, &e.ty, pd, ld)
             }
             // Everything else: fall back to ordinary emit_expr but with a dummy HFunc that holds
             // the inline locals so name lookups resolve. For simplicity, use the inline_f directly.
@@ -8837,12 +8882,16 @@ impl<'a> Cx<'a> {
                     format!("(__extension__ ({{ Callable_{0} __c = ({1}); __c.code({2}); }}))", key, c, all_args)
                 }
             }
-            HExprKind::InlineCall { callee, args, propagate_drops } => {
+            HExprKind::InlineCall { callee, args, propagate_drops, loop_jump_drops } => {
                 let pd: Vec<(String, HType)> = propagate_drops.iter().map(|id| {
                     let li = &f.locals[id.0 as usize];
                     (local_name(*id, &li.name), li.ty.clone())
                 }).collect();
-                self.emit_inline_expansion(f, *callee, args, &e.ty, pd)
+                let ld: Vec<(String, HType)> = loop_jump_drops.iter().map(|id| {
+                    let li = &f.locals[id.0 as usize];
+                    (local_name(*id, &li.name), li.ty.clone())
+                }).collect();
+                self.emit_inline_expansion(f, *callee, args, &e.ty, pd, ld)
             }
             HExprKind::Transfer(inner) => self.emit_expr(f, inner),
             HExprKind::EnumTag(inner) => {

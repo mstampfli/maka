@@ -662,8 +662,11 @@ pub enum HExprKind {
     /// this call site - the lifetime pass fills it.  A `propagate` inside the inline
     /// body early-returns the caller's C frame, so codegen must free these before
     /// that return or they leak (the inline's own scope-exit drops only cover the
-    /// inline's frame, not the caller's).
-    InlineCall { callee: FuncId, args: Vec<HExpr>, propagate_drops: Vec<LocalId> },
+    /// inline's frame, not the caller's).  `loop_jump_drops` is the analogue for a
+    /// `break`/`continue` spliced from the inline that targets the CALLER's enclosing
+    /// loop: the caller's loop-body owning locals live at this call site, freed
+    /// before the jump.
+    InlineCall { callee: FuncId, args: Vec<HExpr>, propagate_drops: Vec<LocalId>, loop_jump_drops: Vec<LocalId> },
     /// Closure value: produces a Callable_KEY with the lifted fn pointer + an env struct.
     /// `env_struct` is the StructId of the synthetic env type; `env_values` lists the field-initializers
     /// in declaration order.  `capture_lids` parallels `env_values` and lists the `LocalId`

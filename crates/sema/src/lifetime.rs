@@ -2213,7 +2213,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
             HExprKind::Call { args, .. } => {
                 for a in args { visit_matches_in_expr(sym, locals, a, scope_chain, loop_start, moved); }
             }
-            HExprKind::InlineCall { args, propagate_drops, .. } => {
+            HExprKind::InlineCall { args, propagate_drops, loop_jump_drops, .. } => {
                 // A `propagate` inside the inlined body early-returns the CALLER's C
                 // frame, so it must free the caller's owning locals live here - the
                 // same set a `return` at this point drops (all in-scope owning locals
@@ -2226,6 +2226,21 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     }
                 }
                 *propagate_drops = drops;
+                // A caller-targeting `break`/`continue` spliced from the inline exits
+                // the CALLER's enclosing loop, so it must free the caller's loop-body
+                // owning locals (the scope chain from the loop start), not the whole
+                // function.  Only meaningful when this call is inside a loop; if it is
+                // not and the inline jumps, the call-site check reports an error.
+                if let Some(start) = loop_start {
+                    let mut ldrops = Vec::new();
+                    for scope in scope_chain.iter().skip(start) {
+                        for id in scope.iter().rev() {
+                            if moved.contains(id) { continue; }
+                            ldrops.push(*id);
+                        }
+                    }
+                    *loop_jump_drops = ldrops;
+                }
                 for a in args { visit_matches_in_expr(sym, locals, a, scope_chain, loop_start, moved); }
             }
             HExprKind::CallIndirect { callee, args } => {
@@ -2418,6 +2433,21 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     if let Some(start) = loop_start {
                         let mut drops = Vec::new();
                         for scope in scope_chain.iter().skip(start).rev() {
+                            for id in scope.iter().rev() {
+                                if moved.contains(id) { continue; }
+                                drops.push(*id);
+                            }
+                        }
+                        *heap_drops = drops;
+                    } else {
+                        // No enclosing loop in THIS function: a caller-targeting
+                        // break/continue inside an `inline` body, which is spliced
+                        // into the caller's loop.  It abandons the whole inline
+                        // frame, so free every live owning local exactly like a
+                        // return does.  (In a non-inline fn a break here is invalid
+                        // and rejected elsewhere, so this only fires for inlines.)
+                        let mut drops = Vec::new();
+                        for scope in scope_chain.iter() {
                             for id in scope.iter().rev() {
                                 if moved.contains(id) { continue; }
                                 drops.push(*id);
