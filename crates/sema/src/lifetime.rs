@@ -2153,22 +2153,28 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
     // fill its heap_to_free as a real nested scope.  A local moved OUT by the arm
     // value (`yield s`) runs after the body and is excluded so it is not also
     // dropped here (which would double-free its new owner).
-    fn visit_matches_in_expr(sym: &SymTab, locals: &[LocalInfo], e: &mut HExpr, scope_chain: &mut Vec<Vec<LocalId>>, loop_start: Option<usize>, moved: &mut std::collections::HashSet<LocalId>) {
+    fn visit_matches_in_expr(sym: &SymTab, locals: &[LocalInfo], e: &mut HExpr, scope_chain: &mut Vec<Vec<LocalId>>, loop_start: Option<usize>, moved: &mut std::collections::HashSet<LocalId>, owning_params: &std::collections::HashSet<LocalId>) {
         match &mut e.kind {
             HExprKind::Match { scrutinee, arms, .. } => {
                 // Scrutinee evaluates first; its moves are in effect for every arm.
-                visit_matches_in_expr(sym, locals, scrutinee, scope_chain, loop_start, moved);
+                visit_matches_in_expr(sym, locals, scrutinee, scope_chain, loop_start, moved, owning_params);
                 // Arms are alternatives, so each starts from the same baseline state.
                 let baseline = moved.clone();
-                // Enclosing owning locals an arm could move out, which the parent
-                // would otherwise double-free at scope exit.
-                let outer: std::collections::HashSet<LocalId> = scope_chain.iter().flatten().copied().collect();
+                // Enclosing owning values an arm could move out, which the parent
+                // would otherwise double-free at scope exit: enclosing owning locals
+                // (the scope chain) PLUS owning parameters.  Params are not in the
+                // scope chain (they are dropped by the separate param-append pass),
+                // so without including them here a param consumed in one arm gets no
+                // compensating drop on the sibling arms and leaks there (the mirror
+                // of the if/else handler, which already covers params via raw esc).
+                let outer: std::collections::HashSet<LocalId> =
+                    scope_chain.iter().flatten().copied().chain(owning_params.iter().copied()).collect();
                 let mut arm_moves: Vec<(std::collections::HashSet<LocalId>, bool)> = Vec::with_capacity(arms.len());
                 for a in arms.iter_mut() {
                     if let Some(g) = &mut a.guard {
-                        visit_matches_in_expr(sym, locals, g, scope_chain, loop_start, moved);
+                        visit_matches_in_expr(sym, locals, g, scope_chain, loop_start, moved, owning_params);
                     }
-                    let (esc, div) = visit_block(sym, locals, &mut a.body, scope_chain, loop_start, &baseline);
+                    let (esc, div) = visit_block(sym, locals, &mut a.body, scope_chain, loop_start, &baseline, owning_params);
                     // Outer owning locals this arm moves out (body moves + value moves).
                     let mut mv: std::collections::HashSet<LocalId> = esc.intersection(&outer).copied().collect();
                     if let Some(v) = &mut a.value {
@@ -2184,7 +2190,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                             a.body.heap_to_free.retain(|id| !vmoved.contains(id));
                         }
                         for id in vmoved.intersection(&outer) { mv.insert(*id); }
-                        visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, moved);
+                        visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, moved, owning_params);
                     }
                     arm_moves.push((mv, div));
                 }
@@ -2211,7 +2217,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                 for id in union { moved.insert(id); }
             }
             HExprKind::Call { args, .. } => {
-                for a in args { visit_matches_in_expr(sym, locals, a, scope_chain, loop_start, moved); }
+                for a in args { visit_matches_in_expr(sym, locals, a, scope_chain, loop_start, moved, owning_params); }
             }
             HExprKind::InlineCall { args, propagate_drops, loop_jump_drops, .. } => {
                 // A `propagate` inside the inlined body early-returns the CALLER's C
@@ -2255,41 +2261,41 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     }
                 }
                 *loop_jump_drops = ldrops;
-                for a in args { visit_matches_in_expr(sym, locals, a, scope_chain, loop_start, moved); }
+                for a in args { visit_matches_in_expr(sym, locals, a, scope_chain, loop_start, moved, owning_params); }
             }
             HExprKind::CallIndirect { callee, args } => {
-                visit_matches_in_expr(sym, locals, callee, scope_chain, loop_start, moved);
-                for a in args { visit_matches_in_expr(sym, locals, a, scope_chain, loop_start, moved); }
+                visit_matches_in_expr(sym, locals, callee, scope_chain, loop_start, moved, owning_params);
+                for a in args { visit_matches_in_expr(sym, locals, a, scope_chain, loop_start, moved, owning_params); }
             }
             HExprKind::Bin { lhs, rhs, .. } => {
-                visit_matches_in_expr(sym, locals, lhs, scope_chain, loop_start, moved);
-                visit_matches_in_expr(sym, locals, rhs, scope_chain, loop_start, moved);
+                visit_matches_in_expr(sym, locals, lhs, scope_chain, loop_start, moved, owning_params);
+                visit_matches_in_expr(sym, locals, rhs, scope_chain, loop_start, moved, owning_params);
             }
             HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. }
             | HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. }
-            | HExprKind::DropWrite(expr) => visit_matches_in_expr(sym, locals, expr, scope_chain, loop_start, moved),
-            HExprKind::AddrOfRef { place, .. } => visit_matches_in_expr(sym, locals, place, scope_chain, loop_start, moved),
-            HExprKind::Field { base, .. } | HExprKind::ArrayToSlice { base, .. } => visit_matches_in_expr(sym, locals, base, scope_chain, loop_start, moved),
+            | HExprKind::DropWrite(expr) => visit_matches_in_expr(sym, locals, expr, scope_chain, loop_start, moved, owning_params),
+            HExprKind::AddrOfRef { place, .. } => visit_matches_in_expr(sym, locals, place, scope_chain, loop_start, moved, owning_params),
+            HExprKind::Field { base, .. } | HExprKind::ArrayToSlice { base, .. } => visit_matches_in_expr(sym, locals, base, scope_chain, loop_start, moved, owning_params),
             HExprKind::Index { base, idx } => {
-                visit_matches_in_expr(sym, locals, base, scope_chain, loop_start, moved);
-                visit_matches_in_expr(sym, locals, idx, scope_chain, loop_start, moved);
+                visit_matches_in_expr(sym, locals, base, scope_chain, loop_start, moved, owning_params);
+                visit_matches_in_expr(sym, locals, idx, scope_chain, loop_start, moved, owning_params);
             }
             HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner) | HExprKind::Free(inner)
-            | HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => visit_matches_in_expr(sym, locals, inner, scope_chain, loop_start, moved),
+            | HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => visit_matches_in_expr(sym, locals, inner, scope_chain, loop_start, moved, owning_params),
             HExprKind::Closure { env_values, .. } => {
-                for v in env_values { visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, moved); }
+                for v in env_values { visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, moved, owning_params); }
             }
             HExprKind::VariantCtor { fields, .. } | HExprKind::Struct { fields, .. } => {
-                for (_, fe) in fields { visit_matches_in_expr(sym, locals, fe, scope_chain, loop_start, moved); }
+                for (_, fe) in fields { visit_matches_in_expr(sym, locals, fe, scope_chain, loop_start, moved, owning_params); }
             }
             HExprKind::ArrayLit(es) => {
-                for e2 in es { visit_matches_in_expr(sym, locals, e2, scope_chain, loop_start, moved); }
+                for e2 in es { visit_matches_in_expr(sym, locals, e2, scope_chain, loop_start, moved, owning_params); }
             }
             _ => {}
         }
     }
 
-    fn visit_block(sym: &SymTab, locals: &[LocalInfo], b: &mut HBlock, scope_chain: &mut Vec<Vec<LocalId>>, loop_start: Option<usize>, inherited: &std::collections::HashSet<LocalId>) -> (std::collections::HashSet<LocalId>, bool) {
+    fn visit_block(sym: &SymTab, locals: &[LocalInfo], b: &mut HBlock, scope_chain: &mut Vec<Vec<LocalId>>, loop_start: Option<usize>, inherited: &std::collections::HashSet<LocalId>, owning_params: &std::collections::HashSet<LocalId>) -> (std::collections::HashSet<LocalId>, bool) {
         scope_chain.push(Vec::new());
         // Track moves up to each position in the block.  Start from the moves
         // already in effect at block entry (made by enclosing statements), so a
@@ -2310,7 +2316,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     // Check init for moves
                     moved_locals_in_expr(sym, init, &mut moved);
                     // Fill drops for any match-expr arm bodies inside the init.
-                    visit_matches_in_expr(sym, locals, init, scope_chain, loop_start, &mut moved);
+                    visit_matches_in_expr(sym, locals, init, scope_chain, loop_start, &mut moved, owning_params);
                     // A direct-Local init of an owning type transfers ownership.
                     if ty_owns_heap(sym, &init.ty) {
                         if let HExprKind::Local(id) = init.kind { moved.insert(id); }
@@ -2329,7 +2335,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                 }
                 HStmt::Assign { place, value, drop_old, .. } => {
                     moved_locals_in_expr(sym, value, &mut moved);
-                    visit_matches_in_expr(sym, locals, value, scope_chain, loop_start, &mut moved);
+                    visit_matches_in_expr(sym, locals, value, scope_chain, loop_start, &mut moved, owning_params);
                     if ty_owns_heap(sym, &value.ty) {
                         if let HExprKind::Local(id) = value.kind { moved.insert(id); }
                     }
@@ -2348,7 +2354,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                 }
                 HStmt::ExprStmt(e) => {
                     moved_locals_in_expr(sym, e, &mut moved);
-                    visit_matches_in_expr(sym, locals, e, scope_chain, loop_start, &mut moved);
+                    visit_matches_in_expr(sym, locals, e, scope_chain, loop_start, &mut moved, owning_params);
                 }
                 HStmt::Return { value, heap_drops, .. } => {
                     // The set of heap locals to drop at return = union of all scopes minus the return value.
@@ -2360,7 +2366,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                             }
                         }
                         moved_locals_in_expr(sym, v, &mut moved);
-                        visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, &mut moved);
+                        visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, &mut moved, owning_params);
                     }
                     let mut drops = Vec::new();
                     for scope in scope_chain.iter() {
@@ -2373,10 +2379,10 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     diverges = true;
                 }
                 HStmt::If { cond, then_b, else_b, .. } => {
-                    visit_matches_in_expr(sym, locals, cond, scope_chain, loop_start, &mut moved);
-                    let (then_esc, then_div) = visit_block(sym, locals, then_b, scope_chain, loop_start, &mut moved);
+                    visit_matches_in_expr(sym, locals, cond, scope_chain, loop_start, &mut moved, owning_params);
+                    let (then_esc, then_div) = visit_block(sym, locals, then_b, scope_chain, loop_start, &mut moved, owning_params);
                     let (else_esc, else_div) = match else_b {
-                        Some(eb) => visit_block(sym, locals, eb, scope_chain, loop_start, &moved),
+                        Some(eb) => visit_block(sym, locals, eb, scope_chain, loop_start, &moved, owning_params),
                         None => (std::collections::HashSet::new(), false),
                     };
                     // Drop elaboration over the paths that actually FALL THROUGH
@@ -2425,18 +2431,18 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     if then_div && else_div { diverges = true; }
                 }
                 HStmt::While { cond, body, .. } => {
-                    visit_matches_in_expr(sym, locals, cond, scope_chain, loop_start, &mut moved);
-                    let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved);
+                    visit_matches_in_expr(sym, locals, cond, scope_chain, loop_start, &mut moved, owning_params);
+                    let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved, owning_params);
                 }
                 // An unconditional nested block always runs, so its escaped moves
                 // are moves for the parent too, and its divergence is the parent's.
                 HStmt::Block(b) => {
-                    let (esc, div) = visit_block(sym, locals, b, scope_chain, loop_start, &mut moved);
+                    let (esc, div) = visit_block(sym, locals, b, scope_chain, loop_start, &mut moved, owning_params);
                     for id in esc { moved.insert(id); }
                     if div { diverges = true; }
                 }
                 HStmt::Unsafe(b, _) => {
-                    let (esc, div) = visit_block(sym, locals, b, scope_chain, loop_start, &mut moved);
+                    let (esc, div) = visit_block(sym, locals, b, scope_chain, loop_start, &mut moved, owning_params);
                     for id in esc { moved.insert(id); }
                     if div { diverges = true; }
                 }
@@ -2472,16 +2478,16 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     diverges = true;
                 }
                 HStmt::ForC { cond, body, .. } => {
-                    visit_matches_in_expr(sym, locals, cond, scope_chain, loop_start, &mut moved);
-                    let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved);
+                    visit_matches_in_expr(sym, locals, cond, scope_chain, loop_start, &mut moved, owning_params);
+                    let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved, owning_params);
                 }
                 HStmt::ForEach { src, body, .. } => {
-                    visit_matches_in_expr(sym, locals, src, scope_chain, loop_start, &mut moved);
-                    let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved);
+                    visit_matches_in_expr(sym, locals, src, scope_chain, loop_start, &mut moved, owning_params);
+                    let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved, owning_params);
                 }
                 HStmt::Propagate { value: Some(v), .. } => {
                     moved_locals_in_expr(sym, v, &mut moved);
-                    visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, &mut moved);
+                    visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, &mut moved, owning_params);
                 }
                 HStmt::Propagate { value: None, .. } => {}
             }
@@ -2508,7 +2514,19 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
 
     let mut chain = Vec::new();
     let locals = f.locals.clone();
-    let _ = visit_block(sym, &locals, &mut f.body, &mut chain, None, &std::collections::HashSet::new());
+    // Owning params: needed by the match drop-elaboration so a param consumed in
+    // one arm gets a compensating drop on the sibling arms (the if/else handler
+    // already covers params via raw escaped-move sets; the match handler filters
+    // by an `outer` set that must therefore include the owning params too).
+    let owning_params: std::collections::HashSet<LocalId> = f.params.iter().copied()
+        .filter(|pid| {
+            let li = &locals[pid.0 as usize];
+            (matches!(li.storage, StorageClass::Heap)
+                && matches!(li.ty, HType::Heap { .. } | HType::OwnPtr { .. }))
+                || is_owning_value_composite(sym, &li.ty)
+        })
+        .collect();
+    let _ = visit_block(sym, &locals, &mut f.body, &mut chain, None, &std::collections::HashSet::new(), &owning_params);
 
     // Append owning parameters to the body's heap_to_free so they auto-free at
     // function scope-exit — unless they were transferred out somewhere in the
@@ -2936,6 +2954,22 @@ fn collect_param_moves_expr(sym: &SymTab, e: &HExpr, out: &mut std::collections:
             }
         }
         HExprKind::ArrayLit(es) => for e in es { collect_param_moves_expr(sym, e, out); },
+        // A `match` lowers to an expression, so a param consumed inside it
+        // (scrutinee, a guard, an arm value, OR an arm body statement) was
+        // invisible to the param-move scan - the missing arm meant the param
+        // fell through to `_ => {}`.  append_param_drops_to_returns would then
+        // auto-drop it at the function's return even though an arm already
+        // consumed it -> double free.  Recurse every match position; the arm
+        // body is a real statement block, so descend it via the block walker
+        // (this path has no separate visit_matches mechanism like the main flow).
+        HExprKind::Match { scrutinee, arms, .. } => {
+            collect_param_moves_expr(sym, scrutinee, out);
+            for a in arms {
+                if let Some(g) = &a.guard { collect_param_moves_expr(sym, g, out); }
+                collect_param_moves_block(sym, &a.body, out);
+                if let Some(v) = &a.value { collect_param_moves_expr(sym, v, out); }
+            }
+        }
         _ => {}
     }
 }

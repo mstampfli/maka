@@ -1,0 +1,38 @@
+// Regression: an owning parameter consumed inside a `match` (an arm value OR an
+// arm body statement) must be marked moved so it is NOT also auto-dropped at the
+// function return (double free), while a sibling arm that does not consume it
+// still drops it exactly once (no leak).  Two cooperating gaps caused this:
+// collect_param_moves_expr had no Match arm (so the consumed param fell through
+// to `_ => {}` and was never recorded as moved -> double free with the return
+// drop), and the match drop-elaboration's compensation set (`outer`) excluded
+// params (so once recorded moved, the sibling arms got no compensating drop ->
+// leak).  The if/else handler already handled params via its raw escaped-move
+// set; the match handler now mirrors it.  Verified ASan/LSan clean.
+data Box { int v; }
+int eat(own *Box b) { mut int r = 0; if (b != null) { r = b!.v; } return r; }
+
+// p consumed in arm 0's VALUE; arm 1 leaves p live (must drop on that path).
+int via_value(own *Box p, int c) {
+  int r = match (c) { 0 { yield eat(p); } else { yield 0; } };
+  return r;
+}
+
+// p consumed in the MIDDLE arm's BODY of a 3-arm match; the outer arms leave it
+// live (each must drop p exactly once).
+int via_body(own *Box p, int c) {
+  int r = match (c) { 0 { yield 10; } 1 { int z = eat(p); yield z; } else { yield 30; } };
+  return r;
+}
+
+unit main() {
+  mut int t = 0;
+  for (int i in 0..100) {
+    own *Box a = alloc Box { v = i }; t = t + via_value(a, 0);   // consume   -> i
+    own *Box b = alloc Box { v = i }; t = t + via_value(b, 1);   // p live    -> 0
+    own *Box c = alloc Box { v = i }; t = t + via_body(c, 0);    // p live    -> 10
+    own *Box d = alloc Box { v = i }; t = t + via_body(d, 1);    // consume   -> i
+    own *Box e = alloc Box { v = i }; t = t + via_body(e, 2);    // p live    -> 30
+  }
+  // sum(i) + 0 + 100*10 + sum(i) + 100*30 = 4950 + 1000 + 4950 + 3000 = 13900
+  log(t);
+}
