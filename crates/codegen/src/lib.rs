@@ -7924,10 +7924,15 @@ impl<'a> Cx<'a> {
                 s
             }
             HStmt::Propagate { value, .. } => {
-                // A `propagate` early-returns the CALLER's C frame, so free the
-                // caller's owning locals live at the inline-call site first (else
-                // they leak - the inline's own scope drops don't cover them).
-                let dc = self.capture_drops(&self.inline_propagate_drops.last().cloned().unwrap_or_default());
+                // A `propagate` early-returns the OUTERMOST non-inline C frame, so
+                // free the owning locals live in EVERY active inline frame between
+                // here and that return - not just the innermost - else an outer
+                // frame's locals leak (nested inline: try_ok inside an inline fn).
+                // Frames hold disjoint locals (distinct functions / tagged names);
+                // emit innermost-first (stack top -> bottom = reverse alloc order).
+                let all_drops: Vec<(String, HType)> =
+                    self.inline_propagate_drops.iter().rev().flatten().cloned().collect();
+                let dc = self.capture_drops(&all_drops);
                 match value {
                     Some(v) => {
                         let s = self.emit_inline_propagate_value(inline_f, v, tag);

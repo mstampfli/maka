@@ -28,6 +28,21 @@ Result<int, String> moved_before(int n) {
   return Result.Ok { value = v + used };
 }
 
+// Nested inline propagate: try_ok inside an `inline` fn (mid) whose try_ok
+// propagates out of the non-inline caller (nested).  The propagate must free the
+// owning locals of EVERY active inline frame between it and the caller's return -
+// both `midlocal` (the inline frame) and `outerlocal` (the caller frame).
+inline Result<int, String> mid(int n) {
+  String midlocal = string_from("MID");
+  int v = try_ok(parse(n));
+  return Result.Ok { value = v + midlocal.length() };
+}
+Result<int, String> nested(int n) {
+  String outerlocal = string_from("OUTER");
+  int v = try_ok(mid(n));
+  return Result.Ok { value = v + outerlocal.length() };
+}
+
 int unwrap(Result<int, String> r) {
   return match (r) { Result.Ok { value } value, Result.Err { err } err.length() as int };
 }
@@ -37,4 +52,6 @@ unit main() {
   log(unwrap(live_across(0 - 1)));  // Err: propagate frees scratch -> "err" = 3
   log(unwrap(moved_before(5)));     // Ok: 5 + 4 = 9
   log(unwrap(moved_before(0 - 1))); // Err: gone already moved, not double-freed -> 3
+  log(unwrap(nested(5)));           // Ok: 5 + 3(MID) + 5(OUTER) = 13
+  log(unwrap(nested(0 - 1)));       // Err: both inline frames freed -> "err" = 3
 }
