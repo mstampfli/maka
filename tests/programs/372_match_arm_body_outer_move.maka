@@ -1,0 +1,39 @@
+// Regression: an owning local declared OUTSIDE a match but moved out inside a match
+// ARM BODY must be propagated to the enclosing scope, so it is not dropped again at
+// scope exit (double-free), while an arm that does NOT move it frees it (a
+// compensating drop) - freed exactly once on every path.  visit_matches_in_expr
+// previously discarded the arm bodies' escaped moves (it ran visit_block on each arm
+// body but ignored the returned escaped set).  Verified under ASan + match LSan.
+import std.{String, StringOps, string_from};
+
+int consume(String s) { return s.length(); }
+
+// Moved in arm 0 (a body statement), read + dropped in else.
+int via_body(int c) {
+  String s = string_from("BODY");
+  int r = match (c) { 0 { int n = consume(s); yield n; } else { yield s.length(); } };
+  return r;
+}
+
+// Moved out via the arm VALUE (yield s) in arm 0; else yields a fresh value.
+int via_value(int c) {
+  String s = string_from("VAL");
+  String picked = match (c) { 0 { yield s; } else { yield string_from("xx"); } };
+  return consume(picked);
+}
+
+// Arm 0 moves s and diverges (return); else keeps s live to scope exit.
+int via_diverge(int c) {
+  String s = string_from("DIV");
+  match (c) { 0 { return consume(s); } else { } };
+  return s.length();
+}
+
+unit main() {
+  log(via_body(0));     // consume("BODY") -> 4
+  log(via_body(9));     // "BODY".length() -> 4
+  log(via_value(0));    // consume("VAL") -> 3
+  log(via_value(9));    // consume("xx") -> 2
+  log(via_diverge(0));  // consume("DIV") -> 3
+  log(via_diverge(9));  // "DIV".length() -> 3
+}
