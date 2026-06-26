@@ -1,0 +1,33 @@
+// Composition regression: several match/arm-body/drop fixes from this line of work
+// must hold TOGETHER in one function, not just in isolation -
+//   * break from a match arm targets the enclosing loop (not the match dispatch),
+//     freeing the loop-body local once (test 374),
+//   * an owning local declared in an arm body plus a yielded rvalue String concat
+//     are dropped at arm exit (tests 366/367),
+//   * a closure capturing an owning value, declared inside the arm body, frees its
+//     env at arm exit (test 373).
+// All inside a loop with an owning loop-body local. Verified ASan/LSan clean.
+import std.{String, StringOps, string_from};
+
+int run(int stopAt) {
+  mut int total = 0;
+  for (int i in 0..6) {
+    String loopcap = string_from("LP");                  // loop-body owning local
+    int r = match (i == stopAt) {
+      true { break; }                                    // exits the loop; drops loopcap once
+      else {
+        String s = string_from("x") + string_from("yy"); // arm-body owning local + rvalue concat
+        int(int) f = int(int q) [s] q + s.length();      // closure capturing owning, in the arm body
+        yield f(2);                                       // 2 + len("xyy") = 5
+      }
+    };
+    total = total + r + loopcap.length();                // 5 + 2 = 7
+  }
+  return total;
+}
+
+unit main() {
+  mut int t = 0;
+  for (int k in 0..1000) { t = t + run(3); }   // i=0,1,2 -> 7 each (21), then break -> 21
+  log(t);                                       // 21000
+}
