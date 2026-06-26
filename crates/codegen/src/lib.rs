@@ -8070,7 +8070,12 @@ impl<'a> Cx<'a> {
                     (inline_local_name(inline_f, *id, tag), li.ty.clone())
                 }).collect();
                 let mut dc = self.capture_drops(&inline_drops);
-                let caller_loop = self.inline_loop_drops.last().cloned().unwrap_or_default();
+                // Free EVERY active inline frame's locals between here and the target
+                // loop (innermost first), not just the nearest - a jump from a nested
+                // inline must free each intermediate frame too (cf. the nested
+                // propagate fix).  Each frame's set is its caller's locals to abandon.
+                let caller_loop: Vec<(String, HType)> =
+                    self.inline_loop_drops.iter().rev().flatten().cloned().collect();
                 dc.push_str(&self.capture_drops(&caller_loop));
                 let kw = if matches!(s, HStmt::Break { .. }) { "break" } else { "continue" };
                 format!("{}{}; ", dc, kw)

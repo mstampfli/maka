@@ -2231,16 +2231,30 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                 // owning locals (the scope chain from the loop start), not the whole
                 // function.  Only meaningful when this call is inside a loop; if it is
                 // not and the inline jumps, the call-site check reports an error.
+                let mut ldrops = Vec::new();
                 if let Some(start) = loop_start {
-                    let mut ldrops = Vec::new();
+                    // The jump targets THIS enclosing loop: free the loop-body locals.
                     for scope in scope_chain.iter().skip(start) {
                         for id in scope.iter().rev() {
                             if moved.contains(id) { continue; }
                             ldrops.push(*id);
                         }
                     }
-                    *loop_jump_drops = ldrops;
+                } else {
+                    // No enclosing loop here: a jump from the inline passes THROUGH
+                    // this frame to an outer one, abandoning this whole frame, so free
+                    // all its owning locals (like a propagate frame).  For a non-inline
+                    // caller this is the call-outside-a-loop case, rejected by
+                    // check_inline_loop_jumps; for an intermediate inline frame it is
+                    // exactly the chaining that frees that frame's locals on the jump.
+                    for scope in scope_chain.iter() {
+                        for id in scope.iter().rev() {
+                            if moved.contains(id) { continue; }
+                            ldrops.push(*id);
+                        }
+                    }
                 }
+                *loop_jump_drops = ldrops;
                 for a in args { visit_matches_in_expr(sym, locals, a, scope_chain, loop_start, moved); }
             }
             HExprKind::CallIndirect { callee, args } => {
