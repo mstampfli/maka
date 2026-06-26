@@ -1,0 +1,42 @@
+// Regression: a placeholder FuncId for a generic call inside a match-ARM BODY must
+// be rewritten to its instantiated id.  rw_expr (placeholder rewriting) previously
+// visited only a match's scrutinee/guard/arm-value, never the arm BODY, so a
+// generic inline called in an arm-body statement kept its unresolved placeholder
+// and codegen emitted a broken `MAKA_UNIT` expansion (a non-generic inline needs no
+// instantiation, so it slipped through).  collect_inline_callees had the same gap.
+import std.{String, StringOps, Result, Try, string_from, try_ok};
+
+inline T id<T>(T v) { return v; }
+
+// Generic inline used as a value in an arm-body Let (was `int x = MAKA_UNIT;`).
+int gen_in_arm(int n) {
+  return match (n) {
+    0 { int x = id(7); yield x + 1; }
+    else { int y = id(n); yield y * 2; }
+  };
+}
+
+Result<int, String> parse(int n) {
+  if (n < 0) { return Result.Err { err = string_from("e") }; }
+  return Result.Ok { value = n };
+}
+
+// try_ok (generic + propagate) inside a match-arm body.
+Result<int, String> tryok_in_arm(int n) {
+  return match (n) {
+    0 { yield Result.Ok { value = 100 }; }
+    else { int v = try_ok(parse(n)); yield Result.Ok { value = v + 1 }; }
+  };
+}
+
+int unwrap(Result<int, String> r) {
+  return match (r) { Result.Ok { value } value, Result.Err { err } 0 - (err.length() as int) };
+}
+
+unit main() {
+  log(gen_in_arm(0));                // id(7)=7, +1 -> 8
+  log(gen_in_arm(5));                // id(5)=5, *2 -> 10
+  log(unwrap(tryok_in_arm(0)));      // 100
+  log(unwrap(tryok_in_arm(4)));      // v=4, +1 -> 5
+  log(unwrap(tryok_in_arm(0 - 1)));  // parse(-1)=Err -> propagate -> "e" -> -1
+}

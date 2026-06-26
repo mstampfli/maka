@@ -855,6 +855,11 @@ fn collect_inline_callees_expr(sym: &SymTab, e: &HExpr, out: &mut Vec<u32>) {
             collect_inline_callees_expr(sym, scrutinee, out);
             for a in arms {
                 if let Some(g) = &a.guard { collect_inline_callees_expr(sym, g, out); }
+                // Arm BODY statements too, not just the arm value: a generic inline
+                // called inside an arm body (`int x = id(5); yield x;`) must still be
+                // collected for monomorphization, or codegen can't find the instance
+                // and emits a broken (MAKA_UNIT) expansion.
+                for s in &a.body.stmts { collect_inline_callees_stmt(sym, s, out); }
                 if let Some(v) = &a.value { collect_inline_callees_expr(sym, v, out); }
             }
         }
@@ -936,6 +941,11 @@ fn rewrite_placeholders(f: &mut HFunc, mapping: &[u32]) {
                 rw_expr(scrutinee, mapping);
                 for a in arms {
                     if let Some(g) = &mut a.guard { rw_expr(g, mapping); }
+                    // Rewrite the arm BODY too: a placeholder FuncId for a generic
+                    // call inside an arm body (`int x = id(5);`) must be remapped to
+                    // its instantiated id, or codegen sees an unresolved placeholder
+                    // and emits a broken (MAKA_UNIT) expansion.
+                    rw_block(&mut a.body, mapping);
                     if let Some(v) = &mut a.value { rw_expr(v, mapping); }
                 }
             }
