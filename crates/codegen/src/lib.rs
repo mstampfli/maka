@@ -9904,9 +9904,19 @@ impl<'a> Cx<'a> {
     }
 
     fn emit_match(&mut self, f: &HFunc, scrutinee: &HExpr, arms: &[HMatchArm], result_ty: &HType) -> String {
-        // Pure tag dispatch -> C `switch` (jump table) instead of an if-chain.
-        if let Some(eid) = self.match_as_switch(&scrutinee.ty, arms) {
-            return self.emit_match_switch(f, scrutinee, arms, result_ty, eid);
+        // Pure tag dispatch -> C `switch` (jump table) instead of an if-chain - but
+        // ONLY when no arm body contains a break/continue: a `switch` captures
+        // `break`, so a loop-targeting break inside an arm would exit the switch
+        // instead of the enclosing loop.  The if-chain form below terminates arms
+        // with a label+goto, so user break/continue fall through to the real loop.
+        let arms_jump = arms.iter().any(|a|
+            a.guard.as_ref().is_some_and(expr_has_break_continue)
+            || block_has_break_continue(&a.body)
+            || a.value.as_ref().is_some_and(expr_has_break_continue));
+        if !arms_jump {
+            if let Some(eid) = self.match_as_switch(&scrutinee.ty, arms) {
+                return self.emit_match_switch(f, scrutinee, arms, result_ty, eid);
+            }
         }
         // Always emit as a GCC statement-expression that yields the result value.
         // Strategy:
@@ -9930,13 +9940,21 @@ impl<'a> Cx<'a> {
         let res_c = self.c_type(result_ty);
         let needs_value = !matches!(result_ty, HType::Unit);
 
+        // Terminate a matched arm with `goto <end>` rather than wrapping the arms in
+        // a `do { ... } while (0)` and breaking out of it: a `do/while` is a C loop,
+        // so a user `break`/`continue` written inside an arm body would target the
+        // dispatch wrapper instead of the enclosing Maka loop (silently exiting the
+        // match and then double-freeing the loop locals).  With a label, user
+        // break/continue fall through to the real enclosing loop.
+        self.yield_label_seq += 1;
+        let mend = format!("__mend_{}", self.yield_label_seq);
+
         let mut body = String::new();
         body.push_str("__extension__ ({ ");
         body.push_str(&format!("{} __s = {}; ", scrut_c, s));
         if needs_value {
             body.push_str(&format!("{} __r = {{0}}; ", res_c));
         }
-        body.push_str("do { ");
 
         // Determine enum-id for variant matching if applicable.
         let _enum_eid: Option<EnumId> = match scrutinee.ty.clone() {
@@ -10003,13 +10021,13 @@ impl<'a> Cx<'a> {
             // scrut-bound arm with a guard, not only `as`-bound ones.
             let has_body_guard = needs_body_guard && a.guard.is_some();
             if has_body_guard {
-                // close inner if with break; close outer arm-if without break (fall-through to next arm).
-                body.push_str(" break; } } ");
+                // close inner if with `goto end`; close outer arm-if without it (fall-through to next arm).
+                body.push_str(&format!(" goto {}; }} }} ", mend));
             } else {
-                body.push_str(" break; } ");
+                body.push_str(&format!(" goto {}; }} ", mend));
             }
         }
-        body.push_str("} while (0); ");
+        body.push_str(&format!("{}: ; ", mend));
         if needs_value { body.push_str("__r; "); } else { body.push_str("MAKA_UNIT; "); }
         body.push_str("})");
         body
@@ -10415,6 +10433,53 @@ fn place_root_is(e: &HExpr, iv: u32) -> bool {
 /// The root local id of a place expression, if it bottoms out in a local.
 /// If `t` is a borrow / pointer to an enum (`&E`, `*E`, `own *E`, ...), return
 /// the pointee enum type, so a `match` on it can deref to the value.
+/// Does this block (recursively, including nested match-arm bodies) contain a
+/// `break`/`continue`?  A `match` is emitted as a `switch` (or, when fixed, a
+/// labeled if-chain); a `switch` is a C break target, so an arm body containing a
+/// loop-targeting break/continue must NOT use the switch form, or the jump would
+/// exit the switch instead of the enclosing Maka loop.  Over-approximates (descends
+/// into nested loops too) - that only costs the jump-table optimization, never
+/// correctness.
+fn block_has_break_continue(b: &HBlock) -> bool {
+    b.stmts.iter().any(stmt_has_break_continue)
+}
+fn stmt_has_break_continue(s: &HStmt) -> bool {
+    match s {
+        HStmt::Break { .. } | HStmt::Continue { .. } => true,
+        HStmt::If { then_b, else_b, .. } => block_has_break_continue(then_b) || else_b.as_ref().is_some_and(block_has_break_continue),
+        HStmt::While { body, .. } | HStmt::Block(body) | HStmt::Unsafe(body, _)
+        | HStmt::ForC { body, .. } | HStmt::ForEach { body, .. } => block_has_break_continue(body),
+        HStmt::Let { init, .. } => expr_has_break_continue(init),
+        HStmt::Assign { value, .. } => expr_has_break_continue(value),
+        HStmt::ExprStmt(e) => expr_has_break_continue(e),
+        HStmt::Return { value, .. } | HStmt::Propagate { value, .. } => value.as_ref().is_some_and(expr_has_break_continue),
+    }
+}
+fn expr_has_break_continue(e: &HExpr) -> bool {
+    // break/continue only occur in statement position, reachable through a nested
+    // match's arm bodies; find any such match.
+    match &e.kind {
+        HExprKind::Match { scrutinee, arms, .. } =>
+            expr_has_break_continue(scrutinee) || arms.iter().any(|a|
+                a.guard.as_ref().is_some_and(expr_has_break_continue)
+                || block_has_break_continue(&a.body)
+                || a.value.as_ref().is_some_and(expr_has_break_continue)),
+        HExprKind::Call { args, .. } | HExprKind::InlineCall { args, .. } => args.iter().any(expr_has_break_continue),
+        HExprKind::CallIndirect { callee, args } => expr_has_break_continue(callee) || args.iter().any(expr_has_break_continue),
+        HExprKind::Bin { lhs, rhs, .. } => expr_has_break_continue(lhs) || expr_has_break_continue(rhs),
+        HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } | HExprKind::Cast { expr, .. }
+        | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
+        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr) | HExprKind::SliceLen(expr)
+        | HExprKind::EnumTag(expr) | HExprKind::Transfer(expr) | HExprKind::ArrayToSlice { base: expr, .. }
+        | HExprKind::AddrOfRef { place: expr, .. } | HExprKind::Field { base: expr, .. } => expr_has_break_continue(expr),
+        HExprKind::Index { base, idx } => expr_has_break_continue(base) || expr_has_break_continue(idx),
+        HExprKind::Closure { env_values, .. } => env_values.iter().any(expr_has_break_continue),
+        HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => fields.iter().any(|(_, fe)| expr_has_break_continue(fe)),
+        HExprKind::ArrayLit(es) => es.iter().any(expr_has_break_continue),
+        _ => false,
+    }
+}
+
 fn enum_pointee(t: &HType) -> Option<HType> {
     match t {
         HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::RawPtr { inner, .. }

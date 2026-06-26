@@ -1,0 +1,50 @@
+// Regression: break/continue inside a match-arm body (within a loop) must target
+// the enclosing loop, not the match dispatch.  The if-chain match form wrapped its
+// arms in a `do { ... } while (0)` and the enum form used a `switch` - both are C
+// break/continue targets, so a user `break` exited the match and the loop kept
+// running, double-freeing the loop locals.  Now if-chain arms terminate via a
+// label+goto, and a match whose arm contains a break/continue is never lowered to a
+// switch.  Verified ASan/LSan clean.
+import std.{String, StringOps, string_from};
+
+enum Sig { Go, Stop }
+
+// Non-enum match (if-chain form): break out of the loop from an arm body.
+int with_break(int stopAt) {
+  mut int total = 0;
+  for (int i in 0..10) {
+    String loopcap = string_from("L");
+    int r = match (i == stopAt) { true { break; } else { yield loopcap.length(); } };
+    total = total + r;
+  }
+  return total;
+}
+
+// Non-enum match: continue from an arm body.
+int with_continue() {
+  mut int total = 0;
+  for (int i in 0..6) {
+    String loopcap = string_from("LP");
+    int r = match (i % 2 == 0) { true { continue; } else { yield 1; } };
+    total = total + r + loopcap.length();   // skipped on the continue path
+  }
+  return total;
+}
+
+// Enum match (would be a switch): break out of the loop from an arm body.
+int enum_break(int stopAt) {
+  mut int total = 0;
+  for (int i in 0..10) {
+    String loopcap = string_from("E");
+    Sig s = if (i == stopAt) { yield Sig.Stop; } else { yield Sig.Go; };
+    int r = match (s) { Sig.Stop { break; } Sig.Go { yield loopcap.length(); } };
+    total = total + r;
+  }
+  return total;
+}
+
+unit main() {
+  log(with_break(3));    // i=0,1,2 yield 1 -> 3, then break -> 3
+  log(with_continue());  // odd i (1,3,5): 1 + len("LP")=2 -> 3 each -> 9
+  log(enum_break(4));    // i=0..3 yield 1 -> 4, then break -> 4
+}
