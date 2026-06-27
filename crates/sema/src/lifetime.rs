@@ -714,17 +714,32 @@ impl<'a> Analyzer<'a> {
         self.walk_block(body, live_outer, depth);
         if let Some(p) = narrow { self.state[p.0 as usize].narrowed_until = None; }
         let post = self.snapshot();
-        // Re-walk only if the body moved something that was live at entry - the
-        // loop-back edge then re-enters with it moved.  Pass 2 is a superset of
-        // pass 1's diagnostics (same flow, more entry moves), so discard pass-1
-        // errors / capture facts to avoid duplicates.
-        let new_moves = (0..self.state.len()).any(|i| post[i].moved && !pre[i].moved);
-        if new_moves {
+        // Re-walk if the body introduced any cross-iteration INVALIDATION that
+        // re-enters at the top of the next iteration: a move (re-move/use-after-
+        // move), OR a borrow invalidation that persists to the body end - an alias
+        // poisoned by reassigning/moving its owner in the loop, or a binding that
+        // now stashes a dying borrow.  A single pass checks the body against the
+        // clean pre-loop state and misses the iteration-2+ dangling use (heap-UAF).
+        // (auto_nulled is NOT folded: it is runtime-backed - codegen nulls the
+        // pointer - so a guarded cross-iteration use is sound.)  Pass 2 is a
+        // superset of pass 1's diagnostics, so discard pass-1 errors / capture
+        // facts to avoid duplicates.
+        let new_invalidation = (0..self.state.len()).any(|i|
+            (post[i].moved && !pre[i].moved)
+            || (post[i].poisoned && !pre[i].poisoned)
+            || (post[i].holds_dying_borrow && !pre[i].holds_dying_borrow));
+        if new_invalidation {
             self.errors.truncate(err_mark);
             self.capture_nonnull.truncate(cap_mark);
             let mut entry = pre;
             for i in 0..entry.len() {
                 if post[i].moved { entry[i].moved = true; }
+                if post[i].poisoned {
+                    entry[i].poisoned = true;
+                    entry[i].known_nonnull = false;
+                    entry[i].narrowed_until = None;
+                }
+                if post[i].holds_dying_borrow { entry[i].holds_dying_borrow = true; }
             }
             self.restore(entry);
             if let Some(p) = narrow { self.state[p.0 as usize].narrowed_until = Some(depth); }
