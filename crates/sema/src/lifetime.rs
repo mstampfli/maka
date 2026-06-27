@@ -1168,7 +1168,10 @@ impl<'a> Analyzer<'a> {
                 // guard, then body, then the yielded value.
                 let body_depth = self.cur_depth + 1;
                 let snap = self.snapshot();
-                let mut moved_union = vec![false; self.state.len()];
+                let n = self.state.len();
+                let mut moved_union = vec![false; n];
+                let mut poison_union = vec![false; n];
+                let mut dying_union = vec![false; n];
                 for a in arms.iter_mut() {
                     self.restore(snap.clone());
                     if let Some(g) = &mut a.guard.clone() { self.walk_expr(g); }
@@ -1177,23 +1180,39 @@ impl<'a> Analyzer<'a> {
                     if let Some(v) = &mut a.value.clone() { self.walk_expr(v); }
                     // A diverging arm (its body always returns/breaks/continues/
                     // propagates) never reaches the join after the match, so its
-                    // moves must NOT propagate there - else a value it consumed
-                    // looks moved on a sibling fall-through path that never touched
-                    // it (false "use of moved value").  Mirrors the if/else join's
-                    // `block_always_exits` divergence handling.
+                    // invalidations must NOT propagate there - else a value it
+                    // consumed looks moved on a sibling fall-through path that never
+                    // touched it (false "use of moved value").  Mirrors the if/else
+                    // join's `block_always_exits` divergence handling.
                     if !block_always_exits(&a.body) {
                         for (i, s) in self.state.iter().enumerate() {
                             if s.moved { moved_union[i] = true; }
+                            // An arm can also INVALIDATE an enclosing borrow: moving
+                            // the owner of a `*T` alias inside the arm poisons the
+                            // alias, and stashing a dying borrow sets holds_dying.
+                            // These must reach the post-match state too, else a use
+                            // of the now-dangling alias after the match is missed
+                            // (heap-UAF).
+                            if s.poisoned { poison_union[i] = true; }
+                            if s.holds_dying_borrow { dying_union[i] = true; }
                         }
                     }
                 }
                 // Post-match state: the unconditional scrutinee moves (in `snap`)
-                // plus, conservatively, anything moved on ANY arm - so a use after
-                // the match is still flagged if some arm consumed it.  Narrowing
-                // and other per-arm facts revert with `snap`.
+                // plus, conservatively, any invalidation on ANY fall-through arm -
+                // so a use after the match is flagged if some arm consumed/
+                // invalidated it.  Narrowing reverts with `snap`; clearing it on a
+                // freshly-poisoned binding keeps a stale `!= null` proof from
+                // re-validating a dangling pointer.
                 self.restore(snap);
-                for (i, m) in moved_union.iter().enumerate() {
-                    if *m { self.state[i].moved = true; }
+                for i in 0..n {
+                    if moved_union[i] { self.state[i].moved = true; }
+                    if dying_union[i] { self.state[i].holds_dying_borrow = true; }
+                    if poison_union[i] {
+                        self.state[i].poisoned = true;
+                        self.state[i].known_nonnull = false;
+                        self.state[i].narrowed_until = None;
+                    }
                 }
             }
             HExprKind::Local(id) => {
