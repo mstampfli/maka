@@ -1,0 +1,16 @@
+// Moving an owner into ANOTHER owning local (a Let-init move) transfers its heap to
+// that local, which frees it on scope exit - a `*T` alias of the original owner
+// then dangles.  The Let-init move marked the source moved but did not poison its
+// aliases, so using the alias after was an accepted heap-use-after-free.  Fixed by
+// centralizing the alias-poison in mark_moved (the single move choke point), so
+// every move site - call arg, struct/array field, return, Let-init, match binding,
+// and `transfer` - poisons the owner's aliases uniformly.
+data Box { int v; }
+int f() {
+  own *Box owner = alloc Box { v = 7 };
+  *Box alias = owner;
+  { own *Box y = owner; }          // owner moved into y; y frees the heap at block exit
+  if (alias != null) { return alias!.v; }   // alias dangles
+  return 0;
+}
+unit main() { log(f()); }

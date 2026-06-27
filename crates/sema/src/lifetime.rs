@@ -1144,19 +1144,10 @@ impl<'a> Analyzer<'a> {
                 self.walk_expr(inner);
                 if let Some(id) = root_local(inner) {
                     let span = inner.span;
+                    // mark_moved poisons the owner's aliases (single move choke
+                    // point): transferring across a gate frees the value, so a *T
+                    // alias of it dangles.
                     self.mark_moved(id, span);
-                    // Transferring an owner POINTER across a gate moves it to the
-                    // gate, which frees it - any `*T`/`&T` alias of it now dangles.
-                    // Poison them, same as a by-value move (mark_owning_move): no
-                    // runtime null is emitted at a transfer, so a later guarded
-                    // deref must be a compile error, not a guard-recoverable null.
-                    let is_owner_ptr = matches!(
-                        self.f().locals[id.0 as usize].ty,
-                        HType::OwnPtr { .. } | HType::Heap { .. }
-                    );
-                    if is_owner_ptr {
-                        let _ = self.kill_lid(id, span, true);
-                    }
                 }
             }
             HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => self.walk_expr(inner),
@@ -1493,6 +1484,19 @@ impl<'a> Analyzer<'a> {
             return;
         }
         self.state[id.0 as usize].moved = true;
+        // Moving an owner POINTER (by-value into a call/struct/array/return, into
+        // another owning local, or via `transfer` across a gate) transfers its heap
+        // to the new owner, which frees it - any `*T`/`&T` alias of it now dangles.
+        // Poison the aliases here, at the single move choke point, so EVERY move
+        // site is covered uniformly (no runtime null is emitted at a move, so a
+        // later guarded deref must be a compile error).  Non-pointer owners
+        // (String/Vec values) have no `*T` aliases, so kill_lid is a no-op there.
+        if matches!(
+            self.f().locals[id.0 as usize].ty,
+            HType::OwnPtr { .. } | HType::Heap { .. }
+        ) {
+            let _ = self.kill_lid(id, sp, true);
+        }
     }
 
     /// Mark `a` moved if it is a bare owning Local consumed BY VALUE - the same
@@ -1505,19 +1509,8 @@ impl<'a> Analyzer<'a> {
     fn mark_owning_move(&mut self, a: &HExpr) {
         if ty_owns_heap(self.sym, &a.ty) {
             if let HExprKind::Local(id) = a.kind {
+                // mark_moved poisons the owner's aliases (single move choke point).
                 self.mark_moved(id, a.span);
-                // Moving an owner POINTER transfers its heap to the consumer, which
-                // frees it on its own scope exit - any `*T`/`&T` alias of it now
-                // dangles.  No runtime null is emitted at a move site, so poison the
-                // aliases: a later guarded deref must be a compile error, not a
-                // guard-recoverable auto-null (which would read freed memory).
-                let is_owner_ptr = matches!(
-                    self.f().locals[id.0 as usize].ty,
-                    HType::OwnPtr { .. } | HType::Heap { .. }
-                );
-                if is_owner_ptr {
-                    let _ = self.kill_lid(id, a.span, true);
-                }
             }
         }
     }
