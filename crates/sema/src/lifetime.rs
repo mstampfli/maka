@@ -1145,6 +1145,18 @@ impl<'a> Analyzer<'a> {
                 if let Some(id) = root_local(inner) {
                     let span = inner.span;
                     self.mark_moved(id, span);
+                    // Transferring an owner POINTER across a gate moves it to the
+                    // gate, which frees it - any `*T`/`&T` alias of it now dangles.
+                    // Poison them, same as a by-value move (mark_owning_move): no
+                    // runtime null is emitted at a transfer, so a later guarded
+                    // deref must be a compile error, not a guard-recoverable null.
+                    let is_owner_ptr = matches!(
+                        self.f().locals[id.0 as usize].ty,
+                        HType::OwnPtr { .. } | HType::Heap { .. }
+                    );
+                    if is_owner_ptr {
+                        let _ = self.kill_lid(id, span, true);
+                    }
                 }
             }
             HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => self.walk_expr(inner),
