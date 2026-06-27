@@ -1,0 +1,17 @@
+// A borrow/view stashed in a LOCAL and then returned is a use-after-free, exactly
+// like returning it directly (neg_71).  `string v = s.as_str()` makes `v` a view of
+// local String `s`'s heap buffer; `return v` dangles once `s` is freed at scope
+// exit.  Previously only the DIRECT `return s.as_str();` was caught - routing the
+// view through the intermediate local `v` slipped past the syntactic escape check.
+// Now flow-sensitive holds_dying_borrow tracking catches it.  (A view of a `&String`
+// PARAMETER is fine - its referent outlives the call - so this only fires for a
+// local source.)
+import std.{String, StringOps, string_from, str_len};
+string view() {
+  String s = string_from("hello");
+  string v = s.as_str();   // v is a view of local s's buffer
+  return v;                 // dangles: s is freed on return
+}
+unit main() {
+  log(str_len(view()) as int);
+}

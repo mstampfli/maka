@@ -37,6 +37,14 @@ struct LocalState {
     /// flow-sensitive warning — the runtime value is NULL even though the user never
     /// wrote `p = null;`.
     auto_nulled: bool,
+    /// This local holds a borrow/view (`&T`, `*T`, or a `string` view from e.g.
+    /// `as_str`) whose referent is a FUNCTION-LOCAL value that dies on return
+    /// (a stack local or an owning local).  Set at assignment when the RHS is a
+    /// dying borrow; cleared when re-assigned from a non-dying source.  The escape
+    /// check rejects returning/escaping such a local - it makes `string v =
+    /// s.as_str(); return v;` (a use-after-free of `s`'s freed buffer) a compile
+    /// error, the same as the direct `return s.as_str();` already is.
+    holds_dying_borrow: bool,
 }
 
 impl LocalState {
@@ -48,6 +56,7 @@ impl LocalState {
             narrowed_until: None,
             known_nonnull: false,
             auto_nulled: false,
+            holds_dying_borrow: false,
         }
     }
 }
@@ -748,6 +757,10 @@ impl<'a> Analyzer<'a> {
                 // Fresh local: it was never auto-nulled.  A re-bound name shadows
                 // the prior state; explicit init beats any historical collapse.
                 self.state[id.0 as usize].auto_nulled = false;
+                // Track whether this binding stashes a borrow of a dying local, so
+                // returning it later is caught as the use-after-free it is.
+                let dying = self.expr_is_dying_borrow(init);
+                self.state[id.0 as usize].holds_dying_borrow = dying;
                 declared_here.push(id);
 
                 // Move semantics: binding a bare owning Local (`own *T`/`heap T`
@@ -769,7 +782,7 @@ impl<'a> Analyzer<'a> {
                 //     reaches back to a parameter, `b` survives the call, so the
                 //     stash would escape.  Reject conservatively.
                 if matches!(place.kind, HExprKind::Field { .. } | HExprKind::Index { .. } | HExprKind::Unwrap { .. }) {
-                    self.check_no_local_ref_escape(value);
+                    self.check_no_local_ref_escape(value, false);
                     let place_root_is_param = root_local(place).map(|id|
                         matches!(self.f().locals[id.0 as usize].storage, StorageClass::Param)
                     ).unwrap_or(false);
@@ -865,6 +878,10 @@ impl<'a> Analyzer<'a> {
                         self.state[id.0 as usize].deps = d;
                         self.state[id.0 as usize].poisoned = false;
                     }
+                    // Re-assignment refreshes whether the binding stashes a dying
+                    // borrow: a fresh non-dying source clears it, a dying one sets it.
+                    let dying = self.expr_is_dying_borrow(value);
+                    self.state[id.0 as usize].holds_dying_borrow = dying;
                 }
                 let _ = span;
             }
@@ -880,7 +897,7 @@ impl<'a> Analyzer<'a> {
                     // dangle as soon as the caller dereferences the borrow.  Covers
                     // both `return &x;` directly and the escape-via-struct-field
                     // case `return Container { p = &x };`.
-                    self.check_no_local_ref_escape(v);
+                    self.check_no_local_ref_escape(v, false);
                 }
                 let _ = heap_drops;
             }
@@ -1221,7 +1238,7 @@ impl<'a> Analyzer<'a> {
     /// Walk an expression tree to catch every `&local` whose root is a
     /// function-scope stack binding — used to reject escape-via-return through
     /// any shape: direct, struct field, array element, variant payload, etc.
-    fn check_no_local_ref_escape(&mut self, e: &HExpr) {
+    fn check_no_local_ref_escape(&mut self, e: &HExpr, under_deref: bool) {
         use HExprKind::*;
         match &e.kind {
             AddrOfRef { place, .. } => {
@@ -1255,15 +1272,20 @@ impl<'a> Analyzer<'a> {
                 }
             }
             Struct { fields, .. } | VariantCtor { fields, .. } => {
-                for (_, fe) in fields { self.check_no_local_ref_escape(fe); }
+                // Aggregates PRESERVE a stored borrow, so propagate under_deref.
+                for (_, fe) in fields { self.check_no_local_ref_escape(fe, under_deref); }
             }
-            ArrayLit(elems) => for el in elems { self.check_no_local_ref_escape(el); }
-            HeapAlloc(inner) | Free(inner) => self.check_no_local_ref_escape(inner),
-            Cast { expr, .. } | CheckedCast { expr, .. } | DerefRef(expr) | DropWrite(expr)
-                | Un { expr, .. } | Unwrap { expr, .. } => self.check_no_local_ref_escape(expr),
+            ArrayLit(elems) => for el in elems { self.check_no_local_ref_escape(el, under_deref); }
+            HeapAlloc(inner) | Free(inner) => self.check_no_local_ref_escape(inner, under_deref),
+            // Cast / DropWrite preserve borrow-ness; a DEREF (DerefRef/Unwrap) or a
+            // unary op CONSUMES the borrow into a plain value, so a holds-dying-borrow
+            // local under it does not escape AS a borrow - mark under_deref.
+            Cast { expr, .. } | CheckedCast { expr, .. } | DropWrite(expr) => self.check_no_local_ref_escape(expr, under_deref),
+            DerefRef(expr) | Un { expr, .. } | Unwrap { expr, .. } => self.check_no_local_ref_escape(expr, true),
             Bin { lhs, rhs, .. } => {
-                self.check_no_local_ref_escape(lhs);
-                self.check_no_local_ref_escape(rhs);
+                // Arithmetic/comparison consumes the borrow into a value.
+                self.check_no_local_ref_escape(lhs, true);
+                self.check_no_local_ref_escape(rhs, true);
             }
             // A call whose borrowed return value aliases one of its arguments
             // (per `compute_return_borrows`): the result borrows whatever that
@@ -1280,7 +1302,9 @@ impl<'a> Analyzer<'a> {
                     .unwrap_or_default();
                 for m in borrowed {
                     if let Some(a) = args.get(m) {
-                        self.check_no_local_ref_escape(a);
+                        // The call re-borrows this arg into its result, preserving
+                        // borrow-ness, so propagate under_deref.
+                        self.check_no_local_ref_escape(a, under_deref);
                     }
                 }
             }
@@ -1294,6 +1318,22 @@ impl<'a> Analyzer<'a> {
                     self.err(
                         format!(
                             "closure `{}` captures a local that the function frees on exit, so returning it would leave a dangling capture. Move the captured owner's ownership out, or build the value the closure needs in the caller",
+                            name
+                        ),
+                        span,
+                    );
+                }
+                // A local that holds a borrow/view of a dying function-local value
+                // (e.g. `string v = s.as_str();`) dangles once returned - the same
+                // use-after-free as `return s.as_str();`, just routed through `v`.
+                // Only when the borrow VALUE escapes: a deref (`p!`) reads the
+                // pointee and does not escape the borrow, so skip under_deref.
+                if !under_deref && self.state[id.0 as usize].holds_dying_borrow {
+                    let name = self.f().locals[id.0 as usize].name.clone();
+                    let span = e.span;
+                    self.err(
+                        format!(
+                            "`{}` holds a borrow of a local that the function frees on exit, so returning it would leave a dangling reference. Return an owned value (e.g. transfer ownership) instead of a borrow of a local",
                             name
                         ),
                         span,
@@ -1331,13 +1371,49 @@ impl<'a> Analyzer<'a> {
             // are statement blocks whose own returns are checked by the statement
             // walk, and the escaping yield value lives in `a.value`.
             Match { scrutinee, arms, .. } => {
-                self.check_no_local_ref_escape(scrutinee);
+                self.check_no_local_ref_escape(scrutinee, under_deref);
                 for a in arms {
-                    if let Some(g) = &a.guard { self.check_no_local_ref_escape(g); }
-                    if let Some(v) = &a.value { self.check_no_local_ref_escape(v); }
+                    if let Some(g) = &a.guard { self.check_no_local_ref_escape(g, under_deref); }
+                    if let Some(v) = &a.value { self.check_no_local_ref_escape(v, under_deref); }
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Non-erroring predicate: does `e` evaluate to a borrow/view whose referent is
+    /// a FUNCTION-LOCAL value that dies on return (a stack local or an owning
+    /// local)?  Mirrors the dying cases of `check_no_local_ref_escape` (an `&local`
+    /// or a borrowing call whose borrowed arg is itself dying), and additionally
+    /// propagates through a local already flagged `holds_dying_borrow`.  Used to set
+    /// that flag at an assignment so a borrow stashed in a local is caught when the
+    /// local later escapes, not only when the borrow is returned directly.
+    fn expr_is_dying_borrow(&self, e: &HExpr) -> bool {
+        use HExprKind::*;
+        match &e.kind {
+            AddrOfRef { place, .. } => root_local(place).map_or(false, |root| {
+                let li = &self.f().locals[root.0 as usize];
+                match li.storage {
+                    StorageClass::Stack => true,
+                    StorageClass::Param => !matches!(
+                        li.ty,
+                        HType::Ref { .. } | HType::Ptr { .. } | HType::RawPtr { .. }
+                    ),
+                    _ => false,
+                }
+            }),
+            Call { callee, args } | InlineCall { callee, args, .. } => {
+                let cid = callee.0 as usize;
+                self.ret_borrows.get(cid).map_or(false, |cb| {
+                    cb.iter().enumerate().any(|(m, &b)| {
+                        b && args.get(m).map_or(false, |a| self.expr_is_dying_borrow(a))
+                    })
+                })
+            }
+            Local(id) => self.state[id.0 as usize].holds_dying_borrow,
+            Cast { expr, .. } | CheckedCast { expr, .. } | DerefRef(expr)
+                | Unwrap { expr, .. } | DropWrite(expr) => self.expr_is_dying_borrow(expr),
+            _ => false,
         }
     }
 
@@ -1560,12 +1636,14 @@ impl<'a> Analyzer<'a> {
                 for d in &else_s[i].deps { deps.insert(*d); }
                 self.state[i].deps = deps;
                 self.state[i].poisoned = then_s[i].poisoned || else_s[i].poisoned;
+                self.state[i].holds_dying_borrow = then_s[i].holds_dying_borrow || else_s[i].holds_dying_borrow;
             } else {
                 // Reference/pointer: union deps; poison if poisoned in either reachable branch.
                 let mut deps = then_s[i].deps.clone();
                 for d in &else_s[i].deps { deps.insert(*d); }
                 self.state[i].deps = deps;
                 self.state[i].poisoned = then_s[i].poisoned || else_s[i].poisoned;
+                self.state[i].holds_dying_borrow = then_s[i].holds_dying_borrow || else_s[i].holds_dying_borrow;
                 // auto_nulled persists if EITHER branch left it set — the user
                 // must re-assign on every code path to deterministically clear it.
                 self.state[i].auto_nulled = then_s[i].auto_nulled || else_s[i].auto_nulled;
