@@ -1,0 +1,15 @@
+// str_substring returns an OWNED substring (own *string) that the caller frees.
+// It used to return a plain `string` while the C side malloc'd the buffer, leaking
+// it on every call.  Out-of-range start/len are clamped into the string.
+import std.{str_substring, str_len};
+unit main() {
+  string s = "hello world";
+  own *string a = str_substring(s, 0, 5);
+  if (a != null) { log(str_len(a!) as int); }    // "hello" -> 5
+  own *string b = str_substring(s, 6, 5);
+  if (b != null) { log(str_len(b!) as int); }    // "world" -> 5
+  own *string c = str_substring(s, 6, 100);      // len clamped to remaining
+  if (c != null) { log(str_len(c!) as int); }    // "world" -> 5
+  own *string d = str_substring(s, 50, 3);       // start past end -> empty
+  if (d != null) { log(str_len(d!) as int); }    // "" -> 0
+}

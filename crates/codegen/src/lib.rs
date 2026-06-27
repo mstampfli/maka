@@ -6600,7 +6600,7 @@ impl<'a> Cx<'a> {
         self.w("    return len;\n");
         self.w("}\n");
         // String slicing + splitting + mtime + listdir.
-        self.w("const char* __maka_rt_str_substring(const char* s, int64_t start, int64_t len) {\n");
+        self.w("char* __maka_rt_str_substring(const char* s, int64_t start, int64_t len) {\n");
         self.w("    if (!s) { char* e = (char*)malloc(1); e[0] = 0; return e; }\n");
         self.w("    size_t slen = strlen(s);\n");
         self.w("    if (start < 0) start = 0;\n");

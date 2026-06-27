@@ -538,7 +538,9 @@ extern "__maka_rt_write_file"    int    __rt_write_file(string path, string cont
 extern "__maka_rt_str_byte"      int    __rt_str_byte  (string s, int i);
 extern "__maka_rt_str_hash"      int    __rt_str_hash  (string s);
 // Owned substring - the C side mallocs, so the result is an owned own *string that
-// auto-frees (the borrowed `str_substring` would leak it inside a Vec<own *string>).
+// auto-frees.  Takes the caller-known source length `slen` to skip an O(n) strlen
+// (str_dup / split_lines already have it); `str_substring` is the public form that
+// computes the length itself.
 extern "__maka_rt_substr_owned"  own *string __rt_substr    (string s, int start, int len, int slen);
 
 // Byte at index `i` of a string (0..len-1), or -1 if out of range.  Strings
@@ -931,7 +933,7 @@ pub int random_bytes(*mut unit buf, int len) { return __random_bytes_raw(buf, le
 // =====================================================================
 // More string + filesystem helpers.
 // =====================================================================
-extern "__maka_rt_str_substring"   string __str_substring  (string s, int start, int len);
+extern "__maka_rt_str_substring"   own *string __str_substring  (string s, int start, int len);
 extern "__maka_rt_file_mtime_ns"   int    __file_mtime_ns  (string path);
 extern "__maka_rt_str_starts_with" int    __str_starts_with(string s, string prefix);
 extern "__maka_rt_str_ends_with"   int    __str_ends_with  (string s, string suffix);
@@ -939,7 +941,11 @@ extern "__maka_rt_str_to_upper"    own *string __str_to_upper   (string s);
 extern "__maka_rt_str_to_lower"    own *string __str_to_lower   (string s);
 extern "__maka_rt_str_trim"        own *string __str_trim       (string s);
 extern "__maka_rt_str_replace"     own *string __str_replace    (string s, string from, string to);
-pub string str_substring  (string s, int start, int len) { return __str_substring(s, start, len); }
+// Returns an OWNED substring (`own *string`): the C side mallocs a fresh,
+// null-terminated copy of `s[start .. start+len]` (a middle substring cannot be a
+// borrowed view - it would not be null-terminated), so the caller owns and frees
+// it.  Returning it as a plain `string` leaked the malloc on every call.
+pub own *string str_substring  (string s, int start, int len) { return __str_substring(s, start, len); }
 pub int    file_mtime_ns  (string path)                  { return __file_mtime_ns(path); }
 pub bool   str_starts_with(string s, string prefix)      { return __str_starts_with(s, prefix) != 0; }
 pub bool   str_ends_with  (string s, string suffix)      { return __str_ends_with  (s, suffix) != 0; }
