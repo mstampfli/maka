@@ -1456,6 +1456,13 @@ impl<'a> Analyzer<'a> {
             Struct { fields, .. } | VariantCtor { fields, .. } =>
                 fields.iter().any(|(_, fe)| self.expr_is_dying_borrow(fe)),
             ArrayLit(elems) => elems.iter().any(|el| self.expr_is_dying_borrow(el)),
+            // A match RESULT is a dying borrow if any arm yields one (`string v =
+            // match c { 0 { yield s.as_str() } ... }` makes v a view of local s).
+            // Without this, the borrow flowing out of the match into v is missed
+            // and `return v` dangles - the direct `return match ...` form is caught
+            // via the arm-body walk, but routing it through v needs this.
+            Match { arms, .. } => arms.iter().any(|a|
+                a.value.as_ref().map_or(false, |v| self.expr_is_dying_borrow(v))),
             _ => false,
         }
     }

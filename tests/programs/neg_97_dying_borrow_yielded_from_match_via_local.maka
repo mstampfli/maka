@@ -1,0 +1,16 @@
+// A dying borrow YIELDED from a match, stashed in a local, then returned, is a
+// heap-use-after-free.  `string v = match c { 0 { yield s.as_str() } ... }` makes
+// v a view of local String s's buffer (freed on return).  The direct
+// `return match c { ... }` form was already caught (via the arm-body walk), but
+// routing the match result through `v` was missed: expr_is_dying_borrow had no
+// Match arm, so `holds_dying_borrow` was never set on v.  Now it descends arm
+// values.  (A match yielding a borrow of a &String PARAMETER stays accepted.)
+import std.{String, StringOps, string_from, str_len};
+string f(int c) {
+  String s = string_from("hello");
+  string v = match (c) { 0 { yield s.as_str(); } else { yield s.as_str(); } };
+  return v;
+}
+unit main() {
+  log(str_len(f(0)) as int);
+}
