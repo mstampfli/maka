@@ -1447,6 +1447,12 @@ impl<'a> Analyzer<'a> {
             Local(id) => self.state[id.0 as usize].holds_dying_borrow,
             Cast { expr, .. } | CheckedCast { expr, .. } | DerefRef(expr)
                 | Unwrap { expr, .. } | DropWrite(expr) => self.expr_is_dying_borrow(expr),
+            // `alloc X { ... }` of an aggregate that holds a dying borrow yields an
+            // owning pointer whose pointee still dangles, so a local bound to it
+            // (`own *Container c = alloc Container { p = &x };`) carries the dying
+            // borrow too.  (`Un`/`Bin` consume a borrow into a plain value and a
+            // `Closure` has its own closure_holds_dying path, so they stay omitted.)
+            HeapAlloc(inner) => self.expr_is_dying_borrow(inner),
             // An aggregate HOLDS a dying borrow if any field/element is one, so a
             // local bound to it (`Container c = Container { p = &x };`) is flagged
             // and returning the whole aggregate is caught - the via-local form of

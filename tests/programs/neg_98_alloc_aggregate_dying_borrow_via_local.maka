@@ -1,0 +1,15 @@
+// An `alloc`'d aggregate that holds a borrow of a local, stashed in an owning
+// pointer local and then returned, is a heap-use-after-free: the returned owning
+// Container's `p` field points at local `x`, freed on return.  The direct
+// `return alloc Container { p = &x };` was already caught; routing it through the
+// local `c` needs expr_is_dying_borrow to descend HeapAlloc.  Now it does.
+data Container { &int p; }
+own *Container f() {
+  int x = 5;
+  own *Container c = alloc Container { p = &x };
+  return c;
+}
+unit main() {
+  own *Container r = f();
+  if (r != null) { log(r!.p); }
+}
