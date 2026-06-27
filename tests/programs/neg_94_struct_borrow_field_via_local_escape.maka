@@ -1,0 +1,17 @@
+// A struct that holds a borrow of a local, stashed in a LOCAL and then returned,
+// is a use-after-free - the via-local form of `return Container { p = &x };`
+// (neg_38).  The aggregate holds a dying borrow in field `p`, so the local `c`
+// dangles once `x` is freed at scope exit.  expr_is_dying_borrow now descends
+// aggregate fields, so a local bound to such an aggregate is flagged and
+// returning it is caught (reading a non-borrow field of it stays fine - the
+// escape check has no Field arm).
+data Container { &int p; }
+Container make() {
+  int x = 5;
+  Container c = Container { p = &x };   // c holds a borrow of local x
+  return c;                              // dangles: x freed on return
+}
+unit main() {
+  Container r = make();
+  log(r.p);
+}

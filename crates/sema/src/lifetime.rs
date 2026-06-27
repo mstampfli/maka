@@ -1413,6 +1413,15 @@ impl<'a> Analyzer<'a> {
             Local(id) => self.state[id.0 as usize].holds_dying_borrow,
             Cast { expr, .. } | CheckedCast { expr, .. } | DerefRef(expr)
                 | Unwrap { expr, .. } | DropWrite(expr) => self.expr_is_dying_borrow(expr),
+            // An aggregate HOLDS a dying borrow if any field/element is one, so a
+            // local bound to it (`Container c = Container { p = &x };`) is flagged
+            // and returning the whole aggregate is caught - the via-local form of
+            // the `return Container { p = &x };` escape.  (Reading a non-borrow
+            // field of `c` does not escape the borrow: the escape check has no
+            // Field arm, so `return c.value_field` is never routed here.)
+            Struct { fields, .. } | VariantCtor { fields, .. } =>
+                fields.iter().any(|(_, fe)| self.expr_is_dying_borrow(fe)),
+            ArrayLit(elems) => elems.iter().any(|el| self.expr_is_dying_borrow(el)),
             _ => false,
         }
     }
