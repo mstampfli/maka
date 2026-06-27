@@ -1,0 +1,15 @@
+// An unproven `*T` deref inside a match arm body must be rejected, exactly like
+// the same deref outside a match.  The borrow/null checker (the walk pass) never
+// descended into match arm bodies, so `match c { 0 { yield p!.v } ... }` accepted
+// an unproven deref of the nullable `p` and codegen (which emits no runtime null
+// check) produced an actual null dereference / SEGV at runtime.  Now the walk
+// pass descends arm bodies, so this is caught at compile time.
+data Box { int v; }
+int f(*Box p, int c) {
+  int r = match (c) { 0 { yield p!.v; } else { yield 0; } };   // p! unproven non-null
+  return r;
+}
+unit main() {
+  *Box p = null;
+  log(f(p, 0));
+}

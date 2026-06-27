@@ -1,0 +1,19 @@
+// A reference to a local escaping via a `return` INSIDE a match arm body must be
+// rejected.  The walk pass did not descend match arm bodies, so the nested
+// `return Container { p = &x }` was never escape-checked, accepting a returned
+// dangling reference (stack-use-after-return).  The else arm yields a Container
+// built from a `&int` parameter (whose referent outlives the call, so it is
+// sound), isolating the escape to the arm-body return.  Now caught at compile
+// time by the walk pass descending arm bodies.
+data Container { &int p; }
+Container make(&int valid, int x, int c) {
+  return match (c) {
+    0 { return Container { p = &x }; }      // dangling &x escapes via the arm-body return
+    else { yield Container { p = valid }; }  // sound: borrows a parameter
+  };
+}
+unit main() {
+  int y = 7;
+  Container c = make(&y, 5, 1);
+  log(c.p);
+}

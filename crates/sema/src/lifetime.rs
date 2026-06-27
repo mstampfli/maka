@@ -597,6 +597,12 @@ struct Analyzer<'a> {
     /// escape walk rejects it - mirrors the `&local` escape rule for the borrow a
     /// capture really is.
     closure_holds_dying: std::collections::HashSet<LocalId>,
+    /// Block nesting depth currently being walked.  Tracked as a field (set at
+    /// every `walk_block` entry, restored on exit) so the expression walker can
+    /// recover it when it must descend a `match` arm body - a statement block
+    /// living inside an expression, which `walk_expr` reaches without the `depth`
+    /// argument the statement walkers thread.
+    cur_depth: u32,
 }
 
 impl<'a> Analyzer<'a> {
@@ -613,6 +619,7 @@ impl<'a> Analyzer<'a> {
             ret_borrows,
             capture_nonnull: Vec::new(),
             closure_holds_dying,
+            cur_depth: 0,
         }
     }
 
@@ -644,6 +651,8 @@ impl<'a> Analyzer<'a> {
     }
 
     fn walk_block(&mut self, b: &mut HBlock, live_outer: &mut Vec<LocalId>, depth: u32) {
+        let prev_depth = self.cur_depth;
+        self.cur_depth = depth;
         let mut declared_here: Vec<LocalId> = Vec::new();
         // Locals that have been narrowed by an early-exit guard like
         // `if (p == null) { return; }` — they revert to nullable at block exit.
@@ -676,6 +685,7 @@ impl<'a> Analyzer<'a> {
         b.ptr_nulls = outer_collapsed;
         let _ = depth;
         let _ = live_outer;
+        self.cur_depth = prev_depth;
     }
 
     /// Walk a loop body with a move-state fixpoint: a value moved by the body is
@@ -1101,7 +1111,7 @@ impl<'a> Analyzer<'a> {
             HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields { self.walk_expr(fe); self.mark_owning_move(fe); },
             HExprKind::Match { scrutinee, arms, .. } => {
                 self.walk_expr(scrutinee);
-                for a in arms {
+                for a in arms.iter() {
                     // A guard runs speculatively, before the arm commits, on a
                     // binding that aliases the scrutinee's payload.  Moving an
                     // owning binding out of a guard (e.g. passing it to a by-value
@@ -1120,9 +1130,44 @@ impl<'a> Analyzer<'a> {
                             }
                         }
                     }
+                }
+                // Arms are alternatives: walk each from the post-scrutinee
+                // baseline so one arm's narrowing/moves never contaminate a
+                // sibling.  Crucially this descends the arm BODY (a statement
+                // block living inside the match expression) through walk_block, so
+                // the borrow/null/escape checks fire there too - previously the
+                // body was skipped entirely, accepting unproven `*T` derefs (null
+                // deref at runtime) and borrows-of-locals escaping via a returned
+                // yield (stack-use-after-return).  Order matches evaluation:
+                // guard, then body, then the yielded value.
+                let body_depth = self.cur_depth + 1;
+                let snap = self.snapshot();
+                let mut moved_union = vec![false; self.state.len()];
+                for a in arms.iter_mut() {
+                    self.restore(snap.clone());
                     if let Some(g) = &mut a.guard.clone() { self.walk_expr(g); }
+                    let mut arm_live: Vec<LocalId> = Vec::new();
+                    self.walk_block(&mut a.body, &mut arm_live, body_depth);
                     if let Some(v) = &mut a.value.clone() { self.walk_expr(v); }
-                    // Body stmts walked separately via the block.
+                    // A diverging arm (its body always returns/breaks/continues/
+                    // propagates) never reaches the join after the match, so its
+                    // moves must NOT propagate there - else a value it consumed
+                    // looks moved on a sibling fall-through path that never touched
+                    // it (false "use of moved value").  Mirrors the if/else join's
+                    // `block_always_exits` divergence handling.
+                    if !block_always_exits(&a.body) {
+                        for (i, s) in self.state.iter().enumerate() {
+                            if s.moved { moved_union[i] = true; }
+                        }
+                    }
+                }
+                // Post-match state: the unconditional scrutinee moves (in `snap`)
+                // plus, conservatively, anything moved on ANY arm - so a use after
+                // the match is still flagged if some arm consumed it.  Narrowing
+                // and other per-arm facts revert with `snap`.
+                self.restore(snap);
+                for (i, m) in moved_union.iter().enumerate() {
+                    if *m { self.state[i].moved = true; }
                 }
             }
             HExprKind::Local(id) => {
@@ -1266,6 +1311,21 @@ impl<'a> Analyzer<'a> {
                             );
                         }
                     }
+                }
+            }
+            // A `match` used as the escaping/returned value: a borrow of a local
+            // can escape through any arm's yielded value, so check each arm.  Match
+            // fell into the catch-all below, so `return match c { 0 { yield S { p =
+            // &x } } ... }` returned a dangling `&x` undetected (stack-use-after-
+            // return).  Mirrors the if/else sugar already handled via Struct/Call
+            // recursion.  The scrutinee/guards are checked defensively; arm bodies
+            // are statement blocks whose own returns are checked by the statement
+            // walk, and the escaping yield value lives in `a.value`.
+            Match { scrutinee, arms, .. } => {
+                self.check_no_local_ref_escape(scrutinee);
+                for a in arms {
+                    if let Some(g) = &a.guard { self.check_no_local_ref_escape(g); }
+                    if let Some(v) = &a.value { self.check_no_local_ref_escape(v); }
                 }
             }
             _ => {}
