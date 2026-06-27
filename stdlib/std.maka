@@ -872,11 +872,14 @@ pub int hm_len<V>(&HashMap<V> m) { return m.count; }
 // =====================================================================
 extern "__maka_rt_file_exists"  int  __file_exists (string path);
 extern "__maka_rt_file_is_dir"  int  __file_is_dir (string path);
-extern "__maka_rt_env_get"      string __env_get_raw(string name);
+extern "__maka_rt_env_get"      own *string __env_get_raw(string name);
 extern "__maka_rt_process_exit" unit __process_exit(int code);
 pub bool file_exists (string path)  { return __file_exists(path) != 0; }
 pub bool file_is_dir (string path)  { return __file_is_dir(path) != 0; }
-pub string env_get   (string name)  { return __env_get_raw(name); }
+// Returns an OWNED copy of the env var's value (`own *string`), or an owned empty
+// string if unset - the C side mallocs a copy, so the caller owns and frees it.
+// (Returned as a plain `string` it leaked the malloc on every call.)
+pub own *string env_get   (string name)  { return __env_get_raw(name); }
 pub unit   process_exit(int code)   { __process_exit(code); }
 
 // =====================================================================
@@ -962,7 +965,7 @@ extern "__maka_rt_env_remove"    int    __env_remove(string name);
 extern "__maka_rt_process_run"   int    __process_run(int argc, **string argv);
 extern "__maka_rt_file_copy"     int    __file_copy   (string src, string dst);
 extern "__maka_rt_file_chmod"    int    __file_chmod  (string path, int mode);
-extern "__maka_rt_file_realpath" string __file_realpath(string path);
+extern "__maka_rt_file_realpath" own *string __file_realpath(string path);
 extern "__maka_rt_udp_recv_from" int    __udp_recv_from(int fd, *mut unit buf, int cap, &mut int peer_v4, &mut int peer_port);
 pub int    process_id    ()                       { return __process_id(); }
 pub int    env_remove    (string name)            { return __env_remove(name); }
@@ -971,7 +974,10 @@ pub int    env_remove    (string name)            { return __env_remove(name); }
 pub int    process_run   (int argc, **string argv) { return __process_run(argc, argv); }
 pub int    file_copy     (string src, string dst) { return __file_copy(src, dst); }
 pub int    file_chmod    (string path, int mode)  { return __file_chmod(path, mode); }
-pub string file_realpath (string path)            { return __file_realpath(path); }
+// Returns an OWNED canonicalized path (`own *string`) - realpath mallocs the
+// result, so the caller owns and frees it.  (Returned as a plain `string` it
+// leaked the malloc on every call.)
+pub own *string file_realpath (string path)            { return __file_realpath(path); }
 pub int    udp_recv_from (int fd, *mut unit buf, int cap, &mut int peer_v4, &mut int peer_port) {
     return __udp_recv_from(fd, buf, cap, peer_v4, peer_port);
 }

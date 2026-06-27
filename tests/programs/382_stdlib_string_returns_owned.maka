@@ -1,0 +1,13 @@
+// env_get / file_realpath return OWNED strings (own *string): their C runtime
+// mallocs the result, so returning a plain `string` leaked it on every call.
+// arg_at returns a BORROWED view of argv[i]; its out-of-range path returns a
+// static "" (not a malloc'd buffer) so it stays a consistent non-owned view.
+import std.{env_get, file_realpath, arg_at, str_len};
+unit main() {
+  own *string e = env_get("MAKA_DEFINITELY_UNSET_XYZ_42");
+  if (e != null) { log(str_len(e!) as int); }    // unset -> "" -> 0
+  own *string r = file_realpath("/");
+  if (r != null) { log(str_len(r!) as int); }    // "/" -> 1
+  string a = arg_at(99);
+  log(str_len(a) as int);                         // out of range -> "" -> 0
+}

@@ -6411,7 +6411,7 @@ impl<'a> Cx<'a> {
         self.w("}\n");
         // Returns the env var value as a freshly-malloc'd string, or "" if
         // unset.  NULL would segfault Maka's printf-based log().
-        self.w("const char* __maka_rt_env_get(const char* name) {\n");
+        self.w("char* __maka_rt_env_get(const char* name) {\n");
         self.w("    const char* v = getenv(name);\n");
         // Return a fresh empty string (not a literal) so callers that free()
         // returned strings don't crash on unset env vars.
@@ -6562,7 +6562,10 @@ impl<'a> Cx<'a> {
         self.w("}\n");
         self.w("int64_t __maka_rt_args_count(void) { return (int64_t)__maka_rt_argc; }\n");
         self.w("const char* __maka_rt_arg_at(int64_t i) {\n");
-        self.w("    if (i < 0 || i >= (int64_t)__maka_rt_argc) { char* e = (char*)malloc(1); e[0] = 0; return e; }\n");
+        // arg_at returns a BORROWED view of argv[i] (lives for the program), so the
+        // out-of-range path must also return a non-owned view - a static "" - not a
+        // malloc'd buffer (which would leak, since the caller never frees a view).
+        self.w("    if (i < 0 || i >= (int64_t)__maka_rt_argc) { return \"\"; }\n");
         self.w("    return __maka_rt_argv[i];\n");
         self.w("}\n");
         // tcp_connect by hostname — resolve via gethostbyname then connect.
@@ -6849,7 +6852,7 @@ impl<'a> Cx<'a> {
         self.w("    return chmod(path, (mode_t)mode);\n");
         self.w("#endif\n");
         self.w("}\n");
-        self.w("const char* __maka_rt_file_realpath(const char* path) {\n");
+        self.w("char* __maka_rt_file_realpath(const char* path) {\n");
         self.w("#ifdef _WIN32\n");
         // UTF-8 → UTF-16, query required length first to avoid silent truncation.
         self.w("    int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);\n");
