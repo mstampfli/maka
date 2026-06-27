@@ -1,0 +1,17 @@
+// A `*T` alias to an owner must not be usable after the owner is REASSIGNED, even
+// behind an `if (alias != null)` guard.  Reassigning the owner frees its old
+// pointee (drop_old); the alias still holds that freed address.  The invalidation
+// only updated static flow state (auto-null) with NO runtime `alias = NULL`, so a
+// `!= null` guard re-validated the dangling pointer and the deref read freed
+// memory (heap-use-after-free).  Now the reassign poisons the alias, so the
+// guarded deref is a compile error (re-assign the alias to a fresh source to use
+// it again - see 165_alias_reassign_clears).
+data Box { int v; }
+int f() {
+  own *Box owner = alloc Box { v = 7 };
+  *Box alias = owner;
+  owner = alloc Box { v = 9 };          // frees the old pointee; alias dangles
+  if (alias != null) { return alias!.v; }
+  return 0;
+}
+unit main() { log(f()); }

@@ -675,7 +675,8 @@ impl<'a> Analyzer<'a> {
         // Scope exit: kill all LIDs declared here in reverse order.
         let mut collapsed: Vec<LocalId> = Vec::new();
         for id in declared_here.iter().rev() {
-            let nulled = self.kill_lid(*id, b.span);
+            // Scope-exit: auto-null aliases (codegen emits the runtime null below).
+            let nulled = self.kill_lid(*id, b.span, false);
             for n in nulled { if !collapsed.contains(&n) { collapsed.push(n); } }
         }
         // Only null pointers that were declared OUTSIDE this scope (otherwise they're going away anyway).
@@ -815,7 +816,10 @@ impl<'a> Analyzer<'a> {
                     // The owner itself is unconstrained — kill_lid skips its
                     // own LID, so its state is refreshed normally below.
                     if is_owner {
-                        let _ = self.kill_lid(id, *span);
+                        // Reassigning the owner frees its OLD pointee (drop_old);
+                        // poison its aliases - no runtime null is emitted here, so a
+                        // guarded deref would read freed memory (heap-UAF).
+                        let _ = self.kill_lid(id, *span, true);
                     }
                     if is_ptr {
                         // `*T` slot: also fold in owner-aliases reachable from
@@ -827,6 +831,11 @@ impl<'a> Analyzer<'a> {
                         self.state[id.0 as usize].known_nonnull = nn;
                         self.state[id.0 as usize].narrowed_until = None;
                         self.state[id.0 as usize].auto_nulled = false;
+                        // Re-pointing the alias to a fresh source is the sound
+                        // recovery from an invalidation - clear poison too (an
+                        // owner reassign/move poisons aliases; this re-establishes
+                        // a valid pointee), mirroring the auto_nulled clear above.
+                        self.state[id.0 as usize].poisoned = false;
                     } else if is_owner {
                         // Reassigning an `own *T` / heap owner re-establishes its
                         // nullness from the RHS (`alloc` => non-null, `null` =>
@@ -1353,6 +1362,18 @@ impl<'a> Analyzer<'a> {
         if ty_owns_heap(self.sym, &a.ty) {
             if let HExprKind::Local(id) = a.kind {
                 self.mark_moved(id, a.span);
+                // Moving an owner POINTER transfers its heap to the consumer, which
+                // frees it on its own scope exit - any `*T`/`&T` alias of it now
+                // dangles.  No runtime null is emitted at a move site, so poison the
+                // aliases: a later guarded deref must be a compile error, not a
+                // guard-recoverable auto-null (which would read freed memory).
+                let is_owner_ptr = matches!(
+                    self.f().locals[id.0 as usize].ty,
+                    HType::OwnPtr { .. } | HType::Heap { .. }
+                );
+                if is_owner_ptr {
+                    let _ = self.kill_lid(id, a.span, true);
+                }
             }
         }
     }
@@ -1467,7 +1488,17 @@ impl<'a> Analyzer<'a> {
     /// Kill a LID. Returns pointers whose deps became empty (need runtime null-collapse).
     /// Also marks every such pointer as `auto_nulled` so subsequent reads are flagged
     /// unless the user explicitly re-assigned on every code path.
-    fn kill_lid(&mut self, id: LocalId, _span: Span) -> Vec<LocalId> {
+    /// Invalidate every `*T`/`&T` alias of owner `id` whose alias-set collapses to
+    /// nothing once `id` is removed.  `poison_ptrs` selects how a `*T` alias dies:
+    /// - false (scope-exit): AUTO-NULL it.  Codegen emits a runtime `alias = NULL`
+    ///   (HBlock.ptr_nulls), so a later `if (alias != null)` guard correctly sees
+    ///   null and the deref is sound.
+    /// - true (owner REASSIGN / MOVE): POISON it.  No runtime null is emitted at a
+    ///   reassign/move site, so the alias still holds the freed address; a guard
+    ///   would wrongly re-validate it against freed memory (heap-UAF).  Poison makes
+    ///   any use a hard compile error until the alias is re-assigned (which clears
+    ///   poison) - the only sound recovery.
+    fn kill_lid(&mut self, id: LocalId, _span: Span, poison_ptrs: bool) -> Vec<LocalId> {
         let lid_num = id.0;
         let types: Vec<HType> = self.f().locals.iter().map(|l| l.ty.clone()).collect();
         let mut nulled = Vec::new();
@@ -1476,12 +1507,18 @@ impl<'a> Analyzer<'a> {
             if st.deps.remove(&lid_num) {
                 if let HType::Ptr { .. } = types[i] {
                     if st.deps.is_empty() {
-                        nulled.push(LocalId(i as u32));
-                        // The runtime value of this pointer is about to be overwritten with
-                        // NULL by codegen.  Past non-null proofs no longer hold.
-                        st.auto_nulled = true;
-                        st.known_nonnull = false;
-                        st.narrowed_until = None;
+                        if poison_ptrs {
+                            st.poisoned = true;
+                            st.known_nonnull = false;
+                            st.narrowed_until = None;
+                        } else {
+                            nulled.push(LocalId(i as u32));
+                            // The runtime value of this pointer is about to be overwritten with
+                            // NULL by codegen.  Past non-null proofs no longer hold.
+                            st.auto_nulled = true;
+                            st.known_nonnull = false;
+                            st.narrowed_until = None;
+                        }
                     }
                 } else {
                     st.poisoned = true;

@@ -1,0 +1,15 @@
+// A `*T` alias to an owner must not be usable after the owner is MOVED (consumed
+// by value): the consumer frees the heap on its own scope exit, so the alias
+// dangles.  Previously a by-value move never invalidated the owner's aliases at
+// all, so this deref was accepted and read freed memory (heap-use-after-free).
+// Now moving an owner pointer poisons its aliases (no runtime null is emitted at
+// a move site, so the use must be a compile error; re-assign the alias to recover).
+data Box { int v; }
+int consume(own *Box b) { mut int r = 0; if (b != null) { r = b!.v; } return r; }
+int f() {
+  own *Box owner = alloc Box { v = 7 };
+  *Box alias = owner;
+  int discard = consume(owner);   // moves owner -> its heap is freed by consume
+  return alias!.v;                // alias now dangles
+}
+unit main() { log(f()); }
