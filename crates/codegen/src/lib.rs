@@ -900,7 +900,17 @@ impl<'a> Cx<'a> {
         self.w("    int closed;\n");
         self.w("    int waiters;\n");
         self.w("    pthread_cond_t drained_cv;\n");
+        // Fiber-park support (mirrors maka_fmutex_t): a spawned (non-anchor) fiber
+        // blocking on an empty recv parks itself onto `fiber_waiters` and yields to
+        // the scheduler instead of pthread_cond_wait'ing (which would block the whole
+        // OS thread and deadlock the sibling producer fiber).  `inflight_parkers`
+        // lets destroy() wait until all armed-but-not-finalized parkers settle.
+        self.w("    _Atomic int    inflight_parkers;\n");
+        self.w("    maka_fiber_t*  fiber_waiters;\n");
         self.w("} maka_bchan_t;\n");
+        // Late-defined (needs the scheduler): re-enqueue one (all=0) or all (all=1)
+        // parked fiber(s) as ready.  Called by send/close/destroy.
+        self.w("void __maka_bchan_wake(maka_bchan_t* c, int all);\n");
         self.w("maka_unit* maka_chan_bytes_new(int64_t item_size) {\n");
         // Clamp to [0, INT_MAX] so the (int) cast can't truncate to negative,
         // which would later promote to a giant size_t in malloc/memcpy and
@@ -928,6 +938,7 @@ impl<'a> Cx<'a> {
         self.w("    c->tail = n; c->count++;\n");
         self.w("    pthread_cond_signal(&c->c);\n");
         self.w("    pthread_mutex_unlock(&c->m);\n");
+        self.w("    __maka_bchan_wake(c, 0);\n");
         self.w("}\n");
         // recv is defined later (after the scheduler) so it can yield via
         // swapcontext when called from the anchor with other fiber work
@@ -946,6 +957,7 @@ impl<'a> Cx<'a> {
         self.w("    c->closed = 1;\n");
         self.w("    pthread_cond_broadcast(&c->c);\n");
         self.w("    pthread_mutex_unlock(&c->m);\n");
+        self.w("    __maka_bchan_wake(c, 1);\n");
         self.w("}\n");
         self.w("void maka_chan_bytes_destroy(maka_unit* p) {\n");
         self.w("    maka_bchan_t* c = (maka_bchan_t*)p;\n");
@@ -953,10 +965,17 @@ impl<'a> Cx<'a> {
         self.w("    c->closed = 1;\n");
         self.w("    while (c->head) { maka_bnode_t* n = c->head; c->head = n->next; free(n); }\n");
         self.w("    pthread_cond_broadcast(&c->c);\n");
-        // Wait for any in-flight recv to actually leave the cv before
-        // destroying it — POSIX UB otherwise.
-        self.w("    while (c->waiters > 0) pthread_cond_wait(&c->drained_cv, &c->m);\n");
         self.w("    pthread_mutex_unlock(&c->m);\n");
+        // Wake every parked fiber (they see `closed` and return) and wait until all
+        // pthread waiters AND in-flight/parked fibers have settled before freeing —
+        // POSIX UB otherwise, and freeing under a parked fiber would corrupt it.
+        self.w("    while (1) {\n");
+        self.w("        __maka_bchan_wake(c, 1);\n");
+        self.w("        pthread_mutex_lock(&c->m);\n");
+        self.w("        if (c->waiters == 0 && atomic_load(&c->inflight_parkers) == 0 && !c->fiber_waiters) { pthread_mutex_unlock(&c->m); break; }\n");
+        self.w("        pthread_cond_wait(&c->drained_cv, &c->m);\n");
+        self.w("        pthread_mutex_unlock(&c->m);\n");
+        self.w("    }\n");
         self.w("    pthread_mutex_destroy(&c->m); pthread_cond_destroy(&c->c); pthread_cond_destroy(&c->drained_cv);\n");
         self.w("    free(c);\n");
         self.w("}\n");
@@ -3830,6 +3849,17 @@ impl<'a> Cx<'a> {
         // Fiber-aware byte-channel recv.  On the anchor with pending fiber
         // work, drive the scheduler in short bursts so other fibers can run
         // (and possibly post to the channel) instead of blocking the worker.
+        // Fiber-park predicate + waker for the byte channel (defined here, after the
+        // scheduler, so they can touch maka_fiber_t / __maka_ready_enqueue).
+        self.w("static int __maka_pp_bchan(void* p) { maka_bchan_t* c = (maka_bchan_t*)p; return !c->head && !c->closed; }\n");
+        self.w("void __maka_bchan_wake(maka_bchan_t* c, int all) {\n");
+        self.w("    pthread_mutex_lock(&c->m);\n");
+        self.w("    maka_fiber_t* w = c->fiber_waiters;\n");
+        self.w("    if (all) { c->fiber_waiters = NULL; }\n");
+        self.w("    else if (w) { c->fiber_waiters = w->next_waiter; w->next_waiter = NULL; }\n");
+        self.w("    pthread_mutex_unlock(&c->m);\n");
+        self.w("    while (w) { maka_fiber_t* nx = all ? w->next_waiter : NULL; w->next_waiter = NULL; __maka_ready_enqueue(w); w = nx; }\n");
+        self.w("}\n");
         self.w("void maka_chan_bytes_recv(maka_unit* p, maka_unit* dst) {\n");
         self.w("    maka_bchan_t* c = (maka_bchan_t*)p;\n");
         self.w("    while (1) {\n");
@@ -3847,6 +3877,22 @@ impl<'a> Cx<'a> {
         self.w("            memset((void*)dst, 0, (size_t)c->item_size);\n");
         self.w("            pthread_mutex_unlock(&c->m);\n");
         self.w("            return;\n");
+        self.w("        }\n");
+        // A spawned (non-anchor) fiber must NOT pthread_cond_wait here - that blocks
+        // the whole OS thread / scheduler, so a sibling producer fiber never runs
+        // (deadlock).  Park onto fiber_waiters and yield to the scheduler instead;
+        // send/close re-enqueue us as ready.  Mirrors maka_fmutex_lock's park branch.
+        self.w("        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
+        self.w("            atomic_fetch_add(&c->inflight_parkers, 1);\n");
+        self.w("            pthread_mutex_unlock(&c->m);\n");
+        self.w("            maka_fiber_t* me = maka_current_fiber;\n");
+        self.w("            maka_park_req_t req = { .lock = &c->m, .head = &c->fiber_waiters,\n");
+        self.w("                                    .should_park = __maka_pp_bchan, .arg = c,\n");
+        self.w("                                    .inflight = &c->inflight_parkers, .drained_cv = &c->drained_cv };\n");
+        self.w("            maka_pending_park = &req;\n");
+        self.w("            me->state = 2;\n");
+        self.w("            swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("            continue;\n");
         self.w("        }\n");
         self.w("        pthread_mutex_unlock(&c->m);\n");
         self.w("        if (maka_sched_inited && maka_current_fiber == maka_anchor_fiber\n");

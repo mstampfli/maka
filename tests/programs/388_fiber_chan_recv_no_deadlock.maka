@@ -1,0 +1,14 @@
+// A spawned (non-anchor) fiber blocking on an empty channel recv must yield to the
+// scheduler (park), not pthread_cond_wait - otherwise it blocks the whole OS thread
+// and the sibling producer fiber never runs (deadlock).  Both consumer and producer
+// are spawned fibers; the consumer parks on the empty recv until the producer sends.
+import std.{IntChan, chan_int_new, chan_int_send, chan_int_recv, chan_int_destroy};
+unit consumer(IntChan c) { int a = chan_int_recv(c); log(a); }
+unit producer(IntChan c) { chan_int_send(c, 42); }
+unit main() {
+  IntChan c = chan_int_new();
+  *Thread cons = spawn(unit() [c] { consumer(c); });
+  *Thread prod = spawn(unit() [c] { producer(c); });
+  join(cons); join(prod);
+  chan_int_destroy(c);
+}
