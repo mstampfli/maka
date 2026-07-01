@@ -1,0 +1,7 @@
+// u8/u16 add/sub/mul integer-promote to signed `int` in C, so a wide u16 product
+// (60000*60000 = 3.6e9) overflowed `int` (UB).  Fixed by computing narrow-unsigned
+// ops in `unsigned int`.  Result wraps at the type width on store.
+unit main() {
+  u16 a = 60000; u16 b = 60000; u16 g = a * b; log(g as int);   // 3600000000 & 0xFFFF = 41984
+  u8 c = 200; u8 d = 200; u8 e = c * d; log(e as int);           // 40000 & 0xFF = 64
+}

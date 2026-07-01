@@ -5809,7 +5809,7 @@ impl<'a> Cx<'a> {
         self.w("static __thread int __maka_http_path_off = -1;\n");
         self.w("static __thread int __maka_http_path_len = 0;\n");
         self.w("static __thread int __maka_http_body_off = -1;\n");
-        self.w("static __thread int __maka_http_content_length = -1;\n");
+        self.w("static __thread int64_t __maka_http_content_length = -1;\n");
         self.w("static inline int64_t __maka_http_parse(const char* buf, int64_t len) {\n");
         self.w("    __maka_http_method_off = -1; __maka_http_method_len = 0;\n");
         self.w("    __maka_http_path_off   = -1; __maka_http_path_len = 0;\n");
@@ -5851,8 +5851,10 @@ impl<'a> Cx<'a> {
         self.w("            if (match) {\n");
         self.w("                int p = i + 15;\n");
         self.w("                while (p < len && (buf[p] == ' ' || buf[p] == '\\t')) p++;\n");
-        self.w("                int v = 0;\n");
-        self.w("                while (p < len && buf[p] >= '0' && buf[p] <= '9') { v = v * 10 + (buf[p] - '0'); p++; }\n");
+        self.w("                int64_t v = 0;\n");
+        self.w("                while (p < len && buf[p] >= '0' && buf[p] <= '9') {\n");
+        self.w("                    if (v > (int64_t)9223372036854775807LL / 10) { v = -1; break; }\n");
+        self.w("                    v = v * 10 + (buf[p] - '0'); p++; }\n");
         self.w("                __maka_http_content_length = v;\n");
         self.w("            }\n");
         self.w("        }\n");
@@ -6322,7 +6324,7 @@ impl<'a> Cx<'a> {
         self.w("char* __maka_rt_substr_owned(const char* s, int64_t start, int64_t len, int64_t slen) {\n");
         self.w("    if (slen < 0) slen = 0;\n");
         self.w("    if (start < 0) start = 0; if (start > slen) start = slen;\n");
-        self.w("    if (len < 0) len = 0; if (start + len > slen) len = slen - start;\n");
+        self.w("    if (len < 0) len = 0; if (len > slen - start) len = slen - start;\n");
         self.w("    char* r = (char*)malloc((size_t)len + 1);\n");
         self.w("    for (int64_t k = 0; k < len; k++) r[k] = s[start + k];\n");
         self.w("    r[len] = 0; return (char*)r;\n");
@@ -6609,7 +6611,7 @@ impl<'a> Cx<'a> {
         self.w("    if (start < 0) start = 0;\n");
         self.w("    if ((size_t)start > slen) start = (int64_t)slen;\n");
         self.w("    if (len < 0) len = 0;\n");
-        self.w("    if ((size_t)(start + len) > slen) len = (int64_t)(slen - (size_t)start);\n");
+        self.w("    if (len > (int64_t)(slen - (size_t)start)) len = (int64_t)(slen - (size_t)start);\n");
         self.w("    char* o = (char*)malloc((size_t)len + 1);\n");
         self.w("    memcpy(o, s + start, (size_t)len); o[len] = 0;\n");
         self.w("    return o;\n");
@@ -6819,6 +6821,11 @@ impl<'a> Cx<'a> {
         self.w("int64_t __maka_rt_file_copy(const char* src, const char* dst) {\n");
         self.w("    int sfd = (int)__maka_file_open(src, 0, 0);\n");
         self.w("    if (sfd < 0) return -1;\n");
+        // Same-file guard: opening dst with O_TRUNC would empty src before we read
+        // it (silent data loss).  If src and dst are the same inode, the copy is a
+        // no-op success.
+        self.w("    { struct stat __ss, __ds; if (fstat(sfd, &__ss) == 0 && stat(dst, &__ds) == 0\n");
+        self.w("        && __ss.st_dev == __ds.st_dev && __ss.st_ino == __ds.st_ino) { close(sfd); return 0; } }\n");
         self.w("    int dfd = (int)__maka_file_open(dst, 1 | 64 | 512, 420);\n");
         self.w("    if (dfd < 0) { close(sfd); return -1; }\n");
         self.w("    char buf[8192]; int64_t total = 0; ssize_t n;\n");
@@ -7367,7 +7374,25 @@ impl<'a> Cx<'a> {
             }
             HStmt::ExprStmt(e) => {
                 let s = self.emit_expr(f, e);
-                self.wl(&format!("(void)({});", s));
+                // Discarding an owning-VALUE temporary (a String / struct with heap-
+                // owning fields produced by a fn / operator / match yield) must drop
+                // it, else it leaks (SPEC 2.3).  Owning POINTERS are already hoisted
+                // and freed by emit_expr.  Restrict to value-PRODUCING expressions
+                // (not a place like a bare Local/Field, whose discard is a move the
+                // lifetime pass already accounts for) so we never double-free.
+                let is_ptr = matches!(&e.ty,
+                    HType::OwnPtr { .. } | HType::Heap { .. } | HType::Ptr { .. }
+                    | HType::RawPtr { .. } | HType::Ref { .. });
+                let is_place = matches!(&e.kind,
+                    HExprKind::Local(_) | HExprKind::Field { .. } | HExprKind::Index { .. }
+                    | HExprKind::Unwrap { .. } | HExprKind::AddrOfRef { .. } | HExprKind::DerefRef(_));
+                if !is_ptr && !is_place && self.drop_ty_owns(&e.ty) {
+                    let ct = self.c_type(&e.ty);
+                    let dc = self.capture_drops(&[("__maka_discard".to_string(), e.ty.clone())]);
+                    self.wl(&format!("{{ {} __maka_discard = ({}); {} }}", ct, s, dc));
+                } else {
+                    self.wl(&format!("(void)({});", s));
+                }
             }
             HStmt::Return { value, heap_drops, .. } => {
                 // Evaluate the return value BEFORE dropping heap locals: the
@@ -7964,6 +7989,19 @@ impl<'a> Cx<'a> {
     }
 
     /// Emit a statement from the inline function's body, with substitutions.
+    /// Drops for an inline block's scope-exit `heap_to_free` (owning locals of the
+    /// inline frame going out of scope at the block end, incl. compensating frees
+    /// the lifetime pass synthesized for a value moved on only one branch).  The
+    /// non-inline block path emits these; the inline expansion must too or they leak.
+    fn inline_block_drops(&mut self, inline_f: &HFunc, b: &HBlock, tag: &str) -> String {
+        if b.heap_to_free.is_empty() { return String::new(); }
+        let drops: Vec<(String, HType)> = b.heap_to_free.iter().map(|id| {
+            let li = &inline_f.locals[id.0 as usize];
+            (inline_local_name(inline_f, *id, tag), li.ty.clone())
+        }).collect();
+        self.capture_drops(&drops)
+    }
+
     fn emit_inline_stmt(&mut self, inline_f: &HFunc, s: &HStmt, tag: &str, result_ty: &HType) -> String {
         match s {
             HStmt::Let { local, init, .. } => {
@@ -8033,10 +8071,16 @@ impl<'a> Cx<'a> {
                 let cs = self.emit_inline_expr(inline_f, cond, tag);
                 let mut s = format!("if ({}) {{ ", cs);
                 for st in &then_b.stmts { s.push_str(&self.emit_inline_stmt(inline_f, st, tag, result_ty)); }
+                // Emit the block's scope-exit / compensating drops (a value moved on
+                // only one branch gets a compensating free on the sibling; the
+                // lifetime pass fills heap_to_free with it).  Non-inline block
+                // codegen emits these; the inline expansion was dropping them.
+                s.push_str(&self.inline_block_drops(inline_f, then_b, tag));
                 s.push_str("} ");
                 if let Some(b) = else_b {
                     s.push_str("else { ");
                     for st in &b.stmts { s.push_str(&self.emit_inline_stmt(inline_f, st, tag, result_ty)); }
+                    s.push_str(&self.inline_block_drops(inline_f, b, tag));
                     s.push_str("} ");
                 }
                 s
@@ -8470,6 +8514,16 @@ impl<'a> Cx<'a> {
             let st = self.c_type(lhs_ty);
             let ut = unsigned_ctype(lhs_ty);
             return format!("(({0})(({1})({2}) {3} ({1})({4})))", st, ut, l, binop_c(op), r);
+        }
+        // Unsigned NARROW types (uint8_t/uint16_t) integer-promote to signed `int`
+        // in C, so u8/u16 add/sub/mul can overflow int (UB).  Compute in unsigned
+        // int (which never promotes to signed) and truncate back.  u32/u64 are >=
+        // int width, stay unsigned, and wrap by definition, so they use the plain form.
+        if matches!(op, HBinOp::Add | HBinOp::Sub | HBinOp::Mul) {
+            let ct = self.c_type(lhs_ty);
+            if ct == "uint8_t" || ct == "uint16_t" {
+                return format!("(({0})((unsigned int)({1}) {2} (unsigned int)({3})))", ct, l, binop_c(op), r);
+            }
         }
         format!("(({}) {} ({}))", l, binop_c(op), r)
     }

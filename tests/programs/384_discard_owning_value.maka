@@ -1,0 +1,11 @@
+// Discarding an owning-VALUE temporary via `_ = expr;` must drop it (SPEC 2.3).
+// String operator result, fn return with owning field, and match yield were leaked.
+import std.{String, StringOps, string_from};
+data Inner { int v; }  data Box { own *Inner p; }
+Box mk() { return Box { p = alloc Inner { v = 7 } }; }
+unit main() {
+  _ = mk();                                    // owning struct field
+  mut int i = 0;
+  while (i < 20) { String a = string_from("x"); String b = string_from("y"); _ = a + b; i = i + 1; }
+  log(1);
+}
