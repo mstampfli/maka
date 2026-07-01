@@ -1,0 +1,8 @@
+unit hammer(&mut int p) { for (int i in 0..100) { p = p + 1; } }
+unit main() {
+  mut int counter = 0;
+  *Thread t = thread(unit() [&mut counter] { for (int i in 0..100) { counter = counter + 1; } });
+  hammer(&mut counter);
+  join(t);
+  log(counter);
+}

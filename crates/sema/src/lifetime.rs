@@ -2211,6 +2211,72 @@ fn handle_joined_in_block(b: &HBlock, spawn_idx: usize, handle: LocalId) -> bool
 /// exit (Rust `thread::scope`-style scoped borrow).  Conservative by design:
 /// when a join cannot be proven, reject - an under-rejection here would be a
 /// use-after-free, so "unsure" must mean "no".
+/// The locals a cross-thread closure captures BY REFERENCE, with each borrow's
+/// mutability (`&mut` = true).  While the (un-joined) thread holds these borrows,
+/// the parent must not alias them - reading/writing them races with the thread.
+fn cross_thread_captured_borrows(e: &HExpr) -> Vec<(LocalId, bool)> {
+    let mut out = Vec::new();
+    let HExprKind::Call { callee, args } = &e.kind else { return out };
+    if !is_cross_thread_callee(*callee) { return out; }
+    let Some(mut cur) = args.first() else { return out };
+    loop {
+        match &cur.kind {
+            HExprKind::Closure { env_values, .. } => {
+                for v in env_values {
+                    if let HType::Ref { mutable, .. } = &v.ty {
+                        if let Some(root) = root_local(v) { out.push((root, *mutable)); }
+                    }
+                }
+                return out;
+            }
+            HExprKind::HeapAlloc(i) | HExprKind::DropWrite(i)
+            | HExprKind::DerefRef(i) | HExprKind::Transfer(i) => cur = i,
+            _ => return out,
+        }
+    }
+}
+
+/// Does statement `s` mention local `target` anywhere in its expressions
+/// (read/write/borrow)?  Used to reject a parent aliasing a thread-borrowed local.
+fn expr_mentions_local(e: &HExpr, t: LocalId) -> bool {
+    use HExprKind::*;
+    match &e.kind {
+        Local(id) => *id == t,
+        AddrOfRef { place, .. } => expr_mentions_local(place, t),
+        Field { base, .. } | ArrayToSlice { base, .. } => expr_mentions_local(base, t),
+        Index { base, idx } => expr_mentions_local(base, t) || expr_mentions_local(idx, t),
+        Bin { lhs, rhs, .. } => expr_mentions_local(lhs, t) || expr_mentions_local(rhs, t),
+        Un { expr, .. } | Unwrap { expr, .. } | Cast { expr, .. } | CheckedCast { expr, .. }
+        | DropWrite(expr) => expr_mentions_local(expr, t),
+        DerefRef(i) | HeapAlloc(i) | Free(i) | Transfer(i) | SliceLen(i) | EnumTag(i) => expr_mentions_local(i, t),
+        Call { args, .. } | InlineCall { args, .. } => args.iter().any(|a| expr_mentions_local(a, t)),
+        CallIndirect { callee, args } => expr_mentions_local(callee, t) || args.iter().any(|a| expr_mentions_local(a, t)),
+        Struct { fields, .. } | VariantCtor { fields, .. } => fields.iter().any(|(_, fe)| expr_mentions_local(fe, t)),
+        ArrayLit(es) => es.iter().any(|e2| expr_mentions_local(e2, t)),
+        Closure { env_values, .. } => env_values.iter().any(|v| expr_mentions_local(v, t)),
+        Match { scrutinee, arms, .. } => expr_mentions_local(scrutinee, t)
+            || arms.iter().any(|a| a.guard.as_ref().map_or(false, |g| expr_mentions_local(g, t))
+                || a.value.as_ref().map_or(false, |v| expr_mentions_local(v, t))
+                || a.body.stmts.iter().any(|s| stmt_mentions_local(s, t))),
+        _ => false,
+    }
+}
+fn stmt_mentions_local(s: &HStmt, t: LocalId) -> bool {
+    match s {
+        HStmt::Let { init, .. } => expr_mentions_local(init, t),
+        HStmt::Assign { place, value, .. } => expr_mentions_local(place, t) || expr_mentions_local(value, t),
+        HStmt::ExprStmt(e) | HStmt::Return { value: Some(e), .. } | HStmt::Propagate { value: Some(e), .. } => expr_mentions_local(e, t),
+        HStmt::If { cond, then_b, else_b, .. } => expr_mentions_local(cond, t)
+            || then_b.stmts.iter().any(|s| stmt_mentions_local(s, t))
+            || else_b.as_ref().map_or(false, |b| b.stmts.iter().any(|s| stmt_mentions_local(s, t))),
+        HStmt::While { cond, body, .. } => expr_mentions_local(cond, t) || body.stmts.iter().any(|s| stmt_mentions_local(s, t)),
+        HStmt::ForC { cond, body, .. } => expr_mentions_local(cond, t) || body.stmts.iter().any(|s| stmt_mentions_local(s, t)),
+        HStmt::ForEach { src, body, .. } => expr_mentions_local(src, t) || body.stmts.iter().any(|s| stmt_mentions_local(s, t)),
+        HStmt::Block(b) | HStmt::Unsafe(b, _) => b.stmts.iter().any(|s| stmt_mentions_local(s, t)),
+        _ => false,
+    }
+}
+
 fn check_scoped_thread_borrows(f: &HFunc, errors: &mut Vec<SemaError>) {
     fn walk(b: &HBlock, locals: &[LocalInfo], errors: &mut Vec<SemaError>) {
         for (i, s) in b.stmts.iter().enumerate() {
@@ -2226,6 +2292,35 @@ fn check_scoped_thread_borrows(f: &HFunc, errors: &mut Vec<SemaError>) {
                                 ),
                                 span: bspan,
                             });
+                        } else {
+                            // Joined - but the parent must not ALIAS a `&mut`-captured
+                            // local (or write a `&const`-captured one) during the
+                            // spawn..join window: the thread holds the borrow, so
+                            // concurrent parent access is an unsynchronized data race.
+                            // (A `&const` capture allows concurrent parent READS, but
+                            // proving read-only is hard here; conservatively any
+                            // mention of a &mut-captured local in the window is rejected.)
+                            let join_idx = b.stmts[i + 1..].iter()
+                                .position(|s2| matches!(s2, HStmt::ExprStmt(e) if is_join_of(e, *local)))
+                                .map(|p| i + 1 + p);
+                            if let Some(ji) = join_idx {
+                                for (cl, is_mut) in cross_thread_captured_borrows(init) {
+                                    if !is_mut { continue; }
+                                    for s2 in &b.stmts[i + 1..ji] {
+                                        if stmt_mentions_local(s2, cl) {
+                                            let cn = &locals[cl.0 as usize].name;
+                                            errors.push(SemaError {
+                                                msg: format!(
+                                                    "`{}` is mutably borrowed by a spawned thread until `join`; the parent must not access it during the spawn..join window (that is an unsynchronized data race). Move access after the `join`, or synchronize via an atomic/Mutex",
+                                                    cn
+                                                ),
+                                                span: bspan,
+                                            });
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
