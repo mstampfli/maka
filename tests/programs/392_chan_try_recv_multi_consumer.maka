@@ -1,0 +1,30 @@
+// Regression: chan_try_recv_* must be truly non-blocking.  It used to do
+// count()>0 then a SEPARATE blocking recv(); with >1 consumer, one could steal
+// the item in the gap and the loser's recv() blocked forever on an empty-but-open
+// channel.  Here 4 consumers poll one channel; each try_recv must never block, so
+// all items are collected and nothing hangs.
+import std.{IntChan, chan_int_new, chan_int_send, chan_try_recv_int, chan_int_destroy,
+            Atomic, atomic_new, atomic_add, atomic_get, atomic_destroy, sleep_us};
+
+unit producer(IntChan c) {
+    mut int i = 0;
+    while (i < 40) { chan_int_send(c, i + 1); sleep_us(200); i = i + 1; }
+}
+unit consumer(IntChan c, Atomic<int> got) {
+    while (atomic_get(got) < 40) {
+        mut int out = 0;
+        if (chan_try_recv_int(c, &mut out) == 1) { _ = atomic_add(got, 1); }
+    }
+}
+unit main() {
+    IntChan c = chan_int_new();
+    Atomic<int> got = atomic_new(0);
+    *Thread pr = thread(unit() [c] { producer(c); });
+    *Thread c0 = thread(unit() [c, got] { consumer(c, got); });
+    *Thread c1 = thread(unit() [c, got] { consumer(c, got); });
+    *Thread c2 = thread(unit() [c, got] { consumer(c, got); });
+    join(c0); join(c1); join(c2); join(pr);
+    log(atomic_get(got));   // 40, and no consumer stranded in a blocking recv()
+    chan_int_destroy(c);
+    atomic_destroy(got);
+}

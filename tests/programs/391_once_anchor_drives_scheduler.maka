@@ -1,0 +1,29 @@
+// Anchor (main) becomes a LATE caller to once_do while a SPAWNED fiber is the
+// once runner and is currently PARKED (sleeping) mid-init.  once_do's anchor
+// path does pthread_cond_wait instead of driving the scheduler (unlike
+// fmutex_lock / wg_wait which do), so the runner fiber never resumes.
+import std.{ Once, once_new, once_do, once_destroy, sleep_ms };
+
+mut int started = 0;
+mut int runner_ran = 0;
+
+unit main() {
+    Once o = once_new();
+    // F wins the once CAS, signals, then sleeps a long time INSIDE the once
+    // body -> it is the runner (state==1) but parked as a sleeper.
+    *Thread f = spawn(unit() [o] {
+        once_do(o, unit() {
+            started = 1;
+            sleep_ms(1000);
+            runner_ran = runner_ran + 1;
+        });
+    });
+    // Anchor drives the scheduler (via sleep) until F is the runner.
+    while (started == 0) { sleep_ms(2); }
+    // main is now a LATE caller: CAS fails (state==1), main == anchor.
+    once_do(o, unit() { runner_ran = runner_ran + 100; });
+    log(runner_ran);     // reached only if not deadlocked
+    join(f);
+    log(777);
+    once_destroy(o);
+}

@@ -760,12 +760,16 @@ impl<'a> Cx<'a> {
         self.w("void maka_mutex_lock(maka_unit* m) { pthread_mutex_lock((pthread_mutex_t*)m); }\n");
         self.w("void maka_mutex_unlock(maka_unit* m) { pthread_mutex_unlock((pthread_mutex_t*)m); }\n");
         self.w("void maka_mutex_destroy(maka_unit* m) { pthread_mutex_destroy((pthread_mutex_t*)m); free(m); }\n");
-        // RwLock via pthread_rwlock_t.
-        self.w("maka_unit* maka_rwlock_new(void) { pthread_rwlock_t* r = (pthread_rwlock_t*)malloc(sizeof(pthread_rwlock_t)); pthread_rwlock_init(r, NULL); return (maka_unit*)r; }\n");
-        self.w("void maka_rwlock_read_lock(maka_unit* r) { pthread_rwlock_rdlock((pthread_rwlock_t*)r); }\n");
-        self.w("void maka_rwlock_write_lock(maka_unit* r) { pthread_rwlock_wrlock((pthread_rwlock_t*)r); }\n");
-        self.w("void maka_rwlock_unlock(maka_unit* r) { pthread_rwlock_unlock((pthread_rwlock_t*)r); }\n");
-        self.w("void maka_rwlock_destroy(maka_unit* r) { pthread_rwlock_destroy((pthread_rwlock_t*)r); free(r); }\n");
+        // RwLock: FIBER-AWARE, defined with the other fiber-aware sync primitives
+        // (Mutex/WaitGroup/Once) after the scheduler infrastructure - a plain
+        // pthread_rwlock blocks the whole OS thread, deadlocking the cooperative
+        // scheduler when a fiber holds the read lock across a yield and another
+        // fiber write-locks.  Forward-declare here; define near maka_fmutex.
+        self.w("maka_unit* maka_rwlock_new(void);\n");
+        self.w("void maka_rwlock_read_lock(maka_unit* r);\n");
+        self.w("void maka_rwlock_write_lock(maka_unit* r);\n");
+        self.w("void maka_rwlock_unlock(maka_unit* r);\n");
+        self.w("void maka_rwlock_destroy(maka_unit* r);\n");
         // Spinlock: pthread_spinlock_t on Linux/BSD/Windows, os_unfair_lock
         // on macOS (Darwin removed pthread_spinlock_t).  os_unfair_lock is
         // the Apple-recommended replacement and has the same surface.
@@ -3659,6 +3663,121 @@ impl<'a> Cx<'a> {
         self.w("    pthread_mutex_destroy(&m->kw_mu); pthread_cond_destroy(&m->kw_cv); pthread_cond_destroy(&m->drained_cv);\n");
         self.w("    free(m);\n");
         self.w("}\n");
+        // Fiber-aware RwLock (forward-declared up with the raw locks).  A single
+        // unlock disambiguates read vs write by the writer flag: a write lock
+        // means writer=1 & readers=0, a read lock means writer=0 & readers>0, so
+        // they never overlap.  On unlock we wake ALL waiters and let each re-check
+        // its own predicate (readers block on writer!=0; writers block on
+        // writer!=0 || readers!=0) - simple and deadlock-free.
+        self.w("typedef struct {\n");
+        self.w("    _Atomic int     writer;\n");
+        self.w("    _Atomic int     readers;\n");
+        self.w("    pthread_mutex_t kw_mu;\n");
+        self.w("    pthread_cond_t  kw_cv;\n");
+        self.w("    pthread_cond_t  drained_cv;\n");
+        self.w("    int             pth_waiters;\n");
+        self.w("    _Atomic int     inflight_parkers;\n");
+        self.w("    maka_fiber_t*   fiber_waiters;\n");
+        self.w("} maka_rwlock_t;\n");
+        self.w("maka_unit* maka_rwlock_new(void) {\n");
+        self.w("    maka_rwlock_t* r = (maka_rwlock_t*)calloc(1, sizeof(maka_rwlock_t));\n");
+        self.w("    atomic_init(&r->writer, 0); atomic_init(&r->readers, 0);\n");
+        self.w("    pthread_mutex_init(&r->kw_mu, NULL);\n");
+        self.w("    pthread_cond_init(&r->kw_cv, NULL);\n");
+        self.w("    pthread_cond_init(&r->drained_cv, NULL);\n");
+        self.w("    return (maka_unit*)r;\n");
+        self.w("}\n");
+        self.w("static int __maka_pp_rwlock_rd(void* p) { return atomic_load(&((maka_rwlock_t*)p)->writer) != 0; }\n");
+        self.w("static int __maka_pp_rwlock_wr(void* p) { maka_rwlock_t* r = (maka_rwlock_t*)p; return atomic_load(&r->writer) != 0 || atomic_load(&r->readers) != 0; }\n");
+        self.w("void maka_rwlock_read_lock(maka_unit* p) {\n");
+        self.w("    maka_rwlock_t* r = (maka_rwlock_t*)p;\n");
+        self.w("    while (1) {\n");
+        self.w("        pthread_mutex_lock(&r->kw_mu);\n");
+        self.w("        if (atomic_load(&r->writer) == 0) { atomic_fetch_add(&r->readers, 1); pthread_mutex_unlock(&r->kw_mu); return; }\n");
+        self.w("        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
+        self.w("            atomic_fetch_add(&r->inflight_parkers, 1);\n");
+        self.w("            pthread_mutex_unlock(&r->kw_mu);\n");
+        self.w("            maka_fiber_t* me = maka_current_fiber;\n");
+        self.w("            maka_park_req_t req = { .lock = &r->kw_mu, .head = &r->fiber_waiters,\n");
+        self.w("                                    .should_park = __maka_pp_rwlock_rd, .arg = r,\n");
+        self.w("                                    .inflight = &r->inflight_parkers, .drained_cv = &r->drained_cv };\n");
+        self.w("            maka_pending_park = &req;\n");
+        self.w("            me->state = 2;\n");
+        self.w("            swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("            pthread_mutex_unlock(&r->kw_mu);\n");
+        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("        } else {\n");
+        self.w("            r->pth_waiters++;\n");
+        self.w("            while (atomic_load(&r->writer) != 0) pthread_cond_wait(&r->kw_cv, &r->kw_mu);\n");
+        self.w("            r->pth_waiters--;\n");
+        self.w("            if (r->pth_waiters == 0) pthread_cond_signal(&r->drained_cv);\n");
+        self.w("            pthread_mutex_unlock(&r->kw_mu);\n");
+        self.w("        }\n");
+        self.w("    }\n");
+        self.w("}\n");
+        self.w("void maka_rwlock_write_lock(maka_unit* p) {\n");
+        self.w("    maka_rwlock_t* r = (maka_rwlock_t*)p;\n");
+        self.w("    while (1) {\n");
+        self.w("        pthread_mutex_lock(&r->kw_mu);\n");
+        self.w("        if (atomic_load(&r->writer) == 0 && atomic_load(&r->readers) == 0) { atomic_store(&r->writer, 1); pthread_mutex_unlock(&r->kw_mu); return; }\n");
+        self.w("        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
+        self.w("            atomic_fetch_add(&r->inflight_parkers, 1);\n");
+        self.w("            pthread_mutex_unlock(&r->kw_mu);\n");
+        self.w("            maka_fiber_t* me = maka_current_fiber;\n");
+        self.w("            maka_park_req_t req = { .lock = &r->kw_mu, .head = &r->fiber_waiters,\n");
+        self.w("                                    .should_park = __maka_pp_rwlock_wr, .arg = r,\n");
+        self.w("                                    .inflight = &r->inflight_parkers, .drained_cv = &r->drained_cv };\n");
+        self.w("            maka_pending_park = &req;\n");
+        self.w("            me->state = 2;\n");
+        self.w("            swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("            pthread_mutex_unlock(&r->kw_mu);\n");
+        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("        } else {\n");
+        self.w("            r->pth_waiters++;\n");
+        self.w("            while (atomic_load(&r->writer) != 0 || atomic_load(&r->readers) != 0) pthread_cond_wait(&r->kw_cv, &r->kw_mu);\n");
+        self.w("            r->pth_waiters--;\n");
+        self.w("            if (r->pth_waiters == 0) pthread_cond_signal(&r->drained_cv);\n");
+        self.w("            pthread_mutex_unlock(&r->kw_mu);\n");
+        self.w("        }\n");
+        self.w("    }\n");
+        self.w("}\n");
+        self.w("void maka_rwlock_unlock(maka_unit* p) {\n");
+        self.w("    maka_rwlock_t* r = (maka_rwlock_t*)p;\n");
+        self.w("    pthread_mutex_lock(&r->kw_mu);\n");
+        self.w("    if (atomic_load(&r->writer)) atomic_store(&r->writer, 0);\n");
+        self.w("    else atomic_fetch_sub(&r->readers, 1);\n");
+        self.w("    maka_fiber_t* w = r->fiber_waiters; r->fiber_waiters = NULL;\n");
+        self.w("    pthread_cond_broadcast(&r->kw_cv);\n");
+        self.w("    pthread_mutex_unlock(&r->kw_mu);\n");
+        self.w("    while (w) { maka_fiber_t* nx = w->next_waiter; w->next_waiter = NULL; __maka_ready_enqueue(w); w = nx; }\n");
+        self.w("}\n");
+        self.w("void maka_rwlock_destroy(maka_unit* p) {\n");
+        self.w("    maka_rwlock_t* r = (maka_rwlock_t*)p;\n");
+        self.w("    pthread_mutex_lock(&r->kw_mu);\n");
+        self.w("    atomic_store(&r->writer, 0); atomic_store(&r->readers, 0);\n");
+        self.w("    pthread_cond_broadcast(&r->kw_cv);\n");
+        self.w("    while (1) {\n");
+        self.w("        maka_fiber_t* w = r->fiber_waiters; r->fiber_waiters = NULL;\n");
+        self.w("        if (w) {\n");
+        self.w("            pthread_mutex_unlock(&r->kw_mu);\n");
+        self.w("            while (w) { maka_fiber_t* nx = w->next_waiter; w->next_waiter = NULL; __maka_ready_enqueue(w); w = nx; }\n");
+        self.w("            pthread_mutex_lock(&r->kw_mu);\n");
+        self.w("            continue;\n");
+        self.w("        }\n");
+        self.w("        if (r->pth_waiters > 0 || atomic_load(&r->inflight_parkers) > 0) {\n");
+        self.w("            pthread_cond_wait(&r->drained_cv, &r->kw_mu);\n");
+        self.w("            continue;\n");
+        self.w("        }\n");
+        self.w("        break;\n");
+        self.w("    }\n");
+        self.w("    pthread_mutex_unlock(&r->kw_mu);\n");
+        self.w("    pthread_mutex_destroy(&r->kw_mu); pthread_cond_destroy(&r->kw_cv); pthread_cond_destroy(&r->drained_cv);\n");
+        self.w("    free(r);\n");
+        self.w("}\n");
         // WaitGroup.
         self.w("typedef struct {\n");
         self.w("    _Atomic int64_t count;\n");
@@ -3811,14 +3930,25 @@ impl<'a> Cx<'a> {
         self.w("        swapcontext(&me->ctx, &maka_sched_ctx);\n");
         self.w("        return;\n");
         self.w("    }\n");
-        // Anchor or no scheduler: pthread_cond_wait is fine — there are no
-        // co-resident fibers to starve.
-        self.w("    pthread_mutex_lock(&o->mu);\n");
-        self.w("    o->waiters++;\n");
-        self.w("    while (atomic_load(&o->state) != 2) pthread_cond_wait(&o->cv, &o->mu);\n");
-        self.w("    o->waiters--;\n");
-        self.w("    if (o->waiters == 0) pthread_cond_signal(&o->drained_cv);\n");
-        self.w("    pthread_mutex_unlock(&o->mu);\n");
+        // Anchor (or no scheduler): the once RUNNER may be a spawned, co-resident
+        // fiber that only the scheduler can resume, so we must DRIVE the scheduler
+        // while there is schedulable work rather than freezing it in a plain
+        // cond_wait - that would deadlock (the runner never resumes to publish
+        // state=2).  Mirrors maka_fmutex_lock / maka_wg_wait.
+        self.w("    while (atomic_load(&o->state) != 2) {\n");
+        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_current_fiber = maka_anchor_fiber;\n");
+        self.w("        } else {\n");
+        self.w("            pthread_mutex_lock(&o->mu);\n");
+        self.w("            if (atomic_load(&o->state) == 2) { pthread_mutex_unlock(&o->mu); break; }\n");
+        self.w("            o->waiters++;\n");
+        self.w("            pthread_cond_wait(&o->cv, &o->mu);\n");
+        self.w("            o->waiters--;\n");
+        self.w("            if (o->waiters == 0) pthread_cond_signal(&o->drained_cv);\n");
+        self.w("            pthread_mutex_unlock(&o->mu);\n");
+        self.w("        }\n");
+        self.w("    }\n");
         self.w("}\n");
         self.w("void maka_once_destroy(maka_unit* p) {\n");
         self.w("    maka_once_t* o = (maka_once_t*)p;\n");
@@ -3908,6 +4038,26 @@ impl<'a> Cx<'a> {
         self.w("        if (c->waiters == 0) pthread_cond_signal(&c->drained_cv);\n");
         self.w("        pthread_mutex_unlock(&c->m);\n");
         self.w("    }\n");
+        self.w("}\n");
+        // Non-blocking dequeue: takes c->m ONCE, pops head if present (returns 1),
+        // else returns 0 without ever waiting.  The try_recv shims must route
+        // through this - doing count()>0 then a separate blocking recv() is a
+        // TOCTOU: with >1 consumer another can steal the item in the gap, so the
+        // loser's recv() blocks forever on an empty-but-open channel.
+        self.w("int64_t maka_chan_bytes_try_recv(maka_unit* p, maka_unit* dst) {\n");
+        self.w("    maka_bchan_t* c = (maka_bchan_t*)p;\n");
+        self.w("    pthread_mutex_lock(&c->m);\n");
+        self.w("    maka_bnode_t* n = c->head;\n");
+        self.w("    if (n) {\n");
+        self.w("        c->head = n->next; if (!c->head) c->tail = NULL;\n");
+        self.w("        c->count--;\n");
+        self.w("        memcpy((void*)dst, n->data, (size_t)c->item_size);\n");
+        self.w("        pthread_mutex_unlock(&c->m);\n");
+        self.w("        free(n);\n");
+        self.w("        return 1;\n");
+        self.w("    }\n");
+        self.w("    pthread_mutex_unlock(&c->m);\n");
+        self.w("    return 0;\n");
         self.w("}\n");
         // ====================================================================
         // Slice-based data-parallel primitives (par_for_each / par_filter /
@@ -6432,8 +6582,7 @@ impl<'a> Cx<'a> {
         self.w("static inline int64_t __maka_chan_try_recv_int(maka_unit* p, int64_t* out) {\n");
         self.w("    /* fast non-blocking peek: if count > 0, do the recv (which won't block). */\n");
         self.w("    if (!p || !out) return 0;\n");
-        self.w("    if (maka_chan_bytes_count(p) <= 0) return 0;\n");
-        self.w("    int64_t v = 0; maka_chan_bytes_recv(p, (maka_unit*)&v);\n");
+        self.w("    int64_t v = 0; if (!maka_chan_bytes_try_recv(p, (maka_unit*)&v)) return 0;\n");
         self.w("    *out = v; return 1;\n");
         self.w("}\n");
         // Convenience: atomic_bool / atomic_ptr — internally back to the int64
@@ -6601,14 +6750,12 @@ impl<'a> Cx<'a> {
         // *out, or 0 if the channel was empty.
         self.w("int64_t __maka_rt_chan_try_recv_int(maka_unit* p, int64_t* out) {\n");
         self.w("    if (!p || !out) return 0;\n");
-        self.w("    if (maka_chan_bytes_count(p) <= 0) return 0;\n");
-        self.w("    int64_t v = 0; maka_chan_bytes_recv(p, (maka_unit*)&v);\n");
+        self.w("    int64_t v = 0; if (!maka_chan_bytes_try_recv(p, (maka_unit*)&v)) return 0;\n");
         self.w("    *out = v; return 1;\n");
         self.w("}\n");
         self.w("int64_t __maka_rt_chan_try_recv_float(maka_unit* p, double* out) {\n");
         self.w("    if (!p || !out) return 0;\n");
-        self.w("    if (maka_chan_bytes_count(p) <= 0) return 0;\n");
-        self.w("    double v = 0; maka_chan_bytes_recv(p, (maka_unit*)&v);\n");
+        self.w("    double v = 0; if (!maka_chan_bytes_try_recv(p, (maka_unit*)&v)) return 0;\n");
         self.w("    *out = v; return 1;\n");
         self.w("}\n");
         // env_set + args + tcp_connect(string).
@@ -6796,8 +6943,7 @@ impl<'a> Cx<'a> {
         // The caller decides item size based on the channel they created with.
         self.w("int64_t __maka_rt_chan_try_recv_bytes(maka_unit* p, maka_unit* out) {\n");
         self.w("    if (!p || !out) return 0;\n");
-        self.w("    if (maka_chan_bytes_count(p) <= 0) return 0;\n");
-        self.w("    maka_chan_bytes_recv(p, out); return 1;\n");
+        self.w("    return maka_chan_bytes_try_recv(p, out);\n");
         self.w("}\n");
         // Process + env_remove + file_copy/chmod/realpath + udp_recv_from.
         self.w("int64_t __maka_rt_process_id(void) {\n");

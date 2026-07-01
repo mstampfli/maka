@@ -1,0 +1,33 @@
+// Regression: RwLock must be fiber-aware.  A raw pthread_rwlock blocks the whole
+// scheduler OS thread, so a fiber write-locking while a suspended fiber holds the
+// read lock deadlocked everything.  Many fibers contend on one RwLock with write
+// (increment) and read phases across yields; mutual exclusion must hold and
+// nothing may hang.
+import std.{
+    RwLock, rwlock_new, rwlock_read_lock, rwlock_write_lock, rwlock_unlock, rwlock_destroy,
+    WaitGroup, wg_new, wg_add, wg_done, wg_wait, wg_destroy,
+};
+mut int shared = 0;
+unit main() {
+    RwLock    lk = rwlock_new();
+    WaitGroup wg = wg_new();
+    int N = 8;
+    wg_add(wg, N);
+    Vec<*Thread> ts = [];
+    for (int i in 0..N) {
+        *Thread t = spawn(unit() [lk, wg] {
+            for (int k in 0..250) {
+                rwlock_write_lock(lk); shared = shared + 1; rwlock_unlock(lk);
+                rwlock_read_lock(lk); rwlock_unlock(lk);
+                yield_now();
+            }
+            wg_done(wg);
+        });
+        push(ts, t);
+    }
+    wg_wait(wg);
+    for (*Thread t in ts) { join(t); }
+    log(shared);   // 8*250 = 2000 exactly if mutual exclusion holds
+    rwlock_destroy(lk);
+    wg_destroy(wg);
+}
