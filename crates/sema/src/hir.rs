@@ -420,6 +420,11 @@ pub struct LocalInfo {
     pub reassignable: bool,
     /// `thread_local` modifier: emits `static __thread` in C.
     pub thread_local: bool,
+    /// True for a closure capture local (in a lifted capturing-closure body).
+    /// The closure's heap env OWNS an owning capture and frees it when the
+    /// closure/env is dropped, so moving such a capture OUT of the body would
+    /// double-free.  The move pass rejects moving an owning capture out.
+    pub is_capture: bool,
     pub span: Span,
 }
 

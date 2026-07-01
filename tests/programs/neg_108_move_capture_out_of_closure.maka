@@ -1,0 +1,10 @@
+// Moving an OWNING capture out of a closure body double-frees it: the closure's
+// heap env owns the value and frees it on drop, and consume() frees it too.
+// The move pass must reject moving an owning capture out of the body.
+data Box { int v; }
+unit consume(own *Box b) { if (b != null) { log(b!.v); } }
+unit main() {
+    own *Box b = alloc Box { v = 42 };
+    *Thread t = spawn(unit() [b] { consume(b); });
+    join(t);
+}

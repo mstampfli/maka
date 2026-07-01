@@ -1547,7 +1547,19 @@ impl<'a> Analyzer<'a> {
 
     fn mark_moved(&mut self, id: LocalId, sp: Span) {
         // Heap-typed bindings honor the v1.2 move semantics; explicit `transfer X` invalidates any binding.
-        let name = self.f().locals[id.0 as usize].name.clone();
+        let (name, is_capture, owns) = {
+            let li = &self.f().locals[id.0 as usize];
+            (li.name.clone(), li.is_capture, ty_owns_heap(self.sym, &li.ty))
+        };
+        // An owning closure capture is owned by the heap env and freed on env
+        // drop; moving it OUT of the body hands ownership to a second owner while
+        // the env still frees it -> double-free.  Reject (borrow it in place, or
+        // don't move the owner out).  Covers every move-out path (by-value call,
+        // struct/array init, return, transfer, move into another local).
+        if is_capture && owns {
+            self.err(format!("cannot move captured value `{}` out of the closure body: the closure's environment owns it and frees it when the closure is dropped, so moving it out would double-free. Read it in place (borrow), or restructure so the owner is not moved out of the closure.", name), sp);
+            return;
+        }
         if self.state[id.0 as usize].moved {
             self.err(format!("use of moved value `{}`", name), sp);
             return;
@@ -2159,6 +2171,7 @@ fn hoist_one(e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: &mut Vec<HStmt>) {
         mut_payload: true,
         reassignable: true,
         thread_local: false,
+        is_capture: false,
         span: sp,
     });
     let original = std::mem::replace(e, HExpr { kind: HExprKind::Local(lid), ty: orig_ty, span: sp });

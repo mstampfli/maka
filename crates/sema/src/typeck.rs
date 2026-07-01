@@ -447,7 +447,7 @@ impl<'a> TypeChecker<'a> {
 
     fn fresh_local(&mut self, name: String, ty: HType, storage: StorageClass, mut_payload: bool, reassignable: bool, span: Span) -> LocalId {
         let id = LocalId(self.locals.len() as u32);
-        self.locals.push(LocalInfo { name, ty, storage, mut_payload, reassignable, thread_local: false, span });
+        self.locals.push(LocalInfo { name, ty, storage, mut_payload, reassignable, thread_local: false, is_capture: false, span });
         id
     }
 
@@ -646,7 +646,7 @@ impl<'a> TypeChecker<'a> {
 
     fn fresh_local_with_tls(&mut self, name: String, ty: HType, storage: StorageClass, mut_payload: bool, reassignable: bool, thread_local: bool, span: Span) -> LocalId {
         let id = LocalId(self.locals.len() as u32);
-        self.locals.push(LocalInfo { name, ty, storage, mut_payload, reassignable, thread_local, span });
+        self.locals.push(LocalInfo { name, ty, storage, mut_payload, reassignable, thread_local, is_capture: false, span });
         id
     }
 
@@ -4590,6 +4590,9 @@ impl<'a> TypeChecker<'a> {
         let mut capture_local_ids: Vec<LocalId> = Vec::new();
         for c in &caps {
             let id = sub.fresh_local(c.name.clone(), c.ty.clone(), StorageClass::Stack, true, false, sp);
+            // Mark it a capture: its owning value is owned by the closure env and
+            // freed on env drop, so the move pass rejects moving it OUT of the body.
+            sub.locals[id.0 as usize].is_capture = true;
             sub.bind_name(&c.name, id);
             capture_local_ids.push(id);
         }
