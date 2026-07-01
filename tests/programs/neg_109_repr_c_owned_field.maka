@@ -1,0 +1,8 @@
+// A #[repr(C)] struct with an owned/opaque field (String) mirrors to a
+// differently-sized C struct -> ABI/size mismatch -> wild sret write / SEGV.
+// The bridge must reject it at signature-parse time.
+rblock "
+    #[repr(C)] pub struct Pair { pub n: i64, pub s: String }
+    pub fn mk() -> Pair { Pair { n: 1, s: String::from(\"x\") } }
+";
+unit main() { Pair p = mk(); log(p.n); }

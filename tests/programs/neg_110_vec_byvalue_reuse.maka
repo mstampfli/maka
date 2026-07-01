@@ -1,0 +1,12 @@
+// A Vec<T> passed by value into Rust transfers ownership (the shim frees the
+// buffer).  __MakaVec is now a move-tracked owning value, so reusing it after
+// the consuming call is rejected (was a use-after-free + double-free).
+rblock "
+    pub fn mk(n:i64)->Vec<i64> { (1..=n).collect() }
+    pub fn sum(v:Vec<i64>)->i64 { v.iter().sum() }
+";
+unit main() {
+    __MakaVec_i64 v = mk(5);
+    log(sum(v));
+    log(sum(v));   // reuse of moved v
+}

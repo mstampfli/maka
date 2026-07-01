@@ -715,11 +715,11 @@ fn build_extern_decl(f: &RustFn) -> ExternDecl {
         .iter()
         .map(|p| Param {
             name: p.name.clone(),
-            ty: rust_to_maka_ty(&p.ty, sp),
+            ty: rust_to_maka_ty(&p.ty, sp, false),
             span: sp,
         })
         .collect();
-    let ret = rust_to_maka_ty(&f.ret, sp);
+    let ret = rust_to_maka_ty(&f.ret, sp, true);
     ExternDecl {
         name: f.name.clone(),
         c_name: format!("__maka_shim_{}", f.name),
@@ -732,11 +732,22 @@ fn build_extern_decl(f: &RustFn) -> ExternDecl {
     }
 }
 
-fn rust_to_maka_ty(ty: &RustType, sp: Span) -> Type {
+fn rust_to_maka_ty(ty: &RustType, sp: Span, is_return: bool) -> Type {
     match ty {
         RustType::Prim(s) => Type::Named(rust_prim_to_maka(s).to_string(), sp),
         RustType::Bool => Type::Named("bool".to_string(), sp),
         RustType::Unit => Type::Unit(sp),
+        // `&str` is position-sensitive.  As a PARAM it is a borrowed view: the
+        // shim reads it via CStr, no allocation, so Maka `string` (a view) is
+        // right.  As a RETURN the shim ALWAYS mallocs an owned copy (see
+        // marshal_out, shared with OwnedString), so it must surface as an owned
+        // `own *const string` that Maka frees at scope exit - otherwise every
+        // `&str`-returning call leaks the copy.
+        RustType::StrSlice if is_return => Type::OwnPtr {
+            mutness: Mutness::Const,
+            inner: Box::new(Type::Named("string".to_string(), sp)),
+            span: sp,
+        },
         RustType::StrSlice => Type::Named("string".to_string(), sp),
         // Returning a Rust `String` is owned heap → Maka `own *string` (= `String`),
         // a single owned `char*`.  Receiving one: Maka caller passes `string`, shim
@@ -912,6 +923,16 @@ enum RustType {
     RawMutPtr,            // *mut T
 }
 
+/// A field type whose Maka mirror has the SAME layout as the Rust type, so it is
+/// safe inside a #[repr(C)] struct.  Owned-heap and opaque-by-value types are NOT
+/// identity - they mirror to a differently-sized pointer/struct and corrupt the
+/// C ABI.
+fn is_repr_c_identity(ty: &RustType) -> bool {
+    !matches!(ty,
+        RustType::OwnedString | RustType::StrSlice | RustType::VecOf(_)
+        | RustType::OptionOf(_) | RustType::ResultOf(..) | RustType::Opaque(_))
+}
+
 /// Walk Rust source and build the full surface we expose to Maka.
 fn parse_rust_surface(src: &str) -> Result<RustSurface, String> {
     let file: syn::File =
@@ -958,6 +979,23 @@ fn parse_rust_surface(src: &str) -> Result<RustSurface, String> {
     for s in &mut structs {
         for f in &mut s.fields {
             f.ty = reclassify(&f.ty, &known_repr_c);
+        }
+        // A #[repr(C)] struct is mirrored field-for-field into a C struct.  An
+        // owned-heap or opaque field (String / &str / Vec / Option / Result / an
+        // opaque by-value type) has a DIFFERENT size and layout in the Maka
+        // mirror (e.g. Rust `String` is 24 bytes but mirrors to a bare `char*`),
+        // so the two structs disagree on size and struct-return ABI class - the
+        // shim writes through an sret pointer the caller never supplied -> a wild
+        // write / SEGV.  Reject such fields.
+        if s.repr_c {
+            for f in &s.fields {
+                if !is_repr_c_identity(&f.ty) {
+                    return Err(format!(
+                        "#[repr(C)] struct `{}`: field `{}` has type `{}`, which is not a C-identity type. Owned/opaque fields (String, &str, Vec, Option, Result, or an opaque struct by value) have a different layout in the Maka mirror and corrupt the C ABI (size + struct-return mismatch). Use primitive, bool, raw-pointer, reference, or other #[repr(C)]-struct fields; return owned data separately or behind an opaque handle.",
+                        s.name, f.name, rust_name_of(&f.ty)
+                    ));
+                }
+            }
         }
     }
 
@@ -1501,8 +1539,15 @@ fn build_container_data_decls(insts: &[ContainerInst]) -> Vec<DataDecl> {
                     format!("__MakaVec_{}", sanitise(t)),
                     vec![
                         (
+                            // OWNING pointer: makes __MakaVec a move-tracked owning
+                            // value.  The shim libc::mallocs the buffer (return) and
+                            // libc::frees it when the Vec is passed by value into Rust
+                            // (param).  So a by-value Vec is a MOVE - reuse/aliasing is
+                            // rejected (was a use-after-free + double-free), and an
+                            // un-consumed returned Vec is auto-freed at scope exit
+                            // (was a leak).  free() matches libc::malloc.
                             "ptr".to_string(),
-                            Type::Ptr {
+                            Type::OwnPtr {
                                 mutness: Mutness::Mut,
                                 inner: Box::new(elem_ty),
                                 span: sp,
@@ -1578,7 +1623,7 @@ fn build_data_decl(s: &RustStruct) -> DataDecl {
         .iter()
         .map(|f| FieldDecl {
             mutness: Mutness::Mut,
-            ty: rust_to_maka_ty(&f.ty, sp),
+            ty: rust_to_maka_ty(&f.ty, sp, false),
             name: f.name.clone(),
             default: None,
             is_embed: false,
