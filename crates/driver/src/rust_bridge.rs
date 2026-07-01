@@ -341,9 +341,14 @@ fn build_sidecar_with_probes(
     if !opaque_names.is_empty() {
         lib_rs.push_str("\n// auto-generated Rust<T> drop shims\n");
         for n in &opaque_names {
+            // The fn NAME must be a sanitised identifier (a raw `Vec<String>`
+            // is invalid Rust in a fn name and, for nested generics, a syntax
+            // error); the real type is kept only in the `*mut <type>` cast.  The
+            // sanitised name matches the Maka-side `Rust<sanitise(name)>` label,
+            // so codegen's `__maka_drop_<label>` call resolves this definition.
             lib_rs.push_str(&format!(
-                "#[no_mangle]\npub extern \"C\" fn __maka_drop_{0}(p: *mut u8) {{ if !p.is_null() {{ unsafe {{ drop(Box::from_raw(p as *mut {0})); }} }} }}\n",
-                n));
+                "#[no_mangle]\npub extern \"C\" fn __maka_drop_{mangled}(p: *mut u8) {{ if !p.is_null() {{ unsafe {{ drop(Box::from_raw(p as *mut {real})); }} }} }}\n",
+                mangled = sanitise(n), real = n));
         }
     }
     // Per-call-site Send / Sync probes routed from sema.  A `Send` probe
@@ -759,10 +764,15 @@ fn rust_to_maka_ty(ty: &RustType, sp: Span, is_return: bool) -> Type {
             span: sp,
         },
         // Owned: surfaces as `Rust<T>` (= `own *mut unit`).  This is the form
-        // Maka users see when binding a return value.
+        // Maka users see when binding a return value.  The label must be the
+        // FULL sanitised type name (not the generics-stripped `opaque_label`):
+        // it is the identifier the auto-drop shim is keyed on, and stripping
+        // `Vec<String>` / `Vec<Vec<i64>>` both to `Vec` collides them AND fails
+        // to match the shim, so the generated drop function never links.  Both
+        // sides now sanitise the SAME `name`, so the names agree.
         RustType::Opaque(name) => Type::Generic {
             name: "Rust".to_string(),
-            args: vec![Type::Named(opaque_label(name), sp)],
+            args: vec![Type::Named(sanitise(name), sp)],
             span: sp,
         },
         // Borrowed: surfaces as a raw `*const unit` / `*mut unit` on the Maka

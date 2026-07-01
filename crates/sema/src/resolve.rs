@@ -8,6 +8,36 @@ pub fn resolve_type(sym: &SymTab, t: &ast::Type, errors: &mut Vec<SemaError>) ->
     resolve_type_in(sym, t, &[], errors)
 }
 
+/// Sanitise a name to a C identifier (same rule as the rust bridge's `sanitise`),
+/// so a `Rust<T>` opaque drop label matches the sidecar's `__maka_drop_<...>` shim.
+fn sanitise_ident(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect()
+}
+
+/// Reconstruct the Rust type string of a `Rust<T>` argument, matching the bridge's
+/// `write_syn_type` format (name, `<`, args joined by `, `, `>`), so sanitising it
+/// yields the same identifier the auto-drop shim is generated with.
+fn rust_type_string(t: &ast::Type) -> String {
+    fn go(t: &ast::Type, out: &mut String) {
+        match t {
+            ast::Type::Named(n, _) => out.push_str(n),
+            ast::Type::Generic { name, args, .. } => {
+                out.push_str(name);
+                out.push('<');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 { out.push_str(", "); }
+                    go(a, out);
+                }
+                out.push('>');
+            }
+            _ => out.push('T'),
+        }
+    }
+    let mut s = String::new();
+    go(t, &mut s);
+    s
+}
+
 /// Lower a struct/variant field's default expression to an HExpr so it can be
 /// spliced in when a struct literal omits the field.  Supports literal defaults
 /// (and a negated numeric literal); anything more complex is left as `None`
@@ -511,9 +541,16 @@ pub fn resolve_type_in(
             // label is carried so Maka can route per-call-site Send / Sync
             // probes back to the sidecar at thread-crossing sites.
             if name == "Rust" && args.len() == 1 {
+                // The label is the identifier the auto-drop shim is keyed on.  A
+                // user may write the natural `Rust<Vec<Vec<i64>>>`, or bind the
+                // bridge-surfaced `Rust<Vec_Vec_i64__>` (already a Named); both
+                // must resolve to the SAME label so codegen's `__maka_drop_<label>`
+                // matches the sidecar shim, which is `__maka_drop_<sanitise(rust
+                // type string)>`.  Reconstruct the Rust type string the same way
+                // the bridge's write_syn_type does, then sanitise identically.
                 let label = match &args[0] {
-                    ast::Type::Named(n, _) => n.clone(),
-                    other => format!("{:?}", other),
+                    ast::Type::Named(n, _) => sanitise_ident(n),
+                    other => sanitise_ident(&rust_type_string(other)),
                 };
                 return HType::RustOpaque(label);
             }

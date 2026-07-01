@@ -1,0 +1,14 @@
+// Regression: the auto-drop shim for a generic opaque `Rust<T>` (Vec<Vec<i64>>,
+// Vec<String>, ...) used to be emitted with three disagreeing name-manglings, so
+// the drop function either failed to compile (nested generics) or failed to link
+// (single generic).  Both the Maka drop call and the sidecar shim now mangle the
+// SAME type string identically, so the generated drop links and runs.
+rblock "
+    pub fn mk_nested() -> Vec<Vec<i64>> { vec![vec![1,2], vec![3,4,5]] }
+    pub fn mk_strs() -> Vec<String> { vec![String::from(\"a\"), String::from(\"b\")] }
+";
+unit main() {
+    Rust<Vec<Vec<i64>>> a = mk_nested();
+    Rust<Vec<String>>   b = mk_strs();
+    log(1);   // reached => both generic-opaque drop shims linked and ran
+}
