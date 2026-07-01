@@ -94,6 +94,12 @@ struct Cx<'a> {
     /// with different type args (e.g. try_ok's Result<T,E>.Err into the caller's
     /// Result<U,E>).
     cur_c_func_ret: HType,
+    /// `*Thread` handle locals in the current function that are NEVER read after
+    /// declaration (genuinely abandoned - not joined/detached/stored/returned).
+    /// Such a handle leaks its runtime Thread struct, so it is auto-detached at
+    /// its declaring block's exit.  Read handles are excluded, so join/store
+    /// paths are never double-reaped.
+    cur_abandoned_handles: std::collections::HashSet<u32>,
     /// Stack of (synthetic `__yield` local, C end-label) for the value-producing
     /// match arms currently being emitted.  A `yield` lowers to an assignment of
     /// that local; assigning it must ALSO jump to the arm's end label so a `yield`
@@ -129,6 +135,7 @@ impl<'a> Cx<'a> {
             inline_propagate_drops: Vec::new(),
             inline_loop_drops: Vec::new(),
             cur_c_func_ret: HType::Unit,
+            cur_abandoned_handles: Default::default(),
             yield_exit: Vec::new(),
             yield_label_seq: 0,
             noted_aggregates: Default::default(),
@@ -7505,6 +7512,23 @@ impl<'a> Cx<'a> {
         // inline functions are spliced at each call site; no standalone C function emitted.
         if self.sym.func_sig(f.id).is_inline { return; }
         self.cur_c_func_ret = self.sym.func_sig(f.id).ret.clone();
+        // Abandoned *Thread handles: declared but never referenced again (not
+        // joined/detached/stored/returned).  Each leaks its runtime Thread
+        // struct, so it is auto-detached at its declaring block's exit.
+        self.cur_abandoned_handles = {
+            let mut read = std::collections::HashSet::new();
+            collect_local_reads_block(&f.body, &mut read);
+            let mut lets = Vec::new();
+            collect_let_locals(&f.body, &mut lets);
+            let mut abandoned = std::collections::HashSet::new();
+            for lid in lets {
+                if read.contains(&lid.0) { continue; }
+                let is_thread = matches!(&f.locals[lid.0 as usize].ty, HType::Ptr { inner, .. }
+                    if matches!(inner.as_ref(), HType::Struct(sid) if self.sym.struct_info(*sid).name == "Thread"));
+                if is_thread { abandoned.insert(lid.0); }
+            }
+            abandoned
+        };
         let sig = self.func_signature(f);
         self.wl(&format!("{} {{", sig));
         self.open();
@@ -7563,6 +7587,22 @@ impl<'a> Cx<'a> {
             };
             self.wl(&format!("/* drop heap {} */", nm));
             self.emit_field_drop(&n, &ty, 0);
+        }
+        // Auto-detach *Thread handles declared in this block that are never read
+        // again (abandoned).  Detach drops the spawner ref and lets the runner
+        // self-reap, so the Thread struct is freed instead of leaked.  The guard
+        // skips a null (failed spawn); read handles are excluded from the set, so
+        // joined/detached/stored/returned handles are never double-reaped.
+        if !self.cur_abandoned_handles.is_empty() {
+            for s in &b.stmts {
+                if let HStmt::Let { local, .. } = s {
+                    if self.cur_abandoned_handles.contains(&local.0) {
+                        let li = &f.locals[local.0 as usize];
+                        let n = local_name(*local, &li.name);
+                        self.wl(&format!("if ({0}) {{ __maka_detach((maka_unit*)({0})); }} /* auto-detach abandoned handle {1} */", n, li.name));
+                    }
+                }
+            }
         }
         if !is_top { self.close(); self.wl("}"); }
     }
@@ -11244,4 +11284,84 @@ fn fn_sig_key(ret: &HType, params: &[HType]) -> String {
 
 fn local_name(id: LocalId, name: &str) -> String {
     format!("{}_{}", c_ident(name), id.0)
+}
+
+/// Collect every local id that appears as an expression (a read or a write
+/// PLACE) anywhere in the block.  Used to find `*Thread` handles that are never
+/// referenced after declaration (so they are abandoned and can be auto-detached
+/// at scope exit).  Exhaustive over sub-expression-bearing variants; a missed
+/// variant would UNDER-count and risk over-reaping, so all are handled and only
+/// genuine leaves fall through.
+fn collect_local_reads_block(b: &HBlock, out: &mut std::collections::HashSet<u32>) {
+    for s in &b.stmts { collect_local_reads_stmt(s, out); }
+}
+fn collect_local_reads_stmt(s: &HStmt, out: &mut std::collections::HashSet<u32>) {
+    match s {
+        HStmt::Let { init, .. } => collect_local_reads_expr(init, out),
+        HStmt::Assign { place, value, .. } => { collect_local_reads_expr(place, out); collect_local_reads_expr(value, out); }
+        HStmt::ExprStmt(e) => collect_local_reads_expr(e, out),
+        HStmt::Return { value: Some(e), .. } | HStmt::Propagate { value: Some(e), .. } => collect_local_reads_expr(e, out),
+        HStmt::Return { value: None, .. } | HStmt::Propagate { value: None, .. }
+        | HStmt::Break { .. } | HStmt::Continue { .. } => {}
+        HStmt::If { cond, then_b, else_b, .. } => {
+            collect_local_reads_expr(cond, out);
+            collect_local_reads_block(then_b, out);
+            if let Some(b) = else_b { collect_local_reads_block(b, out); }
+        }
+        HStmt::While { cond, body, .. } => { collect_local_reads_expr(cond, out); collect_local_reads_block(body, out); }
+        HStmt::ForC { init, cond, step, body, .. } => {
+            collect_local_reads_stmt(init, out); collect_local_reads_expr(cond, out);
+            collect_local_reads_stmt(step, out); collect_local_reads_block(body, out);
+        }
+        HStmt::ForEach { src, body, .. } => { collect_local_reads_expr(src, out); collect_local_reads_block(body, out); }
+        HStmt::Block(b) | HStmt::Unsafe(b, _) => collect_local_reads_block(b, out),
+    }
+}
+fn collect_local_reads_expr(e: &HExpr, out: &mut std::collections::HashSet<u32>) {
+    use HExprKind::*;
+    match &e.kind {
+        Local(id) => { out.insert(id.0); }
+        Field { base, .. } | ArrayToSlice { base, .. } => collect_local_reads_expr(base, out),
+        Index { base, idx } => { collect_local_reads_expr(base, out); collect_local_reads_expr(idx, out); }
+        Call { args, .. } | InlineCall { args, .. } => for a in args { collect_local_reads_expr(a, out); },
+        CallIndirect { callee, args } => { collect_local_reads_expr(callee, out); for a in args { collect_local_reads_expr(a, out); } }
+        Bin { lhs, rhs, .. } => { collect_local_reads_expr(lhs, out); collect_local_reads_expr(rhs, out); }
+        Un { expr, .. } | Unwrap { expr, .. } | Cast { expr, .. } | CheckedCast { expr, .. }
+        | DropWrite(expr) | DerefRef(expr) | HeapAlloc(expr) | Free(expr) | Transfer(expr)
+        | SliceLen(expr) | EnumTag(expr) => collect_local_reads_expr(expr, out),
+        AddrOfRef { place, .. } => collect_local_reads_expr(place, out),
+        Struct { fields, .. } | VariantCtor { fields, .. } => for (_, fe) in fields { collect_local_reads_expr(fe, out); },
+        ArrayLit(es) => for e2 in es { collect_local_reads_expr(e2, out); },
+        Closure { env_values, .. } => for v in env_values { collect_local_reads_expr(v, out); },
+        Match { scrutinee, arms, .. } => {
+            collect_local_reads_expr(scrutinee, out);
+            for a in arms {
+                if let Some(g) = &a.guard { collect_local_reads_expr(g, out); }
+                collect_local_reads_block(&a.body, out);
+                if let Some(v) = &a.value { collect_local_reads_expr(v, out); }
+            }
+        }
+        // Leaves (no sub-expression): literals, ZeroInit, EnumVariant tag, FnRef,
+        // GlobalRef.  None can reference a local.
+        LitInt(..) | LitFloat(..) | LitBool(..) | LitChar(..) | LitStr(..) | LitNull | LitUnit
+        | ZeroInit | EnumVariant { .. } | FnRef(..) | GlobalRef(..) => {}
+    }
+}
+
+/// Collect the local id and declaring block of every `let` in the function, so
+/// each abandoned `*Thread` handle is detached in the block it was declared in
+/// (per loop iteration, not once at function exit).
+fn collect_let_locals(b: &HBlock, out: &mut Vec<LocalId>) {
+    for s in &b.stmts {
+        match s {
+            HStmt::Let { local, .. } => out.push(*local),
+            HStmt::If { then_b, else_b, .. } => {
+                collect_let_locals(then_b, out);
+                if let Some(eb) = else_b { collect_let_locals(eb, out); }
+            }
+            HStmt::While { body, .. } | HStmt::ForC { body, .. } | HStmt::ForEach { body, .. }
+            | HStmt::Block(body) | HStmt::Unsafe(body, _) => collect_let_locals(body, out),
+            _ => {}
+        }
+    }
 }

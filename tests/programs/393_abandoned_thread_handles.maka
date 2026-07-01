@@ -1,0 +1,16 @@
+// Regression: a *Thread handle never joined/detached/stored leaks its runtime
+// Thread struct.  Such abandoned handles are now auto-detached at their block's
+// exit (per iteration).  This exercises the path: 50 abandoned handles in a loop
+// plus one joined handle must coexist and the program must finish cleanly.
+import std.{ Atomic, atomic_new, atomic_add, atomic_get, atomic_destroy };
+unit main() {
+    Atomic<int> a = atomic_new(0);
+    for (int i in 0..50) {
+        *Thread t = thread(unit() [a] { _ = atomic_add(a, 1); });
+        // `t` is never used again -> auto-detached at loop-body exit (no leak).
+    }
+    *Thread j = thread(unit() [a] { _ = atomic_add(a, 100); });
+    join(j);                     // a joined handle alongside the abandoned ones
+    log(1);                      // reached => no crash / hang / double-free
+    atomic_destroy(a);
+}
