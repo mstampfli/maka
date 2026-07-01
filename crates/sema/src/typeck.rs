@@ -1477,7 +1477,16 @@ impl<'a> TypeChecker<'a> {
                 // For an instantiation (e.g. `Atomic<int>`), match the template
                 // base name ("Atomic"), not the mangled instantiation name.
                 let n = info.template.as_deref().unwrap_or(info.name.as_str());
-                if matches!(n,
+                // Trust the known-safe stdlib handle types by name ONLY when the
+                // struct actually comes from `module std` - else a USER struct named
+                // e.g. `Spinlock { *int p; }` (a raw alias, no real lock) would be
+                // falsely judged Shareable and let unsynchronized mutation cross a
+                // thread boundary.  A generic instantiation (`Atomic<int>`) carries
+                // the user's module_path, so also accept when its template is one of
+                // these names (the template itself is defined in std).
+                let from_std = info.module_path.first().map(|s| s.as_str()) == Some("std")
+                    || (info.template.is_some() && n == "Atomic");
+                if from_std && matches!(n,
                     "Mutex" | "RwLock" | "Spinlock" | "Channel" | "Thread"
                     | "Atomic" | "WaitGroup" | "Once" | "IntChan" | "FloatChan" | "ByteChan"
                     | "TlsConn") {
@@ -1494,10 +1503,12 @@ impl<'a> TypeChecker<'a> {
                 // &const T is shareable iff T is Shareable. &mut T is NOT shareable.
                 !mutable && self.is_shareable(inner)
             }
-            // *T (mutable pointer) is NOT shareable. *const T is shareable iff target is.
-            HType::Ptr { mutable, inner } => {
-                !mutable && self.is_shareable(inner)
-            }
+            // Neither `*T` nor `*const T` is Shareable.  A raw `*const T` aliases a
+            // local WITHOUT freezing it (unlike a `&const T` BORROW, which does): the
+            // owner keeps mutating the pointee, so sharing the const view into a thread
+            // that reads it races with the owner's writes.  Only the `&const T`
+            // immutable-borrow form (handled above) crosses a thread boundary.
+            HType::Ptr { inner, .. } => { let _ = inner; false }
             // raw *T: NEVER shareable.  The provenance is unknown, so even immutable
             // raw pointers may alias data being mutated outside Maka's tracking.
             HType::RawPtr { .. } => false,

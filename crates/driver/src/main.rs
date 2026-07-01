@@ -245,6 +245,15 @@ fn run() {
     if run {
         let exec = if out_bin.starts_with('/') || out_bin.starts_with("./") { out_bin.clone() } else { format!("./{}", out_bin) };
         let st = Command::new(&exec).status().expect("run failed");
-        std::process::exit(st.code().unwrap_or(0));
+        // A child killed by a signal (e.g. a Rust panic aborting across the C ABI)
+        // has code()==None; report it as 128+signal like a shell, not a masked 0.
+        #[cfg(unix)]
+        let code = {
+            use std::os::unix::process::ExitStatusExt;
+            st.code().unwrap_or_else(|| 128 + st.signal().unwrap_or(0))
+        };
+        #[cfg(not(unix))]
+        let code = st.code().unwrap_or(1);
+        std::process::exit(code);
     }
 }

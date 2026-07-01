@@ -1,0 +1,11 @@
+// A `data` struct with a trait-object (`&dyn Trait`) field must emit compiling C:
+// the Dyn_Trait fat-pointer typedef is now emitted after the struct forward-decls
+// and before the struct bodies, so a struct embedding it by field is defined.
+data Cat { int n; }
+logic Speak { int sound(&Cat c) { return c.n; } }
+data Holder { &dyn Speak thing; int id; }
+unit main() {
+  Cat c = { n = 3 };
+  Holder h = Holder { thing = &c as dyn Speak, id = 100 };
+  log(h.id);   // 100
+}

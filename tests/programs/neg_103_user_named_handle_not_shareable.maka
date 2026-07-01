@@ -1,0 +1,8 @@
+data Spinlock { *int p; }
+unit main() {
+  mut int x = 0;
+  Spinlock s = { p = &mut x };
+  *Thread t1 = thread(unit() [s] { *int p = s.p; if (p != null) { for (int i in 0..100) { p! = p! + 1; } } });
+  join(t1);
+  log(x);
+}

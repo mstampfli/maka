@@ -1,0 +1,8 @@
+unit main() {
+  mut int x = 0;
+  *const int rp = &x;
+  *Thread t = thread(unit() [rp] { mut int acc = 0; for (int i in 0..100) { acc = acc + rp!; } log(acc); });
+  for (int i in 0..100) { x = x + 1; }
+  join(t);
+  log(x);
+}

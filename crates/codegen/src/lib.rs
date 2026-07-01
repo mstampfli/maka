@@ -147,25 +147,30 @@ impl<'a> Cx<'a> {
 
     fn emit_module(&mut self) {
         self.emit_prologue();
-        self.emit_structs_and_enums();
 
-        // First pass: scan for slice/vec types used in signatures and function bodies so we can typedef them.
-        // Skip generic templates (non-empty type_params) - only their concrete
-        // instantiations are emitted; a template carries TyVar types (e.g.
-        // `Vec<V>`) that would produce bogus typedefs.
+        // First pass: scan for slice/vec/dyn types used in signatures and function
+        // bodies so we can typedef them.  Skip generic templates (non-empty
+        // type_params) - only their concrete instantiations are emitted; a template
+        // carries TyVar types (e.g. `Vec<V>`) that would produce bogus typedefs.
         let funcs: Vec<HFunc> = self.sym.funcs.clone().into_iter()
             .filter(|f| self.sym.func_sig(f.id).type_params.is_empty())
             .collect();
         for f in &funcs {
             self.scan_func(f);
         }
-        // Callable typedefs first: slice/vec element types may be closures
-        // (`Vec<int(int)>` -> buffer of Callable_int_int_).  Dyn typedefs next,
-        // before slice/vec, because a slice/vec element can be a trait object
-        // (`Vec<&dyn Trait>` -> buffer of Dyn_Trait), so the Dyn_Trait struct must
-        // be defined before the container typedef that stores it.
+        // Structs/enums: forward-decls, then (internally) dyn+callable typedefs
+        // that reference struct POINTERS, then the struct BODIES.  A `data` struct
+        // can embed a trait-object VALUE by field (`data Holder { &dyn Trait f; }`),
+        // so the Dyn_Trait fat-pointer typedef must be defined before the struct
+        // body - but AFTER the struct forward-decls (its vtable takes struct ptrs).
+        // The scan above populated the dyn/callable sets used there.
+        self.emit_structs_and_enums();
+        // Callable typedefs for types used only in function signatures (the
+        // dyn typedefs were already emitted inside emit_structs_and_enums, after
+        // the forward-decls; emitting them again would redefine them).
         self.emit_callable_typedefs();
-        self.emit_dyn_typedefs();
+        // Slice/vec typedefs come AFTER structs: a `Vec<Cat>` buffer embeds the
+        // struct by value, so the element struct must already be defined.
         self.emit_slice_typedefs();
         self.emit_vec_typedefs();
 
@@ -4759,6 +4764,12 @@ impl<'a> Cx<'a> {
     /// including `lv` itself when it is an owning pointer.
     fn emit_field_drop(&mut self, lv: &str, ty: &HType, depth: usize) {
         match ty {
+            HType::OwnPtr { inner, .. } if matches!(inner.as_ref(), HType::Dyn { .. }) => {
+                // `own *dyn Trait` collapses to the fat-pointer VALUE `{void* data;
+                // vtbl}` in C, so `free(lv)` would free a struct value (invalid).
+                // The owned erased object is `lv.data` - free that.
+                self.wl(&format!("if (({0}).data) {{ free(({0}).data); }}", lv));
+            }
             HType::OwnPtr { inner, .. } => {
                 self.wl(&format!("if ({}) {{", lv));
                 self.open();
@@ -4893,6 +4904,12 @@ impl<'a> Cx<'a> {
                 }
             }
         }
+
+        // Dyn (trait-object) typedefs go here - AFTER the struct/enum forward-decls
+        // (their vtables take struct POINTERS, satisfied by the forward-decls) and
+        // BEFORE the struct BODIES (a struct field can embed a `Dyn_T` fat-pointer
+        // by value, so its typedef must exist first).  Idempotent.
+        self.emit_dyn_typedefs();
 
         // Full definitions, emitted in dependency order.  A type that embeds
         // another BY VALUE (a struct field, an enum-variant field, or an array
