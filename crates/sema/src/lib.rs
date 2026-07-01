@@ -658,7 +658,7 @@ fn check_inline_propagate_compat(sym: &SymTab, funcs: &[HFunc], errors: &mut Vec
         funcs: &[HFunc], visited: &mut std::collections::HashSet<u32>,
     ) {
         match s {
-            HStmt::Propagate { value, span } => {
+            HStmt::Propagate { value, span, .. } => {
                 match value {
                     Some(v) => {
                         if !type_eq(&v.ty, ret) {

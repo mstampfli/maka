@@ -1,0 +1,23 @@
+// An inline fn's own live owning local must be freed on a `propagate` early-return
+// (propagate exits the frame like a return).  It was leaked - the inline Propagate
+// codegen dropped only the caller-frame locals, never the inline frame's own.
+import std.{String, StringOps, Result, Try, string_from};
+Result<int, String> parse(int n) {
+  if (n < 0) { return Result.Err { err = string_from("err") }; }
+  return Result.Ok { value = n };
+}
+inline T try_ok2<T, E>(Result<T, E> r) {
+  String scratch = string_from("SCRATCH");          // inline frame owning local
+  match (r) {
+    Result.Ok { value } { return value; }
+    Result.Err { err }  { propagate Result.Err { err = err }; }   // must free scratch here
+  }
+}
+Result<int, String> run(int n) { int v = try_ok2(parse(n)); return Result.Ok { value = v }; }
+int unwrap(Result<int, String> r) {
+  return match (r) { Result.Ok { value } value, Result.Err { err } 0 - (err.length() as int) };
+}
+unit main() {
+  log(unwrap(run(5)));       // 5
+  log(unwrap(run(0 - 1)));   // Err "err" -> -3
+}

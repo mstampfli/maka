@@ -759,7 +759,7 @@ pub enum HStmt {
     /// codegens to a real C `return X;` of the *outer* function (exits caller's frame).
     /// `propagate [expr];` — `value` is `None` when the surrounding inline (and
     /// its non-inline caller) returns `unit`.
-    Propagate { value: Option<HExpr>, span: Span },
+    Propagate { value: Option<HExpr>, /* owning locals of THIS frame to free before the early-return */ heap_drops: Vec<LocalId>, span: Span },
 }
 
 /// Global symbol table assembled before per-function type checking.

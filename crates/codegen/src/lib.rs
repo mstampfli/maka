@@ -7477,17 +7477,31 @@ impl<'a> Cx<'a> {
                 for (n, ty) in &drops { self.wl("/* drop on continue */"); self.emit_field_drop(n, ty, 0); }
                 self.wl("continue;");
             }
-            HStmt::Propagate { value, .. } => {
-                // `propagate X;` ⇒ `return X;` from the enclosing C function.
-                // Within an InlineCall expansion (which IS in the caller's C function), this exits
-                // the caller, fulfilling the spec semantics.  `propagate;` (no value) emits a bare
-                // `return;` — only valid when the caller returns `unit` (enforced by sema).
+            HStmt::Propagate { value, heap_drops, .. } => {
+                // `propagate X;` ⇒ `return X;` from the enclosing C function, first
+                // freeing THIS frame's live owning locals (like a `return`) - else
+                // they leak on the propagate path.  Evaluate X into a temp BEFORE the
+                // drops in case it reads one of them.
+                let drops: Vec<(String, HType)> = heap_drops.iter().map(|id| {
+                    let li = &f.locals[id.0 as usize];
+                    (local_name(*id, &li.name), li.ty.clone())
+                }).collect();
                 match value {
                     Some(v) => {
-                        let s = self.emit_expr(f, v);
-                        self.wl(&format!("return {};", s));
+                        let rt = self.c_type(&self.cur_c_func_ret.clone());
+                        self.wl("{");
+                        self.open();
+                        let s = self.emit_move_consuming(f, v);
+                        self.wl(&format!("{} __pv = {};", rt, s));
+                        for (n, ty) in &drops { self.emit_field_drop(n, ty, 0); }
+                        self.wl("return __pv;");
+                        self.close();
+                        self.wl("}");
                     }
-                    None => self.wl("return;"),
+                    None => {
+                        for (n, ty) in &drops { self.emit_field_drop(n, ty, 0); }
+                        self.wl("return;");
+                    }
                 }
             }
             HStmt::ForC { init, cond, step, body, .. } => {
@@ -8042,15 +8056,20 @@ impl<'a> Cx<'a> {
                 s.push_str(&format!("goto end_{}; ", tag));
                 s
             }
-            HStmt::Propagate { value, .. } => {
+            HStmt::Propagate { value, heap_drops, .. } => {
                 // A `propagate` early-returns the OUTERMOST non-inline C frame, so
                 // free the owning locals live in EVERY active inline frame between
                 // here and that return - not just the innermost - else an outer
                 // frame's locals leak (nested inline: try_ok inside an inline fn).
                 // Frames hold disjoint locals (distinct functions / tagged names);
                 // emit innermost-first (stack top -> bottom = reverse alloc order).
-                let all_drops: Vec<(String, HType)> =
-                    self.inline_propagate_drops.iter().rev().flatten().cloned().collect();
+                // THIS inline frame's own live owning locals (heap_drops, filled by
+                // the lifetime pass) come first - they were being missed entirely.
+                let mut all_drops: Vec<(String, HType)> = heap_drops.iter().map(|id| {
+                    let li = &inline_f.locals[id.0 as usize];
+                    (inline_local_name(inline_f, *id, tag), li.ty.clone())
+                }).collect();
+                all_drops.extend(self.inline_propagate_drops.iter().rev().flatten().cloned());
                 let dc = self.capture_drops(&all_drops);
                 match value {
                     Some(v) => {

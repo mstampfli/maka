@@ -536,7 +536,7 @@ impl<'a> TypeChecker<'a> {
                     self.err("`propagate` is only valid inside an `inline` function", *span);
                 }
                 let value = opt_e.as_ref().map(|e| self.check_expr(e, None));
-                HStmt::Propagate { value, span: *span }
+                HStmt::Propagate { value, heap_drops: Vec::new(), span: *span }
             }
             ast::Stmt::ForRange { var_ty, var_name, start, end, inclusive, body, span } => {
                 self.check_for_range(var_ty, var_name, start, end, *inclusive, body, *span)

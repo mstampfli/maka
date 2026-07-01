@@ -557,8 +557,11 @@ fn unmarshal_in(name: &str, ty: &RustType) -> (String, String) {
             name.to_string(),
         ),
         RustType::OwnedString => (
+            // A `String` param is passed BY VALUE (ownership transfers): Maka mints a
+            // libc-malloc'd copy and moves it in.  Copy it into a Rust String, then
+            // FREE the transferred buffer - otherwise it leaks every call.
             format!(
-                "let {n} = unsafe {{ CStr::from_ptr({n}).to_str().unwrap_or(\"\").to_string() }};",
+                "let {n} = unsafe {{ let __v = CStr::from_ptr({n}).to_str().unwrap_or(\"\").to_string(); libc::free({n} as *mut libc::c_void); __v }};",
                 n = name
             ),
             name.to_string(),
@@ -615,8 +618,10 @@ fn unmarshal_in(name: &str, ty: &RustType) -> (String, String) {
         RustType::VecOf(inner) => {
             let inner_ty = rust_name_of(inner);
             (
+                // A `Vec<T>` param transfers ownership: copy the elements into a Rust
+                // Vec, then FREE the transferred libc buffer (else it leaks each call).
                 format!(
-                    "let {n} = unsafe {{ if {n}.ptr.is_null() {{ Vec::new() }} else {{ std::slice::from_raw_parts({n}.ptr as *const {ty}, {n}.len).to_vec() }} }};",
+                    "let {n} = unsafe {{ let __v = if {n}.ptr.is_null() {{ Vec::new() }} else {{ std::slice::from_raw_parts({n}.ptr as *const {ty}, {n}.len).to_vec() }}; if !{n}.ptr.is_null() {{ libc::free({n}.ptr as *mut libc::c_void); }} __v }};",
                     n = name,
                     ty = inner_ty
                 ),

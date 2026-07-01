@@ -2757,11 +2757,29 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                     visit_matches_in_expr(sym, locals, src, scope_chain, loop_start, &mut moved, owning_params);
                     let _ = visit_block(sym, locals, body, scope_chain, Some(scope_chain.len()), &moved, owning_params);
                 }
-                HStmt::Propagate { value: Some(v), .. } => {
-                    moved_locals_in_expr(sym, v, &mut moved);
-                    visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, &mut moved, owning_params);
+                HStmt::Propagate { value, heap_drops, .. } => {
+                    // `propagate` early-returns the enclosing frame, so it must free
+                    // this frame's live owning locals - exactly like a `return`,
+                    // minus a propagated bare-local value (which moves out).  Without
+                    // this the frame's owning locals leaked on the propagate path.
+                    let mut returning: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+                    if let Some(v) = value {
+                        if ty_owns_heap(sym, &v.ty) {
+                            if let HExprKind::Local(id) = v.kind { returning.insert(id); }
+                        }
+                        moved_locals_in_expr(sym, v, &mut moved);
+                        visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, &mut moved, owning_params);
+                    }
+                    let mut drops = Vec::new();
+                    for scope in scope_chain.iter() {
+                        for id in scope.iter().rev() {
+                            if returning.contains(id) || moved.contains(id) { continue; }
+                            drops.push(*id);
+                        }
+                    }
+                    *heap_drops = drops;
+                    diverges = true;
                 }
-                HStmt::Propagate { value: None, .. } => {}
             }
         }
         // Fill heap_to_free: locals declared in this scope, in reverse order, skipping moved.
