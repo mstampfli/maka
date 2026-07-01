@@ -155,7 +155,16 @@ impl<'a> TypeChecker<'a> {
     /// captured ref could outlive its source when the closure resumes on
     /// another thread.  Other types are conservatively allowed — users own
     /// the safety of `*T` to thread-local data.
+    /// `shared_env`: the tier runs the SAME closure env on N worker threads
+    /// concurrently (the data-parallel `par_*` builtins), so a borrowed `&mut`
+    /// capture is shared-mutable-across-workers - an unsynchronized data race -
+    /// and must be rejected too.  The scoped single-thread spawn tiers pass
+    /// `false` (a `&mut` there is exclusive to the one thread, and the scoped
+    /// borrow / join-window check governs it).
     fn check_cross_thread_captures(&mut self, tier: &str, arg: &HExpr, sp: Span) {
+        self.check_cross_thread_captures_ext(tier, arg, sp, false);
+    }
+    fn check_cross_thread_captures_ext(&mut self, tier: &str, arg: &HExpr, sp: Span, shared_env: bool) {
         let mut cur = arg;
         let env_values = loop {
             match &cur.kind {
@@ -191,7 +200,24 @@ impl<'a> TypeChecker<'a> {
             // spawn handle is provably joined before the borrowed data's scope
             // exits, and rejects it otherwise - so defer to that check rather
             // than rejecting every borrow here.
-            if matches!(ty, HType::Ref { .. }) {
+            if let HType::Ref { mutable, .. } = ty {
+                // A `&mut` capture shared across N par-workers is an
+                // unsynchronized data race (every worker mutates the same
+                // pointee).  &const is fine (frozen, read-only, workers only
+                // read).  The scoped single-thread tiers allow &mut (exclusive
+                // to the one thread) and defer to check_scoped_thread_borrows.
+                if shared_env && *mutable {
+                    self.err(
+                        format!(
+                            "`{0}` captures a `&mut` reference, but its workers run concurrently on \
+                             the same env - every worker would mutate the same pointee, an \
+                             unsynchronized data race.  Capture `&const T`, an atomic, or a `Mutex` \
+                             instead, or partition the data so workers write disjoint regions.",
+                            tier
+                        ),
+                        sp,
+                    );
+                }
                 let _ = tier;
                 continue;
             }
@@ -2893,6 +2919,7 @@ impl<'a> TypeChecker<'a> {
                             if matches!(**ret, HType::Int) && params.len() == 1 && matches!(params[0], HType::Int));
                     if !ok_body { self.err(format!("par_map_int(slice) body must be `int(int)`, got `{}`", type_str(&body.ty)), sp); }
                 }
+                if let Some(__b) = hargs.last() { self.check_cross_thread_captures_ext("par_map_int", __b, sp, true); }
                 return HExpr {
                     kind: HExprKind::Call { callee: FuncId(u32::MAX - 28), args: hargs },
                     ty: HType::Vec { elem: Box::new(HType::Int) },
@@ -2994,6 +3021,7 @@ impl<'a> TypeChecker<'a> {
                     self.err(format!("par_map_bytes body must be `unit(*mut unit, *mut unit)`, got `{}`", type_str(&body.ty)), sp);
                 }
             }
+            if let Some(__b) = hargs.last() { self.check_cross_thread_captures_ext("par_map_bytes", __b, sp, true); }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 38), args: hargs },
                 ty: HType::Ptr { mutable: true, inner: Box::new(HType::Unit) },
@@ -3024,6 +3052,7 @@ impl<'a> TypeChecker<'a> {
                 if !is_slice { self.err(format!("par_for_each_float: first arg must be `[]float`, got `{}`", type_str(&hargs[0].ty)), sp); }
                 if !ok_body { self.err(format!("par_for_each_float body must be `unit(float)`, got `{}`", type_str(&body.ty)), sp); }
             }
+            if let Some(__b) = hargs.last() { self.check_cross_thread_captures_ext("par_for_each_float", __b, sp, true); }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 34), args: hargs },
                 ty: HType::Unit,
@@ -3054,6 +3083,7 @@ impl<'a> TypeChecker<'a> {
                 if !is_slice { self.err(format!("par_map_float: first arg must be `[]float`, got `{}`", type_str(&hargs[0].ty)), sp); }
                 if !ok_body { self.err(format!("par_map_float body must be `float(float)`, got `{}`", type_str(&body.ty)), sp); }
             }
+            if let Some(__b) = hargs.last() { self.check_cross_thread_captures_ext("par_map_float", __b, sp, true); }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 35), args: hargs },
                 ty: HType::Vec { elem: Box::new(HType::Float) },
@@ -3087,6 +3117,7 @@ impl<'a> TypeChecker<'a> {
                 if !ok_init { self.err("par_reduce_float: init must be `float`", sp); }
                 if !ok_body { self.err(format!("par_reduce_float combine must be `float(float, float)`, got `{}`", type_str(&body.ty)), sp); }
             }
+            if let Some(__b) = hargs.last() { self.check_cross_thread_captures_ext("par_reduce_float", __b, sp, true); }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 36), args: hargs },
                 ty: HType::Float,
@@ -3117,6 +3148,7 @@ impl<'a> TypeChecker<'a> {
                 if !is_slice { self.err(format!("par_for_each: first arg must be `[]int` or `&[]int`, got `{}`", type_str(&hargs[0].ty)), sp); }
                 if !ok_body { self.err(format!("par_for_each body must be `unit(int)`, got `{}`", type_str(&body.ty)), sp); }
             }
+            if let Some(__b) = hargs.last() { self.check_cross_thread_captures_ext("par_for_each", __b, sp, true); }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 27), args: hargs },
                 ty: HType::Unit,
@@ -3147,6 +3179,7 @@ impl<'a> TypeChecker<'a> {
                 if !is_slice { self.err(format!("par_filter_int: first arg must be `[]int`, got `{}`", type_str(&hargs[0].ty)), sp); }
                 if !ok_body { self.err(format!("par_filter_int pred must be `bool(int)`, got `{}`", type_str(&body.ty)), sp); }
             }
+            if let Some(__b) = hargs.last() { self.check_cross_thread_captures_ext("par_filter_int", __b, sp, true); }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 30), args: hargs },
                 ty: HType::Vec { elem: Box::new(HType::Int) },
@@ -3205,6 +3238,7 @@ impl<'a> TypeChecker<'a> {
                     self.err(format!("par_filter_bytes pred must be `bool(*mut unit)`, got `{}`", type_str(&body.ty)), sp);
                 }
             }
+            if let Some(__b) = hargs.last() { self.check_cross_thread_captures_ext("par_filter_bytes", __b, sp, true); }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 41), args: hargs },
                 ty: HType::Ptr { mutable: true, inner: Box::new(HType::Unit) },
@@ -3233,6 +3267,7 @@ impl<'a> TypeChecker<'a> {
                     self.err(format!("par_scan_bytes combine must be `unit(*mut unit, *mut unit, *mut unit)`, got `{}`", type_str(&body.ty)), sp);
                 }
             }
+            if let Some(__b) = hargs.last() { self.check_cross_thread_captures_ext("par_scan_bytes", __b, sp, true); }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 42), args: hargs },
                 ty: HType::Ptr { mutable: true, inner: Box::new(HType::Unit) },
@@ -3263,6 +3298,7 @@ impl<'a> TypeChecker<'a> {
                 if !is_slice { self.err(format!("par_filter_float: first arg must be `[]float`, got `{}`", type_str(&hargs[0].ty)), sp); }
                 if !ok_body { self.err(format!("par_filter_float pred must be `bool(float)`, got `{}`", type_str(&body.ty)), sp); }
             }
+            if let Some(__b) = hargs.last() { self.check_cross_thread_captures_ext("par_filter_float", __b, sp, true); }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 39), args: hargs },
                 ty: HType::Slice { mutable: false, elem: Box::new(HType::Float) },
@@ -3294,6 +3330,7 @@ impl<'a> TypeChecker<'a> {
                 if !is_slice { self.err(format!("par_scan_float: first arg must be `[]float`, got `{}`", type_str(&hargs[0].ty)), sp); }
                 if !ok_body { self.err(format!("par_scan_float combine must be `float(float, float)`, got `{}`", type_str(&body.ty)), sp); }
             }
+            if let Some(__b) = hargs.last() { self.check_cross_thread_captures_ext("par_scan_float", __b, sp, true); }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 40), args: hargs },
                 ty: HType::Slice { mutable: false, elem: Box::new(HType::Float) },
@@ -3325,6 +3362,7 @@ impl<'a> TypeChecker<'a> {
                 if !is_slice { self.err(format!("par_scan_int: first arg must be `[]int`, got `{}`", type_str(&hargs[0].ty)), sp); }
                 if !ok_body { self.err(format!("par_scan_int combine must be `int(int, int)`, got `{}`", type_str(&body.ty)), sp); }
             }
+            if let Some(__b) = hargs.last() { self.check_cross_thread_captures_ext("par_scan_int", __b, sp, true); }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 31), args: hargs },
                 ty: HType::Vec { elem: Box::new(HType::Int) },
@@ -3373,6 +3411,7 @@ impl<'a> TypeChecker<'a> {
                     if !ok_init { self.err("par_reduce_int(slice): init must be `int`", sp); }
                     if !ok_body { self.err(format!("par_reduce_int(slice) combine must be `int(int, int)`, got `{}`", type_str(&body.ty)), sp); }
                 }
+                if let Some(__b) = hargs_pre.last() { self.check_cross_thread_captures_ext("par_reduce_int", __b, sp, true); }
                 return HExpr {
                     kind: HExprKind::Call { callee: FuncId(u32::MAX - 29), args: hargs_pre },
                     ty: HType::Int,
@@ -3510,6 +3549,7 @@ impl<'a> TypeChecker<'a> {
                     self.err(format!("par_for_range body must be `unit(int)`, got `{}`", type_str(&body.ty)), sp);
                 }
             }
+            if let Some(__b) = hargs.last() { self.check_cross_thread_captures_ext("par_for_range", __b, sp, true); }
             return HExpr {
                 kind: HExprKind::Call { callee: FuncId(u32::MAX - 19), args: hargs },
                 ty: HType::Unit,
@@ -4565,6 +4605,12 @@ impl<'a> TypeChecker<'a> {
         let hir_body = sub.check_block(&body_block);
         sub.leave_scope();
         self.errors.extend(std::mem::take(&mut sub.errors));
+        // The sub-checker indexed every generic-call placeholder in this lambda
+        // body (and any nested lambda it produced) into ITS OWN
+        // instantiation_requests.  We relocate those requests into the parent's
+        // vec at offset `reloc_base`, so the placeholders must be re-based by the
+        // same offset to keep pointing at the right request (see the shift below).
+        let reloc_base = self.instantiation_requests.len() as u32;
         self.instantiation_requests.extend(std::mem::take(&mut sub.instantiation_requests));
         self.send_probes.extend(std::mem::take(&mut sub.send_probes));
         self.sync_probes.extend(std::mem::take(&mut sub.sync_probes));
@@ -4586,6 +4632,17 @@ impl<'a> TypeChecker<'a> {
             body: hir_body,
             span: sp,
         };
+
+        // Re-base the placeholder FuncIds in THIS lambda body (the reserved slot)
+        // and any nested lambdas the sub produced (indices past it) by the offset
+        // at which we relocated the sub's requests into the parent.  Earlier
+        // lambdas of the same parent (indices below reserved_func_idx) already
+        // index the parent's vec and must not be touched.
+        if reloc_base > 0 {
+            for j in reserved_func_idx..self.synth_funcs.len() {
+                shift_placeholder_fids(&mut self.synth_funcs[j], reloc_base);
+            }
+        }
 
         // Build the closure HExpr: env-init values from the current scope's locals.
         let env_inits: Vec<HExpr> = caps.iter().map(|c| {
@@ -5840,6 +5897,73 @@ fn rw_expr(e: &mut ast::Expr, c: &FieldCtx) {
             for a in args { rw_expr(a, c); }
         }
     }
+}
+
+/// Decrement every generic-call placeholder FuncId in `f`'s body by `base`.
+/// Used when a capturing lambda's instantiation requests are relocated into the
+/// enclosing function's request vector at offset `base`: each placeholder there
+/// still encodes its sub-local request index and must be re-based so it points
+/// at the relocated request.  A placeholder is any FuncId in the reserved band
+/// just below PLACEHOLDER_FID_BASE (real FuncIds are small), so it can never
+/// collide with a genuine callee id.
+fn shift_placeholder_fids(f: &mut HFunc, base: u32) {
+    fn shift_fid(callee: &mut FuncId, base: u32) {
+        let v = callee.0;
+        if v <= crate::PLACEHOLDER_FID_BASE && v > crate::PLACEHOLDER_FID_BASE - 0x0010_0000 {
+            callee.0 = v - base;
+        }
+    }
+    fn sh_block(b: &mut HBlock, base: u32) { for s in &mut b.stmts { sh_stmt(s, base); } }
+    fn sh_stmt(s: &mut HStmt, base: u32) {
+        match s {
+            HStmt::Let { init, .. } => sh_expr(init, base),
+            HStmt::Assign { place, value, .. } => { sh_expr(place, base); sh_expr(value, base); }
+            HStmt::ExprStmt(e) => sh_expr(e, base),
+            HStmt::Return { value, .. } => if let Some(v) = value { sh_expr(v, base); },
+            HStmt::If { cond, then_b, else_b, .. } => {
+                sh_expr(cond, base); sh_block(then_b, base);
+                if let Some(b) = else_b { sh_block(b, base); }
+            }
+            HStmt::While { cond, body, .. } => { sh_expr(cond, base); sh_block(body, base); }
+            HStmt::Block(b) | HStmt::Unsafe(b, _) => sh_block(b, base),
+            HStmt::Break { .. } | HStmt::Continue { .. } => {}
+            HStmt::ForC { init, cond, step, body, .. } => {
+                sh_stmt(init, base); sh_expr(cond, base); sh_stmt(step, base); sh_block(body, base);
+            }
+            HStmt::ForEach { src, body, .. } => { sh_expr(src, base); sh_block(body, base); }
+            HStmt::Propagate { value: Some(v), .. } => sh_expr(v, base),
+            HStmt::Propagate { value: None, .. } => {}
+        }
+    }
+    fn sh_expr(e: &mut HExpr, base: u32) {
+        match &mut e.kind {
+            HExprKind::Call { callee, args } => { shift_fid(callee, base); for a in args { sh_expr(a, base); } }
+            HExprKind::InlineCall { callee, args, .. } => { shift_fid(callee, base); for a in args { sh_expr(a, base); } }
+            HExprKind::Bin { lhs, rhs, .. } => { sh_expr(lhs, base); sh_expr(rhs, base); }
+            HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. }
+            | HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. }
+            | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr) => sh_expr(expr, base),
+            HExprKind::AddrOfRef { place, .. } => sh_expr(place, base),
+            HExprKind::Field { base: b, .. } | HExprKind::ArrayToSlice { base: b, .. } => sh_expr(b, base),
+            HExprKind::Index { base: b, idx } => { sh_expr(b, base); sh_expr(idx, base); }
+            HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields { sh_expr(fe, base); },
+            HExprKind::Match { scrutinee, arms, .. } => {
+                sh_expr(scrutinee, base);
+                for a in arms {
+                    if let Some(g) = &mut a.guard { sh_expr(g, base); }
+                    sh_block(&mut a.body, base);
+                    if let Some(v) = &mut a.value { sh_expr(v, base); }
+                }
+            }
+            HExprKind::HeapAlloc(inner) | HExprKind::Transfer(inner)
+            | HExprKind::Free(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => sh_expr(inner, base),
+            HExprKind::CallIndirect { callee, args } => { sh_expr(callee, base); for a in args { sh_expr(a, base); } }
+            HExprKind::Closure { env_values, .. } => for v in env_values { sh_expr(v, base); },
+            HExprKind::ArrayLit(es) => for e2 in es { sh_expr(e2, base); },
+            _ => {}
+        }
+    }
+    sh_block(&mut f.body, base);
 }
 
 pub fn type_eq(a: &HType, b: &HType) -> bool {

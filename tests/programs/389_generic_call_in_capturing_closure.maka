@@ -1,0 +1,19 @@
+// Regression: a generic (monomorphized) call inside a CAPTURING closure body
+// used to leak an un-rewritten placeholder FuncId into codegen and panic on an
+// out-of-bounds signature lookup.  The lifted closure body must have its
+// placeholders rewritten with the parent's instantiation mapping.
+int pick<T>(T v) { return 5; }
+
+unit main() {
+    int x = 21;
+    mut int r = 0;
+    unit() f = unit() [&mut r, x] { r = x + pick(5); };
+    f();
+    log(r);
+    // Also exercise it across a fiber capture (the sweep's original shape).
+    int y = 100;
+    mut int s = 0;
+    unit() g = unit() [&mut s, y] { s = y + pick("str"); };
+    g();
+    log(s);
+}

@@ -1,0 +1,10 @@
+// A par_* data-parallel builtin runs the closure on many worker threads sharing
+// one env; capturing an unsynchronized `*T` alias is a data race and must be
+// rejected (same rule as thread/job/spawn_pool).
+data Box { mut int v; }
+unit main() {
+    own *Box b = alloc Box { v = 0 };
+    *Box q = b;
+    par_for_range(0, 1000, unit(int i) [q] { q!.v = q!.v + 1; });
+    log(b!.v);
+}

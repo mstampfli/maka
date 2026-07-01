@@ -245,6 +245,15 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
         });
     }
 
+    // Maps a parent HFunc index -> the range of `funcs` indices holding the
+    // lifted CAPTURING-closure bodies it produced.  Those synth funcs carry
+    // placeholder FuncIds (for generic calls inside the closure body) that were
+    // re-based into the PARENT's instantiation_requests by check_capturing_lambda,
+    // so they must be rewritten with the parent's mapping - but they are pushed
+    // with EMPTY pending_reqs, so the fixpoint loop never visits them on their
+    // own.  We rewrite them alongside their parent instead.
+    let mut synth_of_parent: std::collections::HashMap<usize, std::ops::Range<usize>> = std::collections::HashMap::new();
+
     // First pass: non-generic top-level + logic funcs.
     let mut seen_has_pairs: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
     for item in &m.items {
@@ -256,7 +265,9 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                     Ok((mut hfunc, reqs, synth)) => {
                         for s in synth.structs { sym.structs.push(s); }
                         for s in synth.sigs { sym.sigs.push(s); }
+                        let __ss = funcs.len();
                         for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
+                        if funcs.len() > __ss { synth_of_parent.insert(funcs.len(), __ss..funcs.len()); }
                         sym.send_probes.extend(synth.send_probes);
                         sym.sync_probes.extend(synth.sync_probes);
                         pending_reqs.push(reqs);
@@ -275,7 +286,9 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                         Ok((hfunc, reqs, synth)) => {
                             for s in synth.structs { sym.structs.push(s); }
                             for s in synth.sigs { sym.sigs.push(s); }
-                            for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
+                            let __ss = funcs.len();
+                        for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
+                        if funcs.len() > __ss { synth_of_parent.insert(funcs.len(), __ss..funcs.len()); }
                             sym.send_probes.extend(synth.send_probes);
                             sym.sync_probes.extend(synth.sync_probes);
                             pending_reqs.push(reqs);
@@ -315,7 +328,9 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                         Ok((hfunc, reqs, synth)) => {
                             for s in synth.structs { sym.structs.push(s); }
                             for s in synth.sigs { sym.sigs.push(s); }
-                            for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
+                            let __ss = funcs.len();
+                        for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
+                        if funcs.len() > __ss { synth_of_parent.insert(funcs.len(), __ss..funcs.len()); }
                             sym.send_probes.extend(synth.send_probes);
                             sym.sync_probes.extend(synth.sync_probes);
                             pending_reqs.push(reqs);
@@ -485,6 +500,14 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
 
             // Rewrite placeholder FuncIds in the caller's body.
             rewrite_placeholders(&mut funcs[i], &mapping);
+            // ...and in the lifted capturing-closure bodies this function produced
+            // (their placeholders were re-based into this function's requests, so
+            // the same mapping applies).  Without this a generic call inside a
+            // capturing closure keeps its placeholder FuncId into codegen and
+            // panics on an out-of-bounds signature lookup.
+            if let Some(range) = synth_of_parent.get(&i).cloned() {
+                for j in range { rewrite_placeholders(&mut funcs[j], &mapping); }
+            }
 
             // Type-check the new instantiation bodies (each may produce more requests).
             for (req, new_id) in reqs.iter().zip(mapping.iter()) {
@@ -503,7 +526,9 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                     Ok((hf, reqs2, synth)) => {
                         for s in synth.structs { sym.structs.push(s); }
                         for s in synth.sigs { sym.sigs.push(s); }
+                        let __ss = funcs.len();
                         for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
+                        if funcs.len() > __ss { synth_of_parent.insert(funcs.len(), __ss..funcs.len()); }
                         sym.send_probes.extend(synth.send_probes);
                         sym.sync_probes.extend(synth.sync_probes);
                         pending_reqs.push(reqs2);
