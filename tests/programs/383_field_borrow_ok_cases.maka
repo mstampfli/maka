@@ -1,0 +1,12 @@
+// The valid twins of neg_101: returning a struct's borrow field that borrows a
+// PARAMETER (outlives the call) is fine, and USING a struct's dying borrow field
+// LOCALLY (not returning it) is fine - only the escape is rejected.
+data Holder { &int q; }
+&int via_param(&int p) { Holder h = Holder { q = p }; return h.q; }
+int local_use() { int x = 5; Holder h = Holder { q = &x }; log(h.q); return 0; }
+unit main() {
+  int y = 7;
+  &int z = via_param(&y);
+  log(z);            // 7
+  log(local_use());  // logs 5, then 0
+}

@@ -1,0 +1,9 @@
+// Extracting a borrow FIELD of a local struct that holds a borrow of a local, then
+// returning it, is a heap-use-after-free (the field points at the freed local).
+// Caught via holds_dying_borrow (set on the struct exactly when a field is a DYING
+// borrow - a param-borrow field leaves it false, see test 383).  A LOCAL use of the
+// field while the referent is alive stays valid (383), so this is escape-only, not
+// a poison of the value.
+data Holder { &int q; }
+&int f() { int x = 5; Holder h = Holder { q = &x }; return h.q; }
+unit main() { &int z = f(); log(z); }

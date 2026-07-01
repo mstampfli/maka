@@ -1319,6 +1319,36 @@ impl<'a> Analyzer<'a> {
             // local under it does not escape AS a borrow - mark under_deref.
             Cast { expr, .. } | CheckedCast { expr, .. } | DropWrite(expr) => self.check_no_local_ref_escape(expr, under_deref),
             DerefRef(expr) | Un { expr, .. } | Unwrap { expr, .. } => self.check_no_local_ref_escape(expr, true),
+            // Extracting a borrow/view FIELD out of a local that holds a dying
+            // borrow (`Holder h = Holder { q = &x }; return h.q;`) escapes that
+            // borrow - the field may be the dying one.  `holds_dying_borrow` is set
+            // on the struct local exactly when some field is a DYING borrow (a field
+            // borrowing a parameter leaves it false), so this is sound; it can only
+            // over-reject the exotic mixed case (one dying field + one param-borrow
+            // field, returning the safe one), which is restructurable.  Reading the
+            // field under a deref (`h.q!`) consumes the borrow, so skip then.
+            Field { base, .. } => {
+                if !under_deref
+                    && matches!(e.ty, HType::Ref { .. } | HType::Ptr { .. })
+                {
+                    if let HExprKind::Local(id) = base.kind {
+                        if self.state[id.0 as usize].holds_dying_borrow {
+                            let name = self.f().locals[id.0 as usize].name.clone();
+                            let span = e.span;
+                            self.err(
+                                format!(
+                                    "a borrow field of `{}` (which holds a borrow of a local the function frees on exit) escapes via the returned value, leaving a dangling reference. Return an owned value instead",
+                                    name
+                                ),
+                                span,
+                            );
+                        }
+                    }
+                }
+                // The base is read into (not itself escaping as a borrow), so walk
+                // it under_deref - this also catches a dying field nested deeper.
+                self.check_no_local_ref_escape(base, true);
+            }
             Bin { lhs, rhs, .. } => {
                 // Arithmetic/comparison consumes the borrow into a value.
                 self.check_no_local_ref_escape(lhs, true);
@@ -1472,6 +1502,12 @@ impl<'a> Analyzer<'a> {
             // via the arm-body walk, but routing it through v needs this.
             Match { arms, .. } => arms.iter().any(|a|
                 a.value.as_ref().map_or(false, |v| self.expr_is_dying_borrow(v))),
+            // Extracting a borrow/view FIELD from a local that holds a dying borrow
+            // yields a dying borrow (the field may be the dying one), so `&int r =
+            // h.q` propagates holds_dying_borrow to r and a later `return r` is
+            // caught - the via-local twin of the Field arm in check_no_local_ref_escape.
+            Field { base, .. } => matches!(e.ty, HType::Ref { .. } | HType::Ptr { .. })
+                && matches!(&base.kind, HExprKind::Local(id) if self.state[id.0 as usize].holds_dying_borrow),
             _ => false,
         }
     }
