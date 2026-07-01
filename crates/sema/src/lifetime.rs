@@ -707,6 +707,17 @@ impl<'a> Analyzer<'a> {
     /// `depth` is the body's depth; `narrow` is a pointer proven non-null by the
     /// loop condition (narrowed inside the body).
     fn walk_loop_body(&mut self, body: &mut HBlock, live_outer: &mut Vec<LocalId>, depth: u32, narrow: Option<LocalId>) {
+        self.walk_loop_body_rebound(body, live_outer, depth, narrow, None)
+    }
+
+    /// `rebound`: a loop binding (the for-each variable) that is FRESHLY assigned
+    /// from the iterator at the top of every iteration.  Its move / poison /
+    /// dying-borrow state must therefore reset each iteration and must NOT be
+    /// folded into the cross-iteration entry state - otherwise consuming it in the
+    /// body (e.g. `for (*Thread t in ts) { join(t); }`, which moves `t`) would make
+    /// the next iteration see it as already-moved and wrongly reject the re-read.
+    fn walk_loop_body_rebound(&mut self, body: &mut HBlock, live_outer: &mut Vec<LocalId>, depth: u32, narrow: Option<LocalId>, rebound: Option<LocalId>) {
+        if let Some(r) = rebound { self.state[r.0 as usize] = LocalState::fresh(); }
         let pre = self.snapshot();
         let err_mark = self.errors.len();
         let cap_mark = self.capture_nonnull.len();
@@ -724,15 +735,20 @@ impl<'a> Analyzer<'a> {
         // pointer - so a guarded cross-iteration use is sound.)  Pass 2 is a
         // superset of pass 1's diagnostics, so discard pass-1 errors / capture
         // facts to avoid duplicates.
+        let rebound_idx = rebound.map(|r| r.0 as usize);
         let new_invalidation = (0..self.state.len()).any(|i|
+            Some(i) != rebound_idx && (
             (post[i].moved && !pre[i].moved)
             || (post[i].poisoned && !pre[i].poisoned)
-            || (post[i].holds_dying_borrow && !pre[i].holds_dying_borrow));
+            || (post[i].holds_dying_borrow && !pre[i].holds_dying_borrow)));
         if new_invalidation {
             self.errors.truncate(err_mark);
             self.capture_nonnull.truncate(cap_mark);
             let mut entry = pre;
             for i in 0..entry.len() {
+                // The rebound loop variable is re-assigned at iteration top, so it
+                // carries no invalidation forward - keep it fresh for pass 2.
+                if Some(i) == rebound_idx { entry[i] = LocalState::fresh(); continue; }
                 if post[i].moved { entry[i].moved = true; }
                 if post[i].poisoned {
                     entry[i].poisoned = true;
@@ -987,9 +1003,9 @@ impl<'a> Analyzer<'a> {
                 self.walk_stmt(step, declared_here, live_outer, depth);
                 self.walk_loop_body(body, live_outer, depth + 1, None);
             }
-            HStmt::ForEach { src, body, .. } => {
+            HStmt::ForEach { var, src, body, .. } => {
                 self.walk_expr(src);
-                self.walk_loop_body(body, live_outer, depth + 1, None);
+                self.walk_loop_body_rebound(body, live_outer, depth + 1, None, Some(*var));
             }
             HStmt::Propagate { value: Some(v), .. } => self.walk_expr(v),
             HStmt::Propagate { value: None, .. } => {}
@@ -1081,7 +1097,8 @@ impl<'a> Analyzer<'a> {
             HExprKind::Index { base, idx } => { self.walk_expr(base); self.walk_expr(idx); }
             HExprKind::Call { callee, args } => {
                 let spawn = is_spawn_callee(*callee);
-                for a in args {
+                let reap = is_reaping_callee(*callee);
+                for a in args.iter_mut() {
                     // Detect move-in for any owning value passed by value.
                     self.walk_expr(a);
                     self.mark_owning_move(a);
@@ -1094,6 +1111,22 @@ impl<'a> Analyzer<'a> {
                                 if ty_owns_heap(self.sym, &v.ty) {
                                     if let HExprKind::Local(id) = v.kind { self.mark_moved(id, v.span); }
                                 }
+                            }
+                        }
+                    }
+                }
+                // A terminal thread-handle reap (join / detach / cancel)
+                // unconditionally drops the handle's spawner ref - the runtime
+                // Thread struct is freed once its refcount hits zero.  So the
+                // `*Thread` handle is CONSUMED: a second reap, or any later use,
+                // is a heap-use-after-free / double-free.  Mark it moved (unless
+                // its read above already flagged it moved, to avoid a double
+                // diagnostic) so reuse is rejected at compile time.
+                if reap {
+                    if let Some(a) = args.first() {
+                        if let Some(id) = root_local(a) {
+                            if !self.state[id.0 as usize].moved {
+                                self.mark_moved(id, a.span);
                             }
                         }
                     }
@@ -2151,6 +2184,17 @@ fn is_spawn_callee(c: FuncId) -> bool {
     c.0 == u32::MAX - 3 || c.0 == u32::MAX - 15 || c.0 == u32::MAX - 16 || c.0 == u32::MAX - 37
 }
 
+/// Terminal thread-handle reaps: `join` / `detach` / `cancel` unconditionally
+/// drop the handle's spawner ref (see codegen __maka_join_result / __maka_detach
+/// / __maka_cancel), so the `*Thread` handle is consumed - a second reap or any
+/// later use is a use-after-free / double-free.  `try_join` / `join_timeout`
+/// reap only on success (they poll), so they are NOT unconditional consumers.
+fn is_reaping_callee(c: FuncId) -> bool {
+    c.0 == u32::MAX - 4     // join
+        || c.0 == u32::MAX - 33 // detach
+        || c.0 == u32::MAX - 23 // cancel
+}
+
 /// CROSS-thread spawn tiers (thread / job / spawn_pool), excluding the
 /// same-thread fiber `spawn`.  Only these can outlive the spawning scope, so a
 /// borrowed-reference capture into one is sound only with a proven join.
@@ -2160,23 +2204,74 @@ fn is_cross_thread_callee(c: FuncId) -> bool {
 
 /// If `e` is a cross-thread spawn whose closure captures a borrowed reference
 /// (`&T`/`&mut T`), return that capture's span (the borrow that needs a join).
-fn cross_thread_borrow_capture(e: &HExpr) -> Option<Span> {
-    let HExprKind::Call { callee, args } = &e.kind else { return None };
-    if !is_cross_thread_callee(*callee) { return None; }
-    let mut cur = args.first()?;
+/// Per-function map: a local bound to a closure -> the borrows (root local +
+/// `&mut`?) that closure carries in its env, TRANSITIVELY (a closure that
+/// captures another borrow-carrying closure by value inherits its borrows).
+/// Lets the cross-thread scans see through a nested closure that smuggles a
+/// borrow across the boundary (`bump = unit()[&mut x]{...}; thread(unit()[bump]{bump()})`).
+type ClosureCaps = std::collections::HashMap<LocalId, Vec<(LocalId, bool)>>;
+
+/// Append the borrows a closure's env carries: a direct `&T`/`&mut T` capture,
+/// AND the transitive borrows of any captured closure value (looked up in `caps`).
+fn closure_env_borrows(env_values: &[HExpr], caps: &ClosureCaps, out: &mut Vec<(LocalId, bool)>) {
+    for v in env_values {
+        let root = root_local(v);
+        if let HType::Ref { mutable, .. } = &v.ty {
+            if let Some(r) = root { out.push((r, *mutable)); }
+        }
+        // A captured closure VALUE (FnPtr) - or a reference to one - drags its
+        // own borrow captures across the boundary even though its type is FnPtr,
+        // invisible to the direct `Ref` check above.  Inherit them.
+        if let Some(r) = root {
+            if let Some(inner) = caps.get(&r) { out.extend(inner.iter().copied()); }
+        }
+    }
+}
+
+/// Unwrap `alloc`/`heap`/deref wrappers to the underlying `Closure { env_values }`.
+fn closure_env_of(e: &HExpr) -> Option<&[HExpr]> {
+    let mut cur = e;
     loop {
         match &cur.kind {
-            HExprKind::Closure { env_values, .. } => {
-                for v in env_values {
-                    if matches!(v.ty, HType::Ref { .. }) { return Some(v.span); }
-                }
-                return None;
-            }
+            HExprKind::Closure { env_values, .. } => return Some(env_values),
             HExprKind::HeapAlloc(i) | HExprKind::DropWrite(i)
             | HExprKind::DerefRef(i) | HExprKind::Transfer(i) => cur = i,
             _ => return None,
         }
     }
+}
+
+/// Build the per-function closure-capture map (forward pass: a closure can only
+/// capture locals bound earlier, so one forward walk resolves transitivity).
+fn build_closure_caps(f: &HFunc) -> ClosureCaps {
+    fn walk(b: &HBlock, caps: &mut ClosureCaps) {
+        for s in &b.stmts {
+            if let HStmt::Let { local, init, .. } = s {
+                if let Some(env) = closure_env_of(init) {
+                    let mut borrows = Vec::new();
+                    closure_env_borrows(env, caps, &mut borrows);
+                    caps.insert(*local, borrows);
+                }
+            }
+            for_each_child_block(s, &mut |cb| walk(cb, caps));
+        }
+    }
+    let mut caps = ClosureCaps::new();
+    walk(&f.body, &mut caps);
+    caps
+}
+
+fn cross_thread_borrow_capture(e: &HExpr, caps: &ClosureCaps) -> Option<Span> {
+    let HExprKind::Call { callee, args } = &e.kind else { return None };
+    if !is_cross_thread_callee(*callee) { return None; }
+    let env = closure_env_of(args.first()?)?;
+    for v in env {
+        if matches!(v.ty, HType::Ref { .. }) { return Some(v.span); }
+        if let Some(r) = root_local(v) {
+            if caps.get(&r).map_or(false, |b| !b.is_empty()) { return Some(v.span); }
+        }
+    }
+    None
 }
 
 /// Is `e` a `join(handle)` call (the single-handle blocking join, MAX-4)?
@@ -2214,26 +2309,15 @@ fn handle_joined_in_block(b: &HBlock, spawn_idx: usize, handle: LocalId) -> bool
 /// The locals a cross-thread closure captures BY REFERENCE, with each borrow's
 /// mutability (`&mut` = true).  While the (un-joined) thread holds these borrows,
 /// the parent must not alias them - reading/writing them races with the thread.
-fn cross_thread_captured_borrows(e: &HExpr) -> Vec<(LocalId, bool)> {
+fn cross_thread_captured_borrows(e: &HExpr, caps: &ClosureCaps) -> Vec<(LocalId, bool)> {
     let mut out = Vec::new();
     let HExprKind::Call { callee, args } = &e.kind else { return out };
     if !is_cross_thread_callee(*callee) { return out; }
-    let Some(mut cur) = args.first() else { return out };
-    loop {
-        match &cur.kind {
-            HExprKind::Closure { env_values, .. } => {
-                for v in env_values {
-                    if let HType::Ref { mutable, .. } = &v.ty {
-                        if let Some(root) = root_local(v) { out.push((root, *mutable)); }
-                    }
-                }
-                return out;
-            }
-            HExprKind::HeapAlloc(i) | HExprKind::DropWrite(i)
-            | HExprKind::DerefRef(i) | HExprKind::Transfer(i) => cur = i,
-            _ => return out,
-        }
+    let Some(a) = args.first() else { return out };
+    if let Some(env) = closure_env_of(a) {
+        closure_env_borrows(env, caps, &mut out);
     }
+    out
 }
 
 /// Does statement `s` mention local `target` anywhere in its expressions
@@ -2278,11 +2362,11 @@ fn stmt_mentions_local(s: &HStmt, t: LocalId) -> bool {
 }
 
 fn check_scoped_thread_borrows(f: &HFunc, errors: &mut Vec<SemaError>) {
-    fn walk(b: &HBlock, locals: &[LocalInfo], errors: &mut Vec<SemaError>) {
+    fn walk(b: &HBlock, locals: &[LocalInfo], caps: &ClosureCaps, errors: &mut Vec<SemaError>) {
         for (i, s) in b.stmts.iter().enumerate() {
             match s {
                 HStmt::Let { local, init, .. } => {
-                    if let Some(bspan) = cross_thread_borrow_capture(init) {
+                    if let Some(bspan) = cross_thread_borrow_capture(init, caps) {
                         if !handle_joined_in_block(b, i, *local) {
                             let h = &locals[local.0 as usize].name;
                             errors.push(SemaError {
@@ -2304,7 +2388,7 @@ fn check_scoped_thread_borrows(f: &HFunc, errors: &mut Vec<SemaError>) {
                                 .position(|s2| matches!(s2, HStmt::ExprStmt(e) if is_join_of(e, *local)))
                                 .map(|p| i + 1 + p);
                             if let Some(ji) = join_idx {
-                                for (cl, is_mut) in cross_thread_captured_borrows(init) {
+                                for (cl, is_mut) in cross_thread_captured_borrows(init, caps) {
                                     if !is_mut { continue; }
                                     for s2 in &b.stmts[i + 1..ji] {
                                         if stmt_mentions_local(s2, cl) {
@@ -2325,7 +2409,7 @@ fn check_scoped_thread_borrows(f: &HFunc, errors: &mut Vec<SemaError>) {
                     }
                 }
                 HStmt::ExprStmt(e) => {
-                    if let Some(bspan) = cross_thread_borrow_capture(e) {
+                    if let Some(bspan) = cross_thread_borrow_capture(e, caps) {
                         errors.push(SemaError {
                             msg: "a cross-thread closure captures a borrowed reference but its handle is discarded, so it can never be joined; bind the handle and `join` it before scope exit, or capture by value".to_string(),
                             span: bspan,
@@ -2334,10 +2418,11 @@ fn check_scoped_thread_borrows(f: &HFunc, errors: &mut Vec<SemaError>) {
                 }
                 _ => {}
             }
-            for_each_child_block(s, &mut |cb| walk(cb, locals, errors));
+            for_each_child_block(s, &mut |cb| walk(cb, locals, caps, errors));
         }
     }
-    walk(&f.body, &f.locals, errors);
+    let caps = build_closure_caps(f);
+    walk(&f.body, &f.locals, &caps, errors);
 }
 
 pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {

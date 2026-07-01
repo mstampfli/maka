@@ -1,0 +1,7 @@
+// A *Thread handle is consumed by join/detach; reaping it twice is a
+// use-after-free / double-free, so the second reap must be rejected.
+unit main() {
+    *Thread t = thread(unit() { log(1); });
+    join(t);
+    join(t);
+}

@@ -1,0 +1,10 @@
+// Smuggle an unsynchronized &mut across a thread boundary via a NESTED closure:
+// `bump` captures `&mut counter`; the spawned closure captures `bump` BY VALUE
+// (type FnPtr), hiding the borrow from the top-level scan.  With no proven join
+// the borrow can outlive `counter`, so the transitive-capture check must reject.
+unit main() {
+    mut int counter = 0;
+    unit() bump = unit() [&mut counter] { counter = counter + 1; };
+    *Thread t = thread(unit() [bump] { bump(); });
+    log(counter);
+}
