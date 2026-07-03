@@ -1,0 +1,4 @@
+// A borrow of a local stored into a global outlives the local -> dangling.
+mut *int g = null;
+unit stash() { mut int x = 42; g = &mut x; }
+unit main() { stash(); *int p = g; if (p != null) { log(p!); } }

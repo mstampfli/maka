@@ -1,0 +1,9 @@
+// Yielding an owning local out of a terse match arm MOVES it; a later use is UAF.
+data Box { int v; }
+int getv(*Box b) { if (b == null) { return -1; } return b!.v; }
+unit main() {
+    own *Box a = alloc Box { v = 111 };
+    own *Box r = match (7) { 0 a, else alloc Box { v = 222 } };
+    log(getv(a));   // use of moved value `a`
+    log(getv(r));
+}

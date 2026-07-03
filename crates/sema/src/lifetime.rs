@@ -812,7 +812,12 @@ impl<'a> Analyzer<'a> {
                 //     know if `borrow_param`'s source outlives `b`.  When the place
                 //     reaches back to a parameter, `b` survives the call, so the
                 //     stash would escape.  Reject conservatively.
-                if matches!(place.kind, HExprKind::Field { .. } | HExprKind::Index { .. } | HExprKind::Unwrap { .. }) {
+                // A GlobalRef place (`g = &local`) stores into a module global,
+                // which OUTLIVES every function local, so a borrow of a local
+                // escaping into it dangles forever - escape-check it like the
+                // field-store case.  (A global is never auto-nulled by the
+                // scope-exit kill_lid path, so the dangle persists.)
+                if matches!(place.kind, HExprKind::Field { .. } | HExprKind::Index { .. } | HExprKind::Unwrap { .. } | HExprKind::GlobalRef(_)) {
                     self.check_no_local_ref_escape(value, false);
                     let place_root_is_param = root_local(place).map(|id|
                         matches!(self.f().locals[id.0 as usize].storage, StorageClass::Param)
@@ -1131,6 +1136,20 @@ impl<'a> Analyzer<'a> {
                         }
                     }
                 }
+                // push(container, element): storing a borrow of a local into a
+                // container that OUTLIVES this function (one reached through a
+                // parameter, or a global) leaves a dangling reference once the
+                // local dies.  Escape-check the pushed element like a returned
+                // borrow.  (A same-scope local container is not checked here - it
+                // dies with the borrow; only a provably-outliving container is.)
+                if callee.0 == u32::MAX - 60 && args.len() == 2 {
+                    let container_outlives = root_local(&args[0]).map(|id|
+                        matches!(self.f().locals[id.0 as usize].storage, StorageClass::Param)
+                    ).unwrap_or_else(|| matches!(args[0].kind, HExprKind::GlobalRef(_)));
+                    if container_outlives {
+                        self.check_no_local_ref_escape(&args[1], false);
+                    }
+                }
             }
             HExprKind::Cast { expr, .. } => self.walk_expr(expr),
             HExprKind::CheckedCast { expr, .. } => self.walk_expr(expr),
@@ -1228,7 +1247,17 @@ impl<'a> Analyzer<'a> {
                     if let Some(g) = &mut a.guard.clone() { self.walk_expr(g); }
                     let mut arm_live: Vec<LocalId> = Vec::new();
                     self.walk_block(&mut a.body, &mut arm_live, body_depth);
-                    if let Some(v) = &mut a.value.clone() { self.walk_expr(v); }
+                    if let Some(v) = &mut a.value.clone() {
+                        self.walk_expr(v);
+                        // A terse arm `pattern value` YIELDS its value out of the
+                        // match (into the match result), so a bare owning local
+                        // yielded here is MOVED - mark it, exactly like the Assign/
+                        // return/struct-init move sites.  The block-`yield` and
+                        // if-expression forms desugar to an Assign which already
+                        // marks the move; the terse arm-value form did not, so a
+                        // later use of the yielded owner was accepted (UAF).
+                        self.mark_owning_move(v);
+                    }
                     // A diverging arm (its body always returns/breaks/continues/
                     // propagates) never reaches the join after the match, so its
                     // invalidations must NOT propagate there - else a value it
@@ -1333,7 +1362,7 @@ impl<'a> Analyzer<'a> {
                         let span = e.span;
                         self.err(
                             format!(
-                                "reference to local `{}` escapes the function via the returned value — the local dies on return, so the caller would observe a dangling reference",
+                                "reference to local `{}` escapes its scope (via a return, a store into a global, or a push into a longer-lived container) — the local dies here, so the reference would dangle",
                                 name
                             ),
                             span,

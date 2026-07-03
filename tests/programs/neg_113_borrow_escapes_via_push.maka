@@ -1,0 +1,11 @@
+// A borrow of a local pushed into a caller-owned container outlives the local.
+unit fill(&mut Vec<*int> v) {
+    mut int x = 77;
+    v.push(&mut x);
+}
+unit main() {
+    mut Vec<*int> v = [];
+    fill(&mut v);
+    *int p = v[0];
+    if (p != null) { log(p!); }
+}
