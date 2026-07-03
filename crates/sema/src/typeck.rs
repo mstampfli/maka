@@ -478,7 +478,7 @@ impl<'a> TypeChecker<'a> {
             stmts.push(self.check_stmt(s));
         }
         self.leave_scope();
-        HBlock { stmts, heap_to_free: Vec::new(), ptr_nulls: Vec::new(), span: b.span }
+        HBlock { stmts, heap_to_free: Vec::new(), ptr_nulls: Vec::new(), stmt_nulls: Vec::new(), span: b.span }
     }
 
     fn check_stmt(&mut self, s: &ast::Stmt) -> HStmt {
@@ -4553,7 +4553,7 @@ impl<'a> TypeChecker<'a> {
             params: Vec::new(),
             ret: resolved_ret.clone(),
             locals: Vec::new(),
-            body: HBlock { stmts: Vec::new(), heap_to_free: Vec::new(), ptr_nulls: Vec::new(), span: sp },
+            body: HBlock { stmts: Vec::new(), heap_to_free: Vec::new(), ptr_nulls: Vec::new(), stmt_nulls: Vec::new(), span: sp },
             span: sp,
         });
 
@@ -4733,7 +4733,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn empty_block_stmt(&self, sp: Span) -> HStmt {
-        HStmt::Block(HBlock { stmts: Vec::new(), heap_to_free: Vec::new(), ptr_nulls: Vec::new(), span: sp })
+        HStmt::Block(HBlock { stmts: Vec::new(), heap_to_free: Vec::new(), ptr_nulls: Vec::new(), stmt_nulls: Vec::new(), span: sp })
     }
 
     /// Tier-2 compile-time reflection: `inline for (f in fields(value)) { body }`.
@@ -4860,7 +4860,7 @@ impl<'a> TypeChecker<'a> {
                     HStmt::ForC { init: Box::new(init), cond, step: Box::new(step), body: body_h, span: sp },
                 ],
                 heap_to_free: Vec::new(),
-                ptr_nulls: Vec::new(),
+                ptr_nulls: Vec::new(), stmt_nulls: Vec::new(),
                 span: sp,
             })
         }
@@ -4895,7 +4895,7 @@ impl<'a> TypeChecker<'a> {
             let (body, value) = match &arm.body {
                 ast::ArmBody::Expr(e) => {
                     let h = self.check_expr(e, result_ty.as_ref());
-                    let block = HBlock { stmts: Vec::new(), heap_to_free: Vec::new(), ptr_nulls: Vec::new(), span: arm.span };
+                    let block = HBlock { stmts: Vec::new(), heap_to_free: Vec::new(), ptr_nulls: Vec::new(), stmt_nulls: Vec::new(), span: arm.span };
                     (block, Some(h))
                 }
                 ast::ArmBody::Block(b) => {

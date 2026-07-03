@@ -1,0 +1,3 @@
+warning at 11:7: pointer `alias` was auto-nulled when its pointee went out of scope and has not been explicitly re-assigned on every code path since; this use observes that silent overwrite — re-assign `alias` yourself before reading it
+warning at 11:31: pointer `alias` was auto-nulled when its pointee went out of scope and has not been explicitly re-assigned on every code path since; this use observes that silent overwrite — re-assign `alias` yourself before reading it
+0

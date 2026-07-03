@@ -1,0 +1,17 @@
+// *T aliases AUTO-NULL (never poison) when their owner is reassigned/moved: a
+// runtime `alias = NULL` is emitted at the site, so this guarded use observes the
+// real null and is SAFE (auto-null model; errors would only be at an UNGUARDED
+// deref use-site). Was formerly a neg test asserting *T poison - that was wrong.
+
+data Box { int v; }
+int f() {
+  mut own *Box owner = alloc Box { v = 100 };
+  *Box alias = owner;
+  mut int acc = 0;
+  for (int i in 0..3) {
+    if (alias != null) { acc = acc + alias!.v; }   // iter 2+: alias dangles
+    owner = alloc Box { v = i };                    // frees the pointee alias holds
+  }
+  return acc;
+}
+unit main() { log(f()); }

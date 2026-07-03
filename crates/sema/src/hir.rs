@@ -732,6 +732,12 @@ pub struct HBlock {
     pub heap_to_free: Vec<LocalId>,
     /// Pointers whose deps became empty due to LIDs dying at this block's exit; set to NULL.
     pub ptr_nulls: Vec<LocalId>,
+    /// Per-statement runtime auto-nulls: `stmt_nulls[i]` lists `*T` alias locals to
+    /// set NULL immediately AFTER stmt `i` (an owner reassign/move mid-block
+    /// invalidated them).  `*T` aliases AUTO-NULL, never poison, so this runtime
+    /// null makes a later `if (a != null)` guard honest.  Parallel to `stmts`
+    /// (empty until the lifetime pass fills it).
+    pub stmt_nulls: Vec<Vec<LocalId>>,
     pub span: Span,
 }
 

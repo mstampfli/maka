@@ -90,6 +90,11 @@ pub fn analyze_func(
     let mut errors = std::mem::take(&mut a.errors);
     let warnings = std::mem::take(&mut a.warnings);
     let capture_nonnull = std::mem::take(&mut a.capture_nonnull);
+    // Materialize the per-statement `*T` auto-nulls the analysis recorded into
+    // real `alias = NULL;` statements (in every block, incl. match-arm bodies),
+    // BEFORE hoisting shifts statement indices.  A `*T` alias whose owner was
+    // reassigned/moved is nulled at runtime so a later guard is honest.
+    inject_stmt_nulls(&mut f.body, &f.locals);
     // Hoist owning temporaries consumed by a borrowing context into hidden
     // owning locals, so the auto-free machinery (below) drops them.
     hoist_owning_temps(sym, f);
@@ -612,6 +617,11 @@ struct Analyzer<'a> {
     /// living inside an expression, which `walk_expr` reaches without the `depth`
     /// argument the statement walkers thread.
     cur_depth: u32,
+    /// `*T` aliases auto-nulled by an owner reassign/move during the current
+    /// statement's walk.  walk_block flushes these into `HBlock.stmt_nulls[i]`
+    /// after statement `i`, so codegen emits a runtime `alias = NULL` right after
+    /// it (making a guarded deref honest).  Drained per statement.
+    pending_stmt_nulls: Vec<LocalId>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -629,6 +639,7 @@ impl<'a> Analyzer<'a> {
             capture_nonnull: Vec::new(),
             closure_holds_dying,
             cur_depth: 0,
+            pending_stmt_nulls: Vec::new(),
         }
     }
 
@@ -667,15 +678,25 @@ impl<'a> Analyzer<'a> {
         // `if (p == null) { return; }` — they revert to nullable at block exit.
         let mut guarded_here: Vec<LocalId> = Vec::new();
 
-        for stmt in &mut b.stmts {
-            self.walk_stmt(stmt, &mut declared_here, live_outer, depth);
-            if let Some(p) = self.detect_guard_return(stmt) {
+        // Per-statement runtime auto-nulls for THIS block.  Isolate the pending
+        // buffer from any in-flight nulls of a PARENT statement (save/restore), so
+        // a nested block never steals or drops them.  Reset the slots so the
+        // loop-fixpoint re-walk is idempotent.
+        let saved_pending = std::mem::take(&mut self.pending_stmt_nulls);
+        b.stmt_nulls = vec![Vec::new(); b.stmts.len()];
+        for i in 0..b.stmts.len() {
+            self.walk_stmt(&mut b.stmts[i], &mut declared_here, live_outer, depth);
+            if !self.pending_stmt_nulls.is_empty() {
+                b.stmt_nulls[i] = std::mem::take(&mut self.pending_stmt_nulls);
+            }
+            if let Some(p) = self.detect_guard_return(&b.stmts[i]) {
                 if self.state[p.0 as usize].narrowed_until.is_none() {
                     self.state[p.0 as usize].narrowed_until = Some(depth);
                     guarded_here.push(p);
                 }
             }
         }
+        self.pending_stmt_nulls = saved_pending;
         // Revert early-exit narrowing at block exit.
         for p in &guarded_here {
             self.state[p.0 as usize].narrowed_until = None;
@@ -693,6 +714,14 @@ impl<'a> Analyzer<'a> {
             .filter(|p| !declared_here.contains(p))
             .collect();
         b.ptr_nulls = outer_collapsed;
+        // Locals declared in THIS block are dead once it exits (they no longer
+        // exist in the emitted C).  Clear their alias deps so a PARENT scope's
+        // later owner drop / reassign / move cannot collapse-null them out of
+        // scope - e.g. a `*T` alias of a Vec element declared in a loop body must
+        // not be nulled when the Vec is freed at the enclosing function's exit.
+        for id in &declared_here {
+            self.state[id.0 as usize].deps.clear();
+        }
         let _ = depth;
         let _ = live_outer;
         self.cur_depth = prev_depth;
@@ -804,7 +833,7 @@ impl<'a> Analyzer<'a> {
                     }
                 }
             }
-            HStmt::Assign { op, place, value, drop_old: _, span } => {
+            HStmt::Assign { op, place, value, drop_old, span } => {
                 let _ = op;
                 // Conservative escape check on assigning into a struct field:
                 // (a) explicit `b.p = &local` — caught by check_no_local_ref_escape;
@@ -865,10 +894,12 @@ impl<'a> Analyzer<'a> {
                     // The owner itself is unconstrained — kill_lid skips its
                     // own LID, so its state is refreshed normally below.
                     if is_owner {
-                        // Reassigning the owner frees its OLD pointee (drop_old);
-                        // poison its aliases - no runtime null is emitted here, so a
-                        // guarded deref would read freed memory (heap-UAF).
-                        let _ = self.kill_lid(id, *span, true);
+                        // Reassigning the owner frees its OLD pointee (drop_old),
+                        // so its `*T` aliases are stale: AUTO-NULL them and emit a
+                        // runtime `alias = NULL` right after this statement (via
+                        // stmt_nulls) so a later `if (a != null)` guard is honest.
+                        let n = self.kill_lid(id, *span, true);
+                        self.pending_stmt_nulls.extend(n);
                     }
                     if is_ptr {
                         // `*T` slot: also fold in owner-aliases reachable from
@@ -918,6 +949,28 @@ impl<'a> Analyzer<'a> {
                     // borrow: a fresh non-dying source clears it, a dying one sets it.
                     let dying = self.expr_is_dying_borrow(value);
                     self.state[id.0 as usize].holds_dying_borrow = dying;
+                }
+                // Reassigning an OWNING-POINTER field/element (`b.p = ...` /
+                // `arr[i] = ...` where the field/element is `own *T` / `own &T`)
+                // frees the OLD pointee, so a *T alias of it - which depends on the
+                // container root (recorded by collect_owner_aliases) - now dangles.
+                // AUTO-NULL the container's *T aliases and emit a runtime
+                // `alias = NULL` after this statement (via stmt_nulls).
+                //
+                // Keyed strictly on the place being an `own *T`/`own &T`
+                // (HType::OwnPtr): ONLY an owning pointer owns heap that gets
+                // freed here.  A place is an lvalue, so its type is the true
+                // field/element type.  `drop_old` alone is wrong - it can be set
+                // for a non-owning element (`v[i] = char`), which frees nothing and
+                // must NOT kill a `string`/borrow view of the container.
+                let _ = drop_old;
+                if matches!(place.kind, HExprKind::Field { .. } | HExprKind::Index { .. })
+                    && matches!(place.ty, HType::OwnPtr { .. })
+                {
+                    if let Some(root) = root_local(place) {
+                        let n = self.kill_lid(root, *span, true);
+                        self.pending_stmt_nulls.extend(n);
+                    }
                 }
                 let _ = span;
             }
@@ -1597,15 +1650,17 @@ impl<'a> Analyzer<'a> {
         // Moving an owner POINTER (by-value into a call/struct/array/return, into
         // another owning local, or via `transfer` across a gate) transfers its heap
         // to the new owner, which frees it - any `*T`/`&T` alias of it now dangles.
-        // Poison the aliases here, at the single move choke point, so EVERY move
-        // site is covered uniformly (no runtime null is emitted at a move, so a
-        // later guarded deref must be a compile error).  Non-pointer owners
+        // Invalidate the aliases here, at the single move choke point, so EVERY
+        // move site is covered uniformly: `*T` aliases AUTO-NULL (a runtime
+        // `alias = NULL` is emitted after this statement via stmt_nulls, so a
+        // guarded deref is honest), `&T` borrows poison.  Non-pointer owners
         // (String/Vec values) have no `*T` aliases, so kill_lid is a no-op there.
         if matches!(
             self.f().locals[id.0 as usize].ty,
             HType::OwnPtr { .. } | HType::Heap { .. }
         ) {
-            let _ = self.kill_lid(id, sp, true);
+            let n = self.kill_lid(id, sp, true);
+            self.pending_stmt_nulls.extend(n);
         }
     }
 
@@ -1680,7 +1735,23 @@ impl<'a> Analyzer<'a> {
             | HExprKind::Cast { expr, .. }
             | HExprKind::CheckedCast { expr, .. }
             | HExprKind::DropWrite(expr) => self.collect_owner_aliases(expr, out),
-            HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => self.collect_owner_aliases(base, out),
+            HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => {
+                // Aliasing into a by-value CONTAINER that owns heap (`*int a = b.p`
+                // where `b: Box{own*int p}`, or `arr[0]` where `arr: [N]own*int`)
+                // makes `a` depend on the container Local: reassigning the owning
+                // field/element (drop_old frees the old pointee) or invalidating
+                // the container must poison the alias.  The container's own type
+                // is a struct/array (not OwnPtr/Heap), so the Local arm records
+                // nothing - and the projected type may be coerced from own*T to
+                // *T here, so key on the container OWNING heap rather than the
+                // projected type.  Coarse (container-level) but sound.
+                if let Some(r) = root_local(e) {
+                    if ty_owns_heap(self.sym, &self.f().locals[r.0 as usize].ty) {
+                        out.insert(r.0);
+                    }
+                }
+                self.collect_owner_aliases(base, out);
+            }
             HExprKind::DerefRef(inner) => self.collect_owner_aliases(inner, out),
             _ => {}
         }
@@ -1745,7 +1816,7 @@ impl<'a> Analyzer<'a> {
     ///   would wrongly re-validate it against freed memory (heap-UAF).  Poison makes
     ///   any use a hard compile error until the alias is re-assigned (which clears
     ///   poison) - the only sound recovery.
-    fn kill_lid(&mut self, id: LocalId, _span: Span, poison_ptrs: bool) -> Vec<LocalId> {
+    fn kill_lid(&mut self, id: LocalId, _span: Span, _poison_ptrs: bool) -> Vec<LocalId> {
         let lid_num = id.0;
         let types: Vec<HType> = self.f().locals.iter().map(|l| l.ty.clone()).collect();
         let mut nulled = Vec::new();
@@ -1754,20 +1825,20 @@ impl<'a> Analyzer<'a> {
             if st.deps.remove(&lid_num) {
                 if let HType::Ptr { .. } = types[i] {
                     if st.deps.is_empty() {
-                        if poison_ptrs {
-                            st.poisoned = true;
-                            st.known_nonnull = false;
-                            st.narrowed_until = None;
-                        } else {
-                            nulled.push(LocalId(i as u32));
-                            // The runtime value of this pointer is about to be overwritten with
-                            // NULL by codegen.  Past non-null proofs no longer hold.
-                            st.auto_nulled = true;
-                            st.known_nonnull = false;
-                            st.narrowed_until = None;
-                        }
+                        // A `*T` nullable alias ALWAYS AUTO-NULLS, NEVER poisons.
+                        // The caller emits a runtime `alias = NULL` at the site
+                        // (scope-exit -> block.ptr_nulls; mid-block reassign/move ->
+                        // block.stmt_nulls) so a later `if (a != null)` guard sees
+                        // the real null.  A dangling `*T` errors ONLY at a USE site
+                        // (a deref of the unproven alias), never here.
+                        nulled.push(LocalId(i as u32));
+                        st.auto_nulled = true;
+                        st.known_nonnull = false;
+                        st.narrowed_until = None;
                     }
                 } else {
+                    // `&T` / `&mut T` borrows POISON: a borrow has no null state to
+                    // reset to, so a dangling-borrow use is a hard error.
                     st.poisoned = true;
                 }
             }
@@ -2003,7 +2074,7 @@ fn desugar_loop_cond_temps(sym: &SymTab, cond: &mut HExpr, body: &mut HBlock, sp
     let if_break = HStmt::If {
         cond: neg,
         then_b: HBlock { stmts: vec![HStmt::Break { heap_drops: Vec::new(), span }],
-                         heap_to_free: Vec::new(), ptr_nulls: Vec::new(), span },
+                         heap_to_free: Vec::new(), ptr_nulls: Vec::new(), stmt_nulls: Vec::new(), span },
         else_b: None,
         span,
     };
@@ -2400,6 +2471,77 @@ fn stmt_mentions_local(s: &HStmt, t: LocalId) -> bool {
         HStmt::ForEach { src, body, .. } => expr_mentions_local(src, t) || body.stmts.iter().any(|s| stmt_mentions_local(s, t)),
         HStmt::Block(b) | HStmt::Unsafe(b, _) => b.stmts.iter().any(|s| stmt_mentions_local(s, t)),
         _ => false,
+    }
+}
+
+/// Materialize `HBlock.stmt_nulls` (filled by the lifetime pass) into real
+/// `alias = NULL;` statements right after their statement, in EVERY block
+/// (including match-arm bodies nested in expressions), so all codegen
+/// block-emission paths (block, match arm, inline) emit the runtime auto-null
+/// for a `*T` alias invalidated by an owner reassign/move.  Runs once after the
+/// analysis (indices still valid, before hoisting).
+fn inject_stmt_nulls(b: &mut HBlock, locals: &[LocalInfo]) {
+    let stmt_nulls = std::mem::take(&mut b.stmt_nulls);
+    let old = std::mem::take(&mut b.stmts);
+    let mut out = Vec::with_capacity(old.len());
+    for (i, mut s) in old.into_iter().enumerate() {
+        inject_nulls_in_stmt(&mut s, locals);
+        out.push(s);
+        if let Some(nulls) = stmt_nulls.get(i) {
+            for alias in nulls {
+                let ty = locals[alias.0 as usize].ty.clone();
+                out.push(HStmt::Assign {
+                    op: HAssignOp::Assign,
+                    place: HExpr { kind: HExprKind::Local(*alias), ty: ty.clone(), span: b.span },
+                    value: HExpr { kind: HExprKind::LitNull, ty, span: b.span },
+                    drop_old: false,
+                    span: b.span,
+                });
+            }
+        }
+    }
+    b.stmts = out;
+}
+fn inject_nulls_in_stmt(s: &mut HStmt, locals: &[LocalInfo]) {
+    match s {
+        HStmt::Let { init, .. } => inject_nulls_in_expr(init, locals),
+        HStmt::Assign { place, value, .. } => { inject_nulls_in_expr(place, locals); inject_nulls_in_expr(value, locals); }
+        HStmt::ExprStmt(e) => inject_nulls_in_expr(e, locals),
+        HStmt::Return { value: Some(e), .. } | HStmt::Propagate { value: Some(e), .. } => inject_nulls_in_expr(e, locals),
+        HStmt::If { cond, then_b, else_b, .. } => { inject_nulls_in_expr(cond, locals); inject_stmt_nulls(then_b, locals); if let Some(eb) = else_b { inject_stmt_nulls(eb, locals); } }
+        HStmt::While { cond, body, .. } => { inject_nulls_in_expr(cond, locals); inject_stmt_nulls(body, locals); }
+        HStmt::ForC { init, cond, step, body, .. } => { inject_nulls_in_stmt(init, locals); inject_nulls_in_expr(cond, locals); inject_nulls_in_stmt(step, locals); inject_stmt_nulls(body, locals); }
+        HStmt::ForEach { src, body, .. } => { inject_nulls_in_expr(src, locals); inject_stmt_nulls(body, locals); }
+        HStmt::Block(b) | HStmt::Unsafe(b, _) => inject_stmt_nulls(b, locals),
+        HStmt::Return { value: None, .. } | HStmt::Propagate { value: None, .. }
+        | HStmt::Break { .. } | HStmt::Continue { .. } => {}
+    }
+}
+fn inject_nulls_in_expr(e: &mut HExpr, locals: &[LocalInfo]) {
+    use HExprKind::*;
+    match &mut e.kind {
+        Match { scrutinee, arms, .. } => {
+            inject_nulls_in_expr(scrutinee, locals);
+            for a in arms {
+                if let Some(g) = &mut a.guard { inject_nulls_in_expr(g, locals); }
+                inject_stmt_nulls(&mut a.body, locals);
+                if let Some(v) = &mut a.value { inject_nulls_in_expr(v, locals); }
+            }
+        }
+        Call { args, .. } | InlineCall { args, .. } => for a in args { inject_nulls_in_expr(a, locals); },
+        CallIndirect { callee, args } => { inject_nulls_in_expr(callee, locals); for a in args { inject_nulls_in_expr(a, locals); } }
+        Bin { lhs, rhs, .. } => { inject_nulls_in_expr(lhs, locals); inject_nulls_in_expr(rhs, locals); }
+        Un { expr, .. } | Unwrap { expr, .. } | Cast { expr, .. } | CheckedCast { expr, .. }
+        | DropWrite(expr) | DerefRef(expr) | HeapAlloc(expr) | Free(expr) | Transfer(expr)
+        | SliceLen(expr) | EnumTag(expr) => inject_nulls_in_expr(expr, locals),
+        AddrOfRef { place, .. } => inject_nulls_in_expr(place, locals),
+        Field { base, .. } | ArrayToSlice { base, .. } => inject_nulls_in_expr(base, locals),
+        Index { base, idx } => { inject_nulls_in_expr(base, locals); inject_nulls_in_expr(idx, locals); }
+        Struct { fields, .. } | VariantCtor { fields, .. } => for (_, fe) in fields { inject_nulls_in_expr(fe, locals); },
+        ArrayLit(es) => for e2 in es { inject_nulls_in_expr(e2, locals); },
+        Closure { env_values, .. } => for v in env_values { inject_nulls_in_expr(v, locals); },
+        LitInt(..) | LitFloat(..) | LitBool(..) | LitChar(..) | LitStr(..) | LitNull | LitUnit
+        | ZeroInit | Local(..) | EnumVariant { .. } | FnRef(..) | GlobalRef(..) => {}
     }
 }
 
@@ -2910,7 +3052,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                                         let eb = else_b.get_or_insert_with(|| HBlock {
                                             stmts: Vec::new(),
                                             heap_to_free: Vec::new(),
-                                            ptr_nulls: Vec::new(),
+                                            ptr_nulls: Vec::new(), stmt_nulls: Vec::new(),
                                             span: then_b.span,
                                         });
                                         eb.heap_to_free.push(id);
