@@ -3488,7 +3488,16 @@ impl<'a> Cx<'a> {
         self.w("        return empty;\n");
         self.w("    }\n");
         self.w("    int64_t total = end - start;\n");
-        self.w("    int64_t* out = (int64_t*)malloc(sizeof(int64_t) * (size_t)total);\n");
+        // Guard the output-buffer size multiply: `total` is caller-controlled
+        // (end-start), so 8*total can wrap size_t and under-allocate `out`,
+        // letting the workers write past it (heap-buffer-overflow).  Mirror the
+        // par_map_bytes __builtin_mul_overflow guards.
+        self.w("    size_t __out_sz;\n");
+        self.w("    if (__builtin_mul_overflow((size_t)total, sizeof(int64_t), &__out_sz)) {\n");
+        self.w("        Slice_maka_int empty = { .ptr = NULL, .len = 0 };\n");
+        self.w("        return empty;\n");
+        self.w("    }\n");
+        self.w("    int64_t* out = (int64_t*)malloc(__out_sz);\n");
         self.w("    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);\n");
         self.w("    if (nprocs < 1) nprocs = 1;\n");
         self.w("    if (nprocs > 16) nprocs = 16;\n");
@@ -7942,7 +7951,7 @@ impl<'a> Cx<'a> {
         if let HStmt::Assign { op, place, value, .. } = step {
             let p = self.emit_place(f, place);
             let v = self.emit_expr(f, value);
-            return format!("{} {} {}", p, assign_op_c(*op), v);
+            return format!("{} = {}", p, self.compound_rhs(&p, *op, &v, &place.ty));
         }
         "(void)0".into()
     }
@@ -8288,7 +8297,7 @@ impl<'a> Cx<'a> {
                     self.yield_exit.iter().rev().find(|(yv, _)| *yv == id)
                         .map(|(_, l)| format!("goto {}; ", l)).unwrap_or_default()
                 } else { String::new() };
-                format!("{} {} {}; {}", p, assign_op_c(*op), v, goto)
+                format!("{} = {}; {}", p, self.compound_rhs(&p, *op, &v, &place.ty), goto)
             }
             HStmt::ExprStmt(e) => {
                 let v = self.emit_inline_expr(inline_f, e, tag);
@@ -8402,7 +8411,7 @@ impl<'a> Cx<'a> {
                     HStmt::Assign { op, place, value, .. } => {
                         let p = self.emit_inline_place(inline_f, place, tag);
                         let v = self.emit_inline_expr(inline_f, value, tag);
-                        format!("{} {} {}", p, assign_op_c(*op), v)
+                        format!("{} = {}", p, self.compound_rhs(&p, *op, &v, &place.ty))
                     }
                     _ => "(void)0".into(),
                 };
@@ -8796,6 +8805,23 @@ impl<'a> Cx<'a> {
         format!("(({}) {} ({}))", l, binop_c(op), r)
     }
 
+    /// The RHS of a compound assignment `place OP= value`, rewritten as the value
+    /// of `place = <this>` so it goes through the SAME guarded/wrapped arithmetic
+    /// as `place = place OP value`: `/=`/`%=` get the divide-by-zero and
+    /// INT_MIN/-1 guard, `+=`/`-=`/`*=` get the signed-overflow wrap.  Emitting a
+    /// raw C `place OP= value` bypasses both (UB).  `lhs` must be a side-effect-
+    /// free lvalue string (it is evaluated twice for a non-Assign op).
+    fn compound_rhs(&self, lhs: &str, op: HAssignOp, rhs: &str, lhs_ty: &HType) -> String {
+        match op {
+            HAssignOp::Assign => rhs.to_string(),
+            HAssignOp::Add => self.emit_arith(lhs, HBinOp::Add, rhs, lhs_ty),
+            HAssignOp::Sub => self.emit_arith(lhs, HBinOp::Sub, rhs, lhs_ty),
+            HAssignOp::Mul => self.emit_arith(lhs, HBinOp::Mul, rhs, lhs_ty),
+            HAssignOp::Div => self.emit_div(lhs, HBinOp::Div, rhs, lhs_ty),
+            HAssignOp::Mod => self.emit_div(lhs, HBinOp::Mod, rhs, lhs_ty),
+        }
+    }
+
     /// Emit unary negation; signed `-MIN` is C UB, so negate in the unsigned
     /// counterpart (wraps) and reinterpret back.  Unsigned negation is already
     /// well-defined in C.
@@ -8951,17 +8977,19 @@ impl<'a> Cx<'a> {
         // (`*n = rhs`) both mismatches types (`T` slot vs `T*` value) and leaks
         // the previous allocation.
         if let HExprKind::Local(id) = place.kind {
-            let lty = &f.locals[id.0 as usize].ty;
+            let lty = f.locals[id.0 as usize].ty.clone();
             // Write through a `&mut T` local (e.g. a by-mut-ref captured binding inside a closure).
-            if matches!(lty, HType::Ref { mutable: true, .. }) {
-                self.wl(&format!("*{} {} {};", lhs, assign_op_c(op), rhs));
+            if let HType::Ref { mutable: true, inner } = &lty {
+                let deref = format!("*{}", lhs);
+                self.wl(&format!("{} = {};", deref, self.compound_rhs(&deref, op, &rhs, inner)));
                 return;
             }
         }
         // Pointer unwrap on LHS like `p! = v` → `*p = v;`
         if let HExprKind::Unwrap { expr, skip_check: _ } = &place.kind {
             let inner = self.emit_expr(f, expr);
-            self.wl(&format!("*({}) {} {};", inner, assign_op_c(op), rhs));
+            let deref = format!("*({})", inner);
+            self.wl(&format!("{} = {};", deref, self.compound_rhs(&deref, op, &rhs, &place.ty)));
             return;
         }
         // Whole-array reassignment: a C array is not `=`-assignable, so copy.
@@ -9007,7 +9035,7 @@ impl<'a> Cx<'a> {
                 }
             }
         }
-        self.wl(&format!("{} {} {};", lhs, assign_op_c(op), rhs));
+        self.wl(&format!("{} = {};", lhs, self.compound_rhs(&lhs, op, &rhs, &place.ty)));
         self.emit_move_out_null(f, value);
         // Moving an owning *local* into an owning slot (a field/index or another
         // owning local) transfers ownership: null the source so it is not freed

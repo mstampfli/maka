@@ -1,0 +1,10 @@
+// Compound assignment must route through the guarded/wrapped arithmetic, not raw
+// C `x OP= y`: `/=` `%=` get the div-by-zero + INT_MIN/-1 guard, `+=` `-=` `*=`
+// get the signed-overflow wrap (matching `x = x OP y`).
+unit main() {
+    mut int a = 100; a /= 7;  log(a);   // 14
+    mut int b = 100; b %= 7;  log(b);   // 2
+    mut int c = 9223372036854775807; c += 1; log(c);   // wraps -> -9223372036854775808
+    mut int d = 10;  d -= 3;  log(d);   // 7
+    mut int e = 6;   e *= 7;  log(e);   // 42
+}

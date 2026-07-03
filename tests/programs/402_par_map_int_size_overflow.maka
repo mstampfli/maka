@@ -1,0 +1,7 @@
+// par_map_int's output-buffer size multiply (8 * (end-start)) is caller-controlled
+// and could wrap size_t -> under-allocation -> heap overflow. A huge range now
+// returns an empty slice (guarded) instead of corrupting memory.
+unit main() {
+    Vec<int> r = par_map_int(0, 2305843009213693954, int(int i) { return i; });
+    log(r.len as int);   // 0 (overflow guarded)
+}
