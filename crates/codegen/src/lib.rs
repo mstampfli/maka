@@ -108,6 +108,11 @@ struct Cx<'a> {
     yield_exit: Vec<(LocalId, String)>,
     /// Monotonic counter for unique `yield`-arm end labels.
     yield_label_seq: u32,
+    /// When Some(tag), sub-expression emission (`emit_sub`) resolves local names
+    /// via the inline expansion's tagged scope instead of the normal one.  Set only
+    /// while emitting a builtin-sentinel call spliced from an inline body, so the one
+    /// `emit_builtin_sentinel` serves both the normal and the inline paths.
+    inline_tag: Option<String>,
     /// Freestanding mode — emit a minimal libc-free prologue and route the
     /// allocator / panic / log / atomic-runtime hooks to user-provided
     /// extern symbols (`__maka_alloc`, `__maka_free`, `__maka_panic`,
@@ -138,6 +143,7 @@ impl<'a> Cx<'a> {
             cur_abandoned_handles: Default::default(),
             yield_exit: Vec::new(),
             yield_label_seq: 0,
+            inline_tag: None,
             noted_aggregates: Default::default(),
             freestanding: false,
         }
@@ -8557,6 +8563,17 @@ impl<'a> Cx<'a> {
                 }).collect();
                 self.emit_inline_expansion_args(*callee, &arg_strs, &e.ty, pd, ld)
             }
+            // `.len` / enum-tag: emit the base in the tagged scope (the shared
+            // `_c` helper is name-agnostic), else the base local would fall through
+            // to the untagged emitter and reference an undeclared `x_0`.
+            HExprKind::SliceLen(inner) => {
+                let s = self.emit_inline_expr(inline_f, inner, tag);
+                self.slice_len_c(&inner.ty, &s)
+            }
+            HExprKind::EnumTag(inner) => {
+                let s = self.emit_inline_expr(inline_f, inner, tag);
+                self.enum_tag_c(&inner.ty, &s)
+            }
             // Everything else: fall back to ordinary emit_expr but with a dummy HFunc that holds
             // the inline locals so name lookups resolve. For simplicity, use the inline_f directly.
             _ => self.emit_expr_with_tag(inline_f, e, tag),
@@ -8581,106 +8598,14 @@ impl<'a> Cx<'a> {
             HExprKind::LitNull => "NULL".into(),
             HExprKind::LitUnit => "MAKA_UNIT".into(),
             HExprKind::Call { callee, args } => {
-                if callee.0 == u32::MAX - 2 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_inline_expr(inline_f, a, tag);
-                        return format!("(maka_panic({}), MAKA_UNIT)", s);
-                    }
-                    return "(maka_panic(\"\"), MAKA_UNIT)".into();
-                }
-                if callee.0 == u32::MAX - 1 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_inline_expr(inline_f, a, tag);
-                        return format!("(free((void*)({})), MAKA_UNIT)", s);
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                if callee.0 == u32::MAX {
-                    if args.len() == 1 {
-                        let s = self.emit_inline_expr(inline_f, &args[0], tag);
-                        let helper = self.log_helper(&args[0].ty);
-                        return format!("({}({}), MAKA_UNIT)", helper, s);
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // Optimized `log(format(...))` -> printf, no allocation.
-                if callee.0 == u32::MAX - 58 {
-                    let mut parts: Vec<String> = vec![self.emit_inline_expr(inline_f, &args[0], tag)];
-                    for a in &args[1..] {
-                        let s = self.emit_inline_expr(inline_f, a, tag);
-                        parts.push(printf_conv(s, &a.ty));
-                    }
-                    return format!("(printf({}), MAKA_UNIT)", parts.join(", "));
-                }
-                // `format(...)` with scalar placeholders -> one __maka_format1 alloc.
-                if callee.0 == u32::MAX - 59 {
-                    let mut parts: Vec<String> = vec![self.emit_inline_expr(inline_f, &args[0], tag)];
-                    for a in &args[1..] {
-                        let s = self.emit_inline_expr(inline_f, a, tag);
-                        parts.push(printf_conv(s, &a.ty));
-                    }
-                    return format!("__maka_format1({})", parts.join(", "));
-                }
-                if callee.0 == u32::MAX - 3 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_inline_expr(inline_f, a, tag);
-                        return format!("(Thread*)__maka_spawn_fiber(({}).code, ({}).env, {})", s, s, self.spawn_env_drop(a));
-                    }
-                    return "NULL".into();
-                }
-                if callee.0 == u32::MAX - 15 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_inline_expr(inline_f, a, tag);
-                        return format!("(Thread*)__maka_spawn_thread(({}).code, ({}).env, {})", s, s, self.spawn_env_drop(a));
-                    }
-                    return "NULL".into();
-                }
-                if callee.0 == u32::MAX - 16 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_inline_expr(inline_f, a, tag);
-                        return format!("(Thread*)__maka_spawn_job(({}).code, ({}).env, {})", s, s, self.spawn_env_drop(a));
-                    }
-                    return "NULL".into();
-                }
-                if callee.0 == u32::MAX - 4 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_inline_expr(inline_f, a, tag);
-                        return format!("(__maka_join((maka_unit*)({})), MAKA_UNIT)", s);
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                if let Some(fname) = match callee.0 {
-                    v if v == u32::MAX - 5 => Some("__maka_str_concat"),
-                    v if v == u32::MAX - 8 => Some("__maka_str_concat_freel"),
-                    v if v == u32::MAX - 9 => Some("__maka_str_concat_freer"),
-                    v if v == u32::MAX - 10 => Some("__maka_str_concat_freeb"),
-                    _ => None,
-                } {
-                    if args.len() == 2 {
-                        let a = self.emit_inline_expr(inline_f, &args[0], tag);
-                        let b = self.emit_inline_expr(inline_f, &args[1], tag);
-                        return format!("{}({}, {})", fname, a, b);
-                    }
-                    return "((char*)0)".into();
-                }
-                if let Some(fname) = match callee.0 {
-                    v if v == u32::MAX - 11 => Some("__maka_int_to_str"),
-                    v if v == u32::MAX - 12 => Some("__maka_bool_to_str"),
-                    v if v == u32::MAX - 13 => Some("__maka_float_to_str"),
-                    v if v == u32::MAX - 14 => Some("__maka_char_to_str"),
-                    _ => None,
-                } {
-                    if args.len() == 1 {
-                        let a = self.emit_inline_expr(inline_f, &args[0], tag);
-                        return format!("{}({})", fname, a);
-                    }
-                    return "((char*)0)".into();
-                }
-                if callee.0 == u32::MAX - 6 {
-                    return "__maka_read_line()".into();
-                }
-                if callee.0 == u32::MAX - 7 {
-                    return "__maka_read_int()".into();
+                if is_builtin_sentinel(*callee) {
+                    // Builtin call spliced from an inline body: reuse the single
+                    // dispatch, tagging sub-expression emission so inline locals
+                    // resolve to their tagged names.
+                    let saved = self.inline_tag.replace(tag.to_string());
+                    let r = self.emit_builtin_sentinel(inline_f, *callee, args, e);
+                    self.inline_tag = saved;
+                    return r;
                 }
                 let sig = self.sym.func_sig(*callee);
                 let name = if sig.is_extern { sig.c_name.clone() }
@@ -8873,8 +8798,67 @@ impl<'a> Cx<'a> {
         format!("(-({}))", v)
     }
 
+    /// Emit a sub-expression, honouring the active inline expansion tag.  When
+    /// `inline_tag` is set (a builtin-sentinel call spliced from an inline body),
+    /// locals must render with their tagged names; otherwise this is plain
+    /// `emit_expr`.  Every sub-emission inside `emit_builtin_sentinel` goes through
+    /// here so the single dispatch is correct in both the normal and inline paths.
+    fn emit_sub(&mut self, f: &HFunc, e: &HExpr) -> String {
+        if let Some(tag) = self.inline_tag.clone() {
+            self.emit_inline_expr(f, e, &tag)
+        } else {
+            self.emit_expr(f, e)
+        }
+    }
+
+    /// `emit_sub` for an lvalue/place (see `emit_sub`).
+    fn emit_place_sub(&mut self, f: &HFunc, e: &HExpr) -> String {
+        if let Some(tag) = self.inline_tag.clone() {
+            self.emit_inline_place(f, e, &tag)
+        } else {
+            self.emit_place(f, e)
+        }
+    }
+
+    /// C for `.len` on a slice / vec / array (or a borrow / pointer to one), given
+    /// the already-emitted base string `s`.  Shared by the normal and the inline
+    /// emitter so the base can be rendered tagged or untagged by the caller.
+    fn slice_len_c(&self, inner_ty: &HType, s: &str) -> String {
+        match inner_ty {
+            HType::Slice { .. } => format!("({}).len", s),
+            HType::Vec { .. } => format!("({}).len", s),
+            HType::Heap { inner: i } => match i.as_ref() {
+                HType::Vec { .. } => format!("({}).len", s),
+                HType::Array { len, .. } => format!("(maka_int){}", len),
+                _ => "0".into(),
+            },
+            // `.len` through a borrow / non-owning pointer to an array, vec, or
+            // slice.  `&Vec<T>` / `&[]T` is a pointer to the {data/ptr,len,cap}
+            // struct, so the count is at `(*base).len`.
+            HType::Ref { inner: i, .. } | HType::Ptr { inner: i, .. } | HType::OwnPtr { inner: i, .. } => match i.as_ref() {
+                HType::Vec { .. } | HType::Slice { .. } => format!("({})->len", s),
+                HType::Array { len, .. } => format!("(maka_int){}", len),
+                _ => "0".into(),
+            },
+            HType::Array { len, .. } => format!("(maka_int){}", len),
+            _ => "0".into(),
+        }
+    }
+
+    /// C for an enum's discriminant tag, given the already-emitted base `s` (see
+    /// `slice_len_c` for why the base is passed in pre-emitted).
+    fn enum_tag_c(&self, inner_ty: &HType, s: &str) -> String {
+        if let HType::Enum(eid) = inner_ty {
+            if self.sym.enum_info(*eid).is_simple() {
+                // Simple enum: the C value IS the tag.
+                return format!("(maka_int)({})", s);
+            }
+        }
+        format!("(maka_int)(({}).tag)", s)
+    }
+
     fn emit_move_consuming(&mut self, f: &HFunc, e: &HExpr) -> String {
-        let s = self.emit_expr(f, e);
+        let s = self.emit_sub(f, e);
         if !matches!(&e.kind, HExprKind::Field { .. } | HExprKind::Index { .. }) { return s; }
         if !move_out_owned_place(e) { return s; }
         let nullv = if matches!(&e.ty, HType::OwnPtr { .. } | HType::Heap { .. }) {
@@ -8884,7 +8868,7 @@ impl<'a> Cx<'a> {
         } else {
             return s;
         };
-        let place = self.emit_place(f, e);
+        let place = self.emit_place_sub(f, e);
         let ty = self.c_type(&e.ty);
         format!("(__extension__ ({{ {0} __mc = {1}; {2} = {3}; __mc; }}))", ty, s, place, nullv)
     }
@@ -9234,6 +9218,602 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// Emit a built-in "sentinel" call: panic / log / format / push / pop /
+    /// spawn / channel / atomic / etc.  Callee ids in [u32::MAX-1024, u32::MAX]
+    /// are reserved for these (see `is_builtin_sentinel`) and every one is handled
+    /// here.  ONE dispatch shared by the normal emitter and inline-body expansion
+    /// (which sets `self.inline_tag` so `emit_sub` renders inline-tagged local
+    /// names) - so a new builtin can never work in one path yet crash the other.
+    fn emit_builtin_sentinel(&mut self, f: &HFunc, callee: FuncId, args: &[HExpr], e: &HExpr) -> String {
+        // Built-in `panic(msg)`.
+        if callee.0 == u32::MAX - 2 {
+            if let Some(a) = args.first() {
+                let s = self.emit_sub(f, a);
+                return format!("(maka_panic({}), MAKA_UNIT)", s);
+            }
+            return "(maka_panic(\"\"), MAKA_UNIT)".into();
+        }
+        // Built-in `free`
+        if callee.0 == u32::MAX - 1 {
+            if let Some(a) = args.first() {
+                let s = self.emit_sub(f, a);
+                return format!("(free((void*)({})), MAKA_UNIT)", s);
+            }
+            return "MAKA_UNIT".into();
+        }
+        // Built-in `log`
+        if callee.0 == u32::MAX {
+            // Dispatch by first arg type
+            if args.len() == 1 {
+                let s = self.emit_sub(f, &args[0]);
+                let helper = self.log_helper(&args[0].ty);
+                return format!("({}({}), MAKA_UNIT)", helper, s);
+            }
+            return "MAKA_UNIT".into();
+        }
+        // Optimized `log(format(...))` -> printf, no allocation.  args[0]
+        // is the printf format string; the rest are scalar values.
+        if callee.0 == u32::MAX - 58 {
+            let mut parts: Vec<String> = vec![self.emit_sub(f, &args[0])];
+            for a in &args[1..] {
+                let s = self.emit_sub(f, a);
+                parts.push(printf_conv(s, &a.ty));
+            }
+            return format!("(printf({}), MAKA_UNIT)", parts.join(", "));
+        }
+        // `format(...)` with scalar placeholders -> one __maka_format1 alloc.
+        if callee.0 == u32::MAX - 59 {
+            let mut parts: Vec<String> = vec![self.emit_sub(f, &args[0])];
+            for a in &args[1..] {
+                let s = self.emit_sub(f, a);
+                parts.push(printf_conv(s, &a.ty));
+            }
+            return format!("__maka_format1({})", parts.join(", "));
+        }
+        // `push(v, x)` - append, growing the buffer (realloc) on demand.
+        // args[0] is `&mut Vec_T`; element size is taken from the buffer.
+        if callee.0 == u32::MAX - 60 {
+            let vp_ty = self.c_type(&args[0].ty);   // Vec_T*
+            let vp = self.emit_sub(f, &args[0]);
+            // The element is moved into the Vec: null an owning field/index
+            // source so the caller's container drop does not double-free it.
+            let x = self.emit_move_consuming(f, &args[1]);
+            return format!("(__extension__ ({{ {0} __vp = {1}; if (__vp->len == __vp->cap) {{ __vp->cap = __vp->cap ? __vp->cap * 2 : 4; __vp->data = realloc(__vp->data, __vp->cap * sizeof(*__vp->data)); }} __vp->data[__vp->len++] = ({2}); MAKA_UNIT; }}))", vp_ty, vp, x);
+        }
+        // `pop(v)` -> last element, shrinking the length (panics if empty).
+        if callee.0 == u32::MAX - 61 {
+            let vp_ty = self.c_type(&args[0].ty);
+            let vp = self.emit_sub(f, &args[0]);
+            return format!("(__extension__ ({{ {0} __vp = {1}; if (__vp->len == 0) {{ maka_panic(\"pop from empty Vec\"); }} __vp->len--; __vp->data[__vp->len]; }}))", vp_ty, vp);
+        }
+        // `zeroed()` -> a zero-initialized value of the call's type.
+        if callee.0 == u32::MAX - 62 {
+            return format!("(({}){{0}})", self.c_type(&e.ty));
+        }
+        // Built-in `spawn(closure)` — fiber tier.  Compound-stmt expr
+        // wraps the closure once so its env malloc happens exactly once
+        // (emitting `(s).code, (s).env` would expand and re-allocate).
+        if callee.0 == u32::MAX - 3 {
+            if let Some(a) = args.first() {
+                let s = self.emit_sub(f, a);
+                return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_fiber(__cb.code, __cb.env, {}); }}))", s, self.spawn_env_drop(a));
+            }
+            return "NULL".into();
+        }
+        // Built-in `thread(closure)` — kernel thread tier.
+        if callee.0 == u32::MAX - 15 {
+            if let Some(a) = args.first() {
+                let s = self.emit_sub(f, a);
+                return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_thread(__cb.code, __cb.env, {}); }}))", s, self.spawn_env_drop(a));
+            }
+            return "NULL".into();
+        }
+        // Built-in `job(closure)` — work-pool tier.
+        if callee.0 == u32::MAX - 16 {
+            if let Some(a) = args.first() {
+                let s = self.emit_sub(f, a);
+                return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_job(__cb.code, __cb.env, {}); }}))", s, self.spawn_env_drop(a));
+            }
+            return "NULL".into();
+        }
+        // Built-in `spawn_pool(closure)` — fiber on background pool.
+        if callee.0 == u32::MAX - 37 {
+            if let Some(a) = args.first() {
+                let s = self.emit_sub(f, a);
+                return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_pool(__cb.code, __cb.env, {}); }}))", s, self.spawn_env_drop(a));
+            }
+            return "NULL".into();
+        }
+        // Built-in `join(slice_of_handles)` — wait for all handles.
+        // Codegen extracts the slice's ptr+len and calls the runtime.
+        if callee.0 == u32::MAX - 17 {
+            if let Some(a) = args.first() {
+                let s = self.emit_sub(f, a);
+                // The slice value (or borrow thereof) carries `.ptr` and
+                // `.len`.  For `&[]*Thread` we deref via (*s).; for `[]*Thread`
+                // direct access works.  The codegen for `Ref` wraps the
+                // value in `&v` which dereferences cleanly via (s).ptr too —
+                // so either form lands at the same access pattern.
+                return format!(
+                    "(__maka_join_all_i64((maka_unit**)({0}).ptr, ({0}).len, NULL), MAKA_UNIT)",
+                    s
+                );
+            }
+            return "MAKA_UNIT".into();
+        }
+        // Built-in `select(slice_of_handles)` — race; first ready wins,
+        // losers are cancelled.
+        if callee.0 == u32::MAX - 18 {
+            if let Some(a) = args.first() {
+                let s = self.emit_sub(f, a);
+                return format!(
+                    "(__maka_select_first_i64((maka_unit**)({0}).ptr, ({0}).len, NULL), MAKA_UNIT)",
+                    s
+                );
+            }
+            return "MAKA_UNIT".into();
+        }
+        // Built-in `yield_now()` — cooperative yield.
+        if callee.0 == u32::MAX - 20 {
+            return "(__maka_yield_now(), MAKA_UNIT)".into();
+        }
+        // par_map_bytes(in_ptr, n, in_sz, out_sz, body) — generic.
+        if callee.0 == u32::MAX - 38 {
+            if args.len() == 5 {
+                let ip = self.emit_sub(f, &args[0]);
+                let n  = self.emit_sub(f, &args[1]);
+                let isz = self.emit_sub(f, &args[2]);
+                let osz = self.emit_sub(f, &args[3]);
+                let body = self.emit_sub(f, &args[4]);
+                return format!(
+                    "(__extension__ ({{ Callable_unit_Pmunit_Pmunit_ __cb = ({4}); \
+                     (maka_unit*)maka_par_map_bytes((void*)({0}), (int64_t)({1}), (int64_t)({2}), (int64_t)({3}), (void*)__cb.code, (void*)__cb.env); }}))",
+                    ip, n, isz, osz, body
+                );
+            }
+            return "NULL".into();
+        }
+        // file_listdir(path) -> Slice_str
+        if callee.0 == u32::MAX - 43 {
+            if let Some(a) = args.first() {
+                let p = self.emit_sub(f, a);
+                return format!(
+                    "(__extension__ ({{ int64_t __n; const char** __p = __maka_rt_file_listdir(({0}), &__n); (Slice_str){{ .ptr = __p, .len = (maka_int)__n }}; }}))",
+                    p
+                );
+            }
+            return "(Slice_str){0}".into();
+        }
+        // str_split(s, sep) -> Slice_str
+        if callee.0 == u32::MAX - 44 {
+            if args.len() == 2 {
+                let s = self.emit_sub(f, &args[0]);
+                let sep = self.emit_sub(f, &args[1]);
+                return format!(
+                    "(__extension__ ({{ int64_t __n; const char** __p = __maka_rt_str_split(({0}), ({1}), &__n); (Slice_str){{ .ptr = __p, .len = (maka_int)__n }}; }}))",
+                    s, sep
+                );
+            }
+            return "(Slice_str){0}".into();
+        }
+        // ===== Concurrency primitives (irreducible base) =====
+        // atomic_cas(&mut T p, T expected, T new) -> T (returns old).
+        // __atomic_compare_exchange_n updates *expected to *p on
+        // failure; either way `__exp` ends up holding the OLD value.
+        if callee.0 == u32::MAX - 45 {
+            if args.len() == 3 {
+                let p = self.emit_sub(f, &args[0]);
+                let exp = self.emit_sub(f, &args[1]);
+                let new = self.emit_sub(f, &args[2]);
+                let ty = self.c_type(&args[2].ty);
+                return format!(
+                    "(__extension__ ({{ {ty} __exp = ({exp}); \
+                     __atomic_compare_exchange_n({p}, &__exp, ({new}), 0, \
+                     __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); __exp; }}))",
+                    ty = ty, p = p, exp = exp, new = new
+                );
+            }
+            return "0".into();
+        }
+        // atomic_load(&const T p) -> T
+        if callee.0 == u32::MAX - 46 {
+            if let Some(a) = args.first() {
+                let p = self.emit_sub(f, a);
+                return format!("__atomic_load_n(({}), __ATOMIC_SEQ_CST)", p);
+            }
+            return "0".into();
+        }
+        // atomic_store(&mut T p, T v)
+        if callee.0 == u32::MAX - 47 {
+            if args.len() == 2 {
+                let p = self.emit_sub(f, &args[0]);
+                let v = self.emit_sub(f, &args[1]);
+                return format!(
+                    "(__atomic_store_n(({}), ({}), __ATOMIC_SEQ_CST), MAKA_UNIT)",
+                    p, v
+                );
+            }
+            return "MAKA_UNIT".into();
+        }
+        // atomic_fetch_add / sub / and / or / xor — all the same shape.
+        if let Some(c_op) = match callee.0 {
+            v if v == u32::MAX - 48 => Some("__atomic_fetch_add"),
+            v if v == u32::MAX - 49 => Some("__atomic_fetch_sub"),
+            v if v == u32::MAX - 50 => Some("__atomic_fetch_and"),
+            v if v == u32::MAX - 51 => Some("__atomic_fetch_or"),
+            v if v == u32::MAX - 52 => Some("__atomic_fetch_xor"),
+            _ => None,
+        } {
+            if args.len() == 2 {
+                let p = self.emit_sub(f, &args[0]);
+                let v = self.emit_sub(f, &args[1]);
+                return format!("{}(({}), ({}), __ATOMIC_SEQ_CST)", c_op, p, v);
+            }
+            return "0".into();
+        }
+        // atomic_fence(int order)
+        if callee.0 == u32::MAX - 53 {
+            if let Some(a) = args.first() {
+                let o = self.emit_sub(f, a);
+                // Map Maka order to __ATOMIC_* via a small dispatch.
+                return format!(
+                    "(__atomic_thread_fence((({}) == 1) ? __ATOMIC_ACQUIRE : \
+                                            (({}) == 2) ? __ATOMIC_RELEASE : \
+                                            (({}) == 3) ? __ATOMIC_ACQ_REL : \
+                                                          __ATOMIC_SEQ_CST), MAKA_UNIT)",
+                    o, o, o
+                );
+            }
+            return "MAKA_UNIT".into();
+        }
+        // futex_wait(&const int addr, int expected) -> int
+        if callee.0 == u32::MAX - 54 {
+            if args.len() == 2 {
+                let p = self.emit_sub(f, &args[0]);
+                let v = self.emit_sub(f, &args[1]);
+                return format!("(int64_t)__maka_futex_wait((const int*)({}), (int)({}))", p, v);
+            }
+            return "0".into();
+        }
+        // futex_wake(&const int addr, int n) -> int
+        if callee.0 == u32::MAX - 55 {
+            if args.len() == 2 {
+                let p = self.emit_sub(f, &args[0]);
+                let n = self.emit_sub(f, &args[1]);
+                return format!("(int64_t)__maka_futex_wake((const int*)({}), (int)({}))", p, n);
+            }
+            return "0".into();
+        }
+        // thread_yield()
+        if callee.0 == u32::MAX - 56 {
+            return "(__maka_thread_yield(), MAKA_UNIT)".into();
+        }
+        // syscall(n, a1..a6) -> int — variadic, missing args = 0.
+        if callee.0 == u32::MAX - 57 {
+            let mut parts: Vec<String> = (0..7).map(|i| {
+                if let Some(a) = args.get(i) {
+                    format!("(long)({})", self.emit_sub(f, a))
+                } else {
+                    "0L".to_string()
+                }
+            }).collect();
+            let n = parts.remove(0);
+            return format!(
+                "(int64_t)__maka_syscall({}, {})",
+                n, parts.join(", ")
+            );
+        }
+        // par_filter_bytes(in, n, item_sz, &mut out_n, pred)
+        if callee.0 == u32::MAX - 41 {
+            if args.len() == 5 {
+                let ip = self.emit_sub(f, &args[0]);
+                let n  = self.emit_sub(f, &args[1]);
+                let isz = self.emit_sub(f, &args[2]);
+                let outn = self.emit_sub(f, &args[3]);
+                let body = self.emit_sub(f, &args[4]);
+                return format!(
+                    "(__extension__ ({{ Callable_bool_Pmunit_ __cb = ({4}); \
+                     (maka_unit*)maka_par_filter_bytes((void*)({0}), (int64_t)({1}), (int64_t)({2}), (int64_t*)({3}), (void*)__cb.code, (void*)__cb.env); }}))",
+                    ip, n, isz, outn, body
+                );
+            }
+            return "NULL".into();
+        }
+        // par_scan_bytes(in, n, item_sz, combine)
+        if callee.0 == u32::MAX - 42 {
+            if args.len() == 4 {
+                let ip = self.emit_sub(f, &args[0]);
+                let n  = self.emit_sub(f, &args[1]);
+                let isz = self.emit_sub(f, &args[2]);
+                let body = self.emit_sub(f, &args[3]);
+                return format!(
+                    "(__extension__ ({{ Callable_unit_Pmunit_Pmunit_Pmunit_ __cb = ({3}); \
+                     (maka_unit*)maka_par_scan_bytes((void*)({0}), (int64_t)({1}), (int64_t)({2}), (void*)__cb.code, (void*)__cb.env); }}))",
+                    ip, n, isz, body
+                );
+            }
+            return "NULL".into();
+        }
+        // Built-in `detach(*Thread)`.
+        if callee.0 == u32::MAX - 33 {
+            if let Some(a) = args.first() {
+                let s = self.emit_sub(f, a);
+                return format!("(__maka_detach((maka_unit*)({})), MAKA_UNIT)", s);
+            }
+            return "MAKA_UNIT".into();
+        }
+        // Built-in `cancel(*Thread)`.
+        if callee.0 == u32::MAX - 23 {
+            if let Some(a) = args.first() {
+                let s = self.emit_sub(f, a);
+                return format!("(__maka_cancel((maka_unit*)({})), MAKA_UNIT)", s);
+            }
+            return "MAKA_UNIT".into();
+        }
+        // Built-in `try_join(*Thread) -> bool`.
+        if callee.0 == u32::MAX - 24 {
+            if let Some(a) = args.first() {
+                let s = self.emit_sub(f, a);
+                return format!("((bool)(__maka_try_join((maka_unit*)({}), NULL) != 0))", s);
+            }
+            return "0".into();
+        }
+        // Built-in `join_timeout(*Thread, int) -> bool`.
+        if callee.0 == u32::MAX - 25 {
+            if args.len() == 2 {
+                let h = self.emit_sub(f, &args[0]);
+                let ms = self.emit_sub(f, &args[1]);
+                return format!(
+                    "((bool)(__maka_join_timeout((maka_unit*)({}), (int64_t)({}), NULL) != 0))",
+                    h, ms
+                );
+            }
+            return "0".into();
+        }
+        // once_do(o, init) builtin: split Callable to (code, env).
+        if callee.0 == u32::MAX - 32 {
+            if args.len() == 2 {
+                let o = self.emit_sub(f, &args[0]);
+                let cb = self.emit_sub(f, &args[1]);
+                return format!(
+                    "(__extension__ ({{ Callable_unit_ __cb = ({1}); (maka_once_do((maka_unit*)({0}), (void*)__cb.code, (void*)__cb.env), MAKA_UNIT); }}))",
+                    o, cb
+                );
+            }
+            return "MAKA_UNIT".into();
+        }
+        // par_for_each_float(slice, body)
+        if callee.0 == u32::MAX - 34 {
+            if args.len() == 2 {
+                let s = self.emit_sub(f, &args[0]);
+                let b = self.emit_sub(f, &args[1]);
+                return format!(
+                    "(__extension__ ({{ Callable_unit_float_ __cb = ({1}); (__maka_par_for_each_f64(({0}), __cb.code, __cb.env), MAKA_UNIT); }}))",
+                    s, b
+                );
+            }
+            return "MAKA_UNIT".into();
+        }
+        // par_map_float(slice, fn)
+        if callee.0 == u32::MAX - 35 {
+            if args.len() == 2 {
+                let s = self.emit_sub(f, &args[0]);
+                let b = self.emit_sub(f, &args[1]);
+                return format!(
+                    "(__extension__ ({{ Callable_float_float_ __cb = ({1}); Slice_maka_float __s = __maka_par_map_float(({0}), __cb.code, __cb.env); (Vec_maka_float){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
+                    s, b
+                );
+            }
+            return "((Vec_maka_float){ .data = NULL, .len = 0, .cap = 0 })".into();
+        }
+        // par_reduce_float(slice, init, combine)
+        if callee.0 == u32::MAX - 36 {
+            if args.len() == 3 {
+                let s = self.emit_sub(f, &args[0]);
+                let init = self.emit_sub(f, &args[1]);
+                let b = self.emit_sub(f, &args[2]);
+                return format!(
+                    "(__extension__ ({{ Callable_float_float_float_ __cb = ({2}); __maka_par_reduce_float(({0}), (double)({1}), __cb.code, __cb.env); }}))",
+                    s, init, b
+                );
+            }
+            return "0.0".into();
+        }
+        // par_for_each(slice, body)
+        if callee.0 == u32::MAX - 27 {
+            if args.len() == 2 {
+                let s = self.emit_sub(f, &args[0]);
+                let b = self.emit_sub(f, &args[1]);
+                return format!(
+                    "(__extension__ ({{ Callable_unit_ __cb = ({1}); (__maka_par_for_each_i64(({0}), __cb.code, __cb.env), MAKA_UNIT); }}))",
+                    s, b
+                );
+            }
+            return "MAKA_UNIT".into();
+        }
+        // par_map_int(slice, fn)
+        if callee.0 == u32::MAX - 28 {
+            if args.len() == 2 {
+                let s = self.emit_sub(f, &args[0]);
+                let b = self.emit_sub(f, &args[1]);
+                return format!(
+                    "(__extension__ ({{ Callable_int_int_ __cb = ({1}); Slice_maka_int __s = __maka_par_map_int_slice(({0}), __cb.code, __cb.env); (Vec_maka_int){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
+                    s, b
+                );
+            }
+            return "((Vec_maka_int){ .data = NULL, .len = 0, .cap = 0 })".into();
+        }
+        // par_reduce_int(slice, init, combine)
+        if callee.0 == u32::MAX - 29 {
+            if args.len() == 3 {
+                let s = self.emit_sub(f, &args[0]);
+                let init = self.emit_sub(f, &args[1]);
+                let b = self.emit_sub(f, &args[2]);
+                return format!(
+                    "(__extension__ ({{ Callable_int_int_int_ __cb = ({2}); __maka_par_reduce_int_slice(({0}), (int64_t)({1}), __cb.code, __cb.env); }}))",
+                    s, init, b
+                );
+            }
+            return "0".into();
+        }
+        // par_filter_int(slice, pred)
+        if callee.0 == u32::MAX - 30 {
+            if args.len() == 2 {
+                let s = self.emit_sub(f, &args[0]);
+                let b = self.emit_sub(f, &args[1]);
+                return format!(
+                    "(__extension__ ({{ Callable_bool_int_ __cb = ({1}); Slice_maka_int __s = __maka_par_filter_int(({0}), __cb.code, __cb.env); (Vec_maka_int){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
+                    s, b
+                );
+            }
+            return "((Vec_maka_int){ .data = NULL, .len = 0, .cap = 0 })".into();
+        }
+        // par_filter_float(slice, pred)
+        if callee.0 == u32::MAX - 39 {
+            if args.len() == 2 {
+                let s = self.emit_sub(f, &args[0]);
+                let b = self.emit_sub(f, &args[1]);
+                return format!(
+                    "(__extension__ ({{ Callable_bool_float_ __cb = ({1}); __maka_par_filter_float(({0}), __cb.code, __cb.env); }}))",
+                    s, b
+                );
+            }
+            return "(Slice_maka_float){0}".into();
+        }
+        // par_scan_float(slice, combine)
+        if callee.0 == u32::MAX - 40 {
+            if args.len() == 2 {
+                let s = self.emit_sub(f, &args[0]);
+                let b = self.emit_sub(f, &args[1]);
+                return format!(
+                    "(__extension__ ({{ Callable_float_float_float_ __cb = ({1}); __maka_par_scan_float(({0}), __cb.code, __cb.env); }}))",
+                    s, b
+                );
+            }
+            return "(Slice_maka_float){0}".into();
+        }
+        // par_scan_int(slice, combine)
+        if callee.0 == u32::MAX - 31 {
+            if args.len() == 2 {
+                let s = self.emit_sub(f, &args[0]);
+                let b = self.emit_sub(f, &args[1]);
+                return format!(
+                    "(__extension__ ({{ Callable_int_int_int_ __cb = ({1}); Slice_maka_int __s = __maka_par_scan_int(({0}), __cb.code, __cb.env); (Vec_maka_int){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
+                    s, b
+                );
+            }
+            return "((Vec_maka_int){ .data = NULL, .len = 0, .cap = 0 })".into();
+        }
+        // Built-in `select_timeout(slice, int) -> int`.
+        if callee.0 == u32::MAX - 26 {
+            if args.len() == 2 {
+                let s = self.emit_sub(f, &args[0]);
+                let ms = self.emit_sub(f, &args[1]);
+                return format!(
+                    "({{ int64_t __out_i = -1; \
+                         (void)__maka_select_timeout_i64((maka_unit**)({0}).ptr, ({0}).len, (int64_t)({1}), &__out_i); \
+                         __out_i; }})",
+                    s, ms
+                );
+            }
+            return "(-1)".into();
+        }
+        // Built-in `par_map_int(start, end, fn)` — produce a `[]int`.
+        if callee.0 == u32::MAX - 22 {
+            if args.len() == 3 {
+                let a = self.emit_sub(f, &args[0]);
+                let b = self.emit_sub(f, &args[1]);
+                let body = self.emit_sub(f, &args[2]);
+                return format!(
+                    "(__extension__ ({{ Callable_int_int_ __cb = ({2}); Slice_maka_int __s = __maka_par_map_int((int64_t)({0}), (int64_t)({1}), __cb.code, __cb.env); (Vec_maka_int){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
+                    a, b, body
+                );
+            }
+            return "((Vec_maka_int){ .data = NULL, .len = 0, .cap = 0 })".into();
+        }
+        // Built-in `par_reduce_int(start, end, init, combine)`.
+        if callee.0 == u32::MAX - 21 {
+            if args.len() == 4 {
+                let a = self.emit_sub(f, &args[0]);
+                let b = self.emit_sub(f, &args[1]);
+                let init = self.emit_sub(f, &args[2]);
+                let body = self.emit_sub(f, &args[3]);
+                return format!(
+                    "(__extension__ ({{ Callable_int_int_int_ __cb = ({3}); __maka_par_reduce_int((int64_t)({0}), (int64_t)({1}), (int64_t)({2}), __cb.code, __cb.env); }}))",
+                    a, b, init, body
+                );
+            }
+            return "0".into();
+        }
+        // Built-in `par_for_range(start, end, closure)` — dispatch
+        // chunks across the job pool.
+        if callee.0 == u32::MAX - 19 {
+            if args.len() == 3 {
+                let a = self.emit_sub(f, &args[0]);
+                let b = self.emit_sub(f, &args[1]);
+                let body = self.emit_sub(f, &args[2]);
+                // par_for_range runs the closure synchronously, so a fresh
+                // capturing closure's env can be freed right after (its
+                // malloc'd env would otherwise leak).  Only free when the
+                // arg is a closure literal - never a borrowed fn-ptr value.
+                let free_env = if matches!(&args[2].kind, HExprKind::Closure { .. }) { " free(__cb.env);" } else { "" };
+                return format!(
+                    "(__extension__ ({{ Callable_unit_int_ __cb = ({2}); __maka_par_for_range((int64_t)({0}), (int64_t)({1}), __cb.code, __cb.env);{3} MAKA_UNIT; }}))",
+                    a, b, body, free_env
+                );
+            }
+            return "MAKA_UNIT".into();
+        }
+        // Built-in `join(*Thread)` — pthread join + free handle.
+        if callee.0 == u32::MAX - 4 {
+            if let Some(a) = args.first() {
+                let s = self.emit_sub(f, a);
+                return format!("(__maka_join((maka_unit*)({})), MAKA_UNIT)", s);
+            }
+            return "MAKA_UNIT".into();
+        }
+        // Built-in string concat — four variants depending on whether each
+        // operand is borrowed (`string`) or owned (`own *char` from a prior
+        // concat / `read_line`).  Owned operands are freed inside the helper.
+        if let Some(fname) = match callee.0 {
+            v if v == u32::MAX - 5 => Some("__maka_str_concat"),
+            v if v == u32::MAX - 8 => Some("__maka_str_concat_freel"),
+            v if v == u32::MAX - 9 => Some("__maka_str_concat_freer"),
+            v if v == u32::MAX - 10 => Some("__maka_str_concat_freeb"),
+            _ => None,
+        } {
+            if args.len() == 2 {
+                let a = self.emit_sub(f, &args[0]);
+                let b = self.emit_sub(f, &args[1]);
+                return format!("{}({}, {})", fname, a, b);
+            }
+            return "((char*)0)".into();
+        }
+        // Built-in `format(...)` placeholder converters.
+        if let Some(fname) = match callee.0 {
+            v if v == u32::MAX - 11 => Some("__maka_int_to_str"),
+            v if v == u32::MAX - 12 => Some("__maka_bool_to_str"),
+            v if v == u32::MAX - 13 => Some("__maka_float_to_str"),
+            v if v == u32::MAX - 14 => Some("__maka_char_to_str"),
+            _ => None,
+        } {
+            if args.len() == 1 {
+                let a = self.emit_sub(f, &args[0]);
+                return format!("{}({})", fname, a);
+            }
+            return "((char*)0)".into();
+        }
+        // Built-in `read_line()` — owns a heap NUL-terminated buffer.
+        if callee.0 == u32::MAX - 6 {
+            return "__maka_read_line()".into();
+        }
+        // Built-in `read_int()` — reads one int from stdin.
+        if callee.0 == u32::MAX - 7 {
+            return "__maka_read_int()".into();
+        }
+        unreachable!("unhandled builtin sentinel: u32::MAX - {}", u32::MAX - callee.0)
+    }
+
     fn emit_expr(&mut self, f: &HFunc, e: &HExpr) -> String {
         match &e.kind {
             HExprKind::LitInt(n) => c_int_lit(*n),
@@ -9293,35 +9873,11 @@ impl<'a> Cx<'a> {
             HExprKind::Transfer(inner) => self.emit_expr(f, inner),
             HExprKind::EnumTag(inner) => {
                 let s = self.emit_expr(f, inner);
-                if let HType::Enum(eid) = &inner.ty {
-                    if self.sym.enum_info(*eid).is_simple() {
-                        // Simple enum: the C value IS the tag.
-                        return format!("(maka_int)({})", s);
-                    }
-                }
-                format!("(maka_int)(({}).tag)", s)
+                self.enum_tag_c(&inner.ty, &s)
             }
             HExprKind::SliceLen(inner) => {
                 let s = self.emit_expr(f, inner);
-                match &inner.ty {
-                    HType::Slice { .. } => format!("({}).len", s),
-                    HType::Vec { .. } => format!("({}).len", s),
-                    HType::Heap { inner: i } => match i.as_ref() {
-                        HType::Vec { .. } => format!("({}).len", s),
-                        HType::Array { len, .. } => format!("(maka_int){}", len),
-                        _ => "0".into(),
-                    },
-                    // `.len` through a borrow / non-owning pointer to an array,
-                    // vec, or slice.  `&Vec<T>` / `&[]T` is a pointer to the
-                    // {data/ptr,len,cap} struct, so the count is at `(*base).len`.
-                    HType::Ref { inner: i, .. } | HType::Ptr { inner: i, .. } | HType::OwnPtr { inner: i, .. } => match i.as_ref() {
-                        HType::Vec { .. } | HType::Slice { .. } => format!("({})->len", s),
-                        HType::Array { len, .. } => format!("(maka_int){}", len),
-                        _ => "0".into(),
-                    },
-                    HType::Array { len, .. } => format!("(maka_int){}", len),
-                    _ => "0".into(),
-                }
+                self.slice_len_c(&inner.ty, &s)
             }
             HExprKind::Closure { lifted, env_struct, env_values, .. } => {
                 let sig = self.sym.func_sig(*lifted);
@@ -9437,591 +9993,8 @@ impl<'a> Cx<'a> {
                 self.index_access(f, base, idx, &bs, &is_)
             }
             HExprKind::Call { callee, args } => {
-                // Built-in `panic(msg)`.
-                if callee.0 == u32::MAX - 2 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_expr(f, a);
-                        return format!("(maka_panic({}), MAKA_UNIT)", s);
-                    }
-                    return "(maka_panic(\"\"), MAKA_UNIT)".into();
-                }
-                // Built-in `free`
-                if callee.0 == u32::MAX - 1 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_expr(f, a);
-                        return format!("(free((void*)({})), MAKA_UNIT)", s);
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // Built-in `log`
-                if callee.0 == u32::MAX {
-                    // Dispatch by first arg type
-                    if args.len() == 1 {
-                        let s = self.emit_expr(f, &args[0]);
-                        let helper = self.log_helper(&args[0].ty);
-                        return format!("({}({}), MAKA_UNIT)", helper, s);
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // Optimized `log(format(...))` -> printf, no allocation.  args[0]
-                // is the printf format string; the rest are scalar values.
-                if callee.0 == u32::MAX - 58 {
-                    let mut parts: Vec<String> = vec![self.emit_expr(f, &args[0])];
-                    for a in &args[1..] {
-                        let s = self.emit_expr(f, a);
-                        parts.push(printf_conv(s, &a.ty));
-                    }
-                    return format!("(printf({}), MAKA_UNIT)", parts.join(", "));
-                }
-                // `format(...)` with scalar placeholders -> one __maka_format1 alloc.
-                if callee.0 == u32::MAX - 59 {
-                    let mut parts: Vec<String> = vec![self.emit_expr(f, &args[0])];
-                    for a in &args[1..] {
-                        let s = self.emit_expr(f, a);
-                        parts.push(printf_conv(s, &a.ty));
-                    }
-                    return format!("__maka_format1({})", parts.join(", "));
-                }
-                // `push(v, x)` - append, growing the buffer (realloc) on demand.
-                // args[0] is `&mut Vec_T`; element size is taken from the buffer.
-                if callee.0 == u32::MAX - 60 {
-                    let vp_ty = self.c_type(&args[0].ty);   // Vec_T*
-                    let vp = self.emit_expr(f, &args[0]);
-                    // The element is moved into the Vec: null an owning field/index
-                    // source so the caller's container drop does not double-free it.
-                    let x = self.emit_move_consuming(f, &args[1]);
-                    return format!("(__extension__ ({{ {0} __vp = {1}; if (__vp->len == __vp->cap) {{ __vp->cap = __vp->cap ? __vp->cap * 2 : 4; __vp->data = realloc(__vp->data, __vp->cap * sizeof(*__vp->data)); }} __vp->data[__vp->len++] = ({2}); MAKA_UNIT; }}))", vp_ty, vp, x);
-                }
-                // `pop(v)` -> last element, shrinking the length (panics if empty).
-                if callee.0 == u32::MAX - 61 {
-                    let vp_ty = self.c_type(&args[0].ty);
-                    let vp = self.emit_expr(f, &args[0]);
-                    return format!("(__extension__ ({{ {0} __vp = {1}; if (__vp->len == 0) {{ maka_panic(\"pop from empty Vec\"); }} __vp->len--; __vp->data[__vp->len]; }}))", vp_ty, vp);
-                }
-                // `zeroed()` -> a zero-initialized value of the call's type.
-                if callee.0 == u32::MAX - 62 {
-                    return format!("(({}){{0}})", self.c_type(&e.ty));
-                }
-                // Built-in `spawn(closure)` — fiber tier.  Compound-stmt expr
-                // wraps the closure once so its env malloc happens exactly once
-                // (emitting `(s).code, (s).env` would expand and re-allocate).
-                if callee.0 == u32::MAX - 3 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_expr(f, a);
-                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_fiber(__cb.code, __cb.env, {}); }}))", s, self.spawn_env_drop(a));
-                    }
-                    return "NULL".into();
-                }
-                // Built-in `thread(closure)` — kernel thread tier.
-                if callee.0 == u32::MAX - 15 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_expr(f, a);
-                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_thread(__cb.code, __cb.env, {}); }}))", s, self.spawn_env_drop(a));
-                    }
-                    return "NULL".into();
-                }
-                // Built-in `job(closure)` — work-pool tier.
-                if callee.0 == u32::MAX - 16 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_expr(f, a);
-                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_job(__cb.code, __cb.env, {}); }}))", s, self.spawn_env_drop(a));
-                    }
-                    return "NULL".into();
-                }
-                // Built-in `spawn_pool(closure)` — fiber on background pool.
-                if callee.0 == u32::MAX - 37 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_expr(f, a);
-                        return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_pool(__cb.code, __cb.env, {}); }}))", s, self.spawn_env_drop(a));
-                    }
-                    return "NULL".into();
-                }
-                // Built-in `join(slice_of_handles)` — wait for all handles.
-                // Codegen extracts the slice's ptr+len and calls the runtime.
-                if callee.0 == u32::MAX - 17 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_expr(f, a);
-                        // The slice value (or borrow thereof) carries `.ptr` and
-                        // `.len`.  For `&[]*Thread` we deref via (*s).; for `[]*Thread`
-                        // direct access works.  The codegen for `Ref` wraps the
-                        // value in `&v` which dereferences cleanly via (s).ptr too —
-                        // so either form lands at the same access pattern.
-                        return format!(
-                            "(__maka_join_all_i64((maka_unit**)({0}).ptr, ({0}).len, NULL), MAKA_UNIT)",
-                            s
-                        );
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // Built-in `select(slice_of_handles)` — race; first ready wins,
-                // losers are cancelled.
-                if callee.0 == u32::MAX - 18 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_expr(f, a);
-                        return format!(
-                            "(__maka_select_first_i64((maka_unit**)({0}).ptr, ({0}).len, NULL), MAKA_UNIT)",
-                            s
-                        );
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // Built-in `yield_now()` — cooperative yield.
-                if callee.0 == u32::MAX - 20 {
-                    return "(__maka_yield_now(), MAKA_UNIT)".into();
-                }
-                // par_map_bytes(in_ptr, n, in_sz, out_sz, body) — generic.
-                if callee.0 == u32::MAX - 38 {
-                    if args.len() == 5 {
-                        let ip = self.emit_expr(f, &args[0]);
-                        let n  = self.emit_expr(f, &args[1]);
-                        let isz = self.emit_expr(f, &args[2]);
-                        let osz = self.emit_expr(f, &args[3]);
-                        let body = self.emit_expr(f, &args[4]);
-                        return format!(
-                            "(__extension__ ({{ Callable_unit_Pmunit_Pmunit_ __cb = ({4}); \
-                             (maka_unit*)maka_par_map_bytes((void*)({0}), (int64_t)({1}), (int64_t)({2}), (int64_t)({3}), (void*)__cb.code, (void*)__cb.env); }}))",
-                            ip, n, isz, osz, body
-                        );
-                    }
-                    return "NULL".into();
-                }
-                // file_listdir(path) -> Slice_str
-                if callee.0 == u32::MAX - 43 {
-                    if let Some(a) = args.first() {
-                        let p = self.emit_expr(f, a);
-                        return format!(
-                            "(__extension__ ({{ int64_t __n; const char** __p = __maka_rt_file_listdir(({0}), &__n); (Slice_str){{ .ptr = __p, .len = (maka_int)__n }}; }}))",
-                            p
-                        );
-                    }
-                    return "(Slice_str){0}".into();
-                }
-                // str_split(s, sep) -> Slice_str
-                if callee.0 == u32::MAX - 44 {
-                    if args.len() == 2 {
-                        let s = self.emit_expr(f, &args[0]);
-                        let sep = self.emit_expr(f, &args[1]);
-                        return format!(
-                            "(__extension__ ({{ int64_t __n; const char** __p = __maka_rt_str_split(({0}), ({1}), &__n); (Slice_str){{ .ptr = __p, .len = (maka_int)__n }}; }}))",
-                            s, sep
-                        );
-                    }
-                    return "(Slice_str){0}".into();
-                }
-                // ===== Concurrency primitives (irreducible base) =====
-                // atomic_cas(&mut T p, T expected, T new) -> T (returns old).
-                // __atomic_compare_exchange_n updates *expected to *p on
-                // failure; either way `__exp` ends up holding the OLD value.
-                if callee.0 == u32::MAX - 45 {
-                    if args.len() == 3 {
-                        let p = self.emit_expr(f, &args[0]);
-                        let exp = self.emit_expr(f, &args[1]);
-                        let new = self.emit_expr(f, &args[2]);
-                        let ty = self.c_type(&args[2].ty);
-                        return format!(
-                            "(__extension__ ({{ {ty} __exp = ({exp}); \
-                             __atomic_compare_exchange_n({p}, &__exp, ({new}), 0, \
-                             __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); __exp; }}))",
-                            ty = ty, p = p, exp = exp, new = new
-                        );
-                    }
-                    return "0".into();
-                }
-                // atomic_load(&const T p) -> T
-                if callee.0 == u32::MAX - 46 {
-                    if let Some(a) = args.first() {
-                        let p = self.emit_expr(f, a);
-                        return format!("__atomic_load_n(({}), __ATOMIC_SEQ_CST)", p);
-                    }
-                    return "0".into();
-                }
-                // atomic_store(&mut T p, T v)
-                if callee.0 == u32::MAX - 47 {
-                    if args.len() == 2 {
-                        let p = self.emit_expr(f, &args[0]);
-                        let v = self.emit_expr(f, &args[1]);
-                        return format!(
-                            "(__atomic_store_n(({}), ({}), __ATOMIC_SEQ_CST), MAKA_UNIT)",
-                            p, v
-                        );
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // atomic_fetch_add / sub / and / or / xor — all the same shape.
-                if let Some(c_op) = match callee.0 {
-                    v if v == u32::MAX - 48 => Some("__atomic_fetch_add"),
-                    v if v == u32::MAX - 49 => Some("__atomic_fetch_sub"),
-                    v if v == u32::MAX - 50 => Some("__atomic_fetch_and"),
-                    v if v == u32::MAX - 51 => Some("__atomic_fetch_or"),
-                    v if v == u32::MAX - 52 => Some("__atomic_fetch_xor"),
-                    _ => None,
-                } {
-                    if args.len() == 2 {
-                        let p = self.emit_expr(f, &args[0]);
-                        let v = self.emit_expr(f, &args[1]);
-                        return format!("{}(({}), ({}), __ATOMIC_SEQ_CST)", c_op, p, v);
-                    }
-                    return "0".into();
-                }
-                // atomic_fence(int order)
-                if callee.0 == u32::MAX - 53 {
-                    if let Some(a) = args.first() {
-                        let o = self.emit_expr(f, a);
-                        // Map Maka order to __ATOMIC_* via a small dispatch.
-                        return format!(
-                            "(__atomic_thread_fence((({}) == 1) ? __ATOMIC_ACQUIRE : \
-                                                    (({}) == 2) ? __ATOMIC_RELEASE : \
-                                                    (({}) == 3) ? __ATOMIC_ACQ_REL : \
-                                                                  __ATOMIC_SEQ_CST), MAKA_UNIT)",
-                            o, o, o
-                        );
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // futex_wait(&const int addr, int expected) -> int
-                if callee.0 == u32::MAX - 54 {
-                    if args.len() == 2 {
-                        let p = self.emit_expr(f, &args[0]);
-                        let v = self.emit_expr(f, &args[1]);
-                        return format!("(int64_t)__maka_futex_wait((const int*)({}), (int)({}))", p, v);
-                    }
-                    return "0".into();
-                }
-                // futex_wake(&const int addr, int n) -> int
-                if callee.0 == u32::MAX - 55 {
-                    if args.len() == 2 {
-                        let p = self.emit_expr(f, &args[0]);
-                        let n = self.emit_expr(f, &args[1]);
-                        return format!("(int64_t)__maka_futex_wake((const int*)({}), (int)({}))", p, n);
-                    }
-                    return "0".into();
-                }
-                // thread_yield()
-                if callee.0 == u32::MAX - 56 {
-                    return "(__maka_thread_yield(), MAKA_UNIT)".into();
-                }
-                // syscall(n, a1..a6) -> int — variadic, missing args = 0.
-                if callee.0 == u32::MAX - 57 {
-                    let mut parts: Vec<String> = (0..7).map(|i| {
-                        if let Some(a) = args.get(i) {
-                            format!("(long)({})", self.emit_expr(f, a))
-                        } else {
-                            "0L".to_string()
-                        }
-                    }).collect();
-                    let n = parts.remove(0);
-                    return format!(
-                        "(int64_t)__maka_syscall({}, {})",
-                        n, parts.join(", ")
-                    );
-                }
-                // par_filter_bytes(in, n, item_sz, &mut out_n, pred)
-                if callee.0 == u32::MAX - 41 {
-                    if args.len() == 5 {
-                        let ip = self.emit_expr(f, &args[0]);
-                        let n  = self.emit_expr(f, &args[1]);
-                        let isz = self.emit_expr(f, &args[2]);
-                        let outn = self.emit_expr(f, &args[3]);
-                        let body = self.emit_expr(f, &args[4]);
-                        return format!(
-                            "(__extension__ ({{ Callable_bool_Pmunit_ __cb = ({4}); \
-                             (maka_unit*)maka_par_filter_bytes((void*)({0}), (int64_t)({1}), (int64_t)({2}), (int64_t*)({3}), (void*)__cb.code, (void*)__cb.env); }}))",
-                            ip, n, isz, outn, body
-                        );
-                    }
-                    return "NULL".into();
-                }
-                // par_scan_bytes(in, n, item_sz, combine)
-                if callee.0 == u32::MAX - 42 {
-                    if args.len() == 4 {
-                        let ip = self.emit_expr(f, &args[0]);
-                        let n  = self.emit_expr(f, &args[1]);
-                        let isz = self.emit_expr(f, &args[2]);
-                        let body = self.emit_expr(f, &args[3]);
-                        return format!(
-                            "(__extension__ ({{ Callable_unit_Pmunit_Pmunit_Pmunit_ __cb = ({3}); \
-                             (maka_unit*)maka_par_scan_bytes((void*)({0}), (int64_t)({1}), (int64_t)({2}), (void*)__cb.code, (void*)__cb.env); }}))",
-                            ip, n, isz, body
-                        );
-                    }
-                    return "NULL".into();
-                }
-                // Built-in `detach(*Thread)`.
-                if callee.0 == u32::MAX - 33 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_expr(f, a);
-                        return format!("(__maka_detach((maka_unit*)({})), MAKA_UNIT)", s);
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // Built-in `cancel(*Thread)`.
-                if callee.0 == u32::MAX - 23 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_expr(f, a);
-                        return format!("(__maka_cancel((maka_unit*)({})), MAKA_UNIT)", s);
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // Built-in `try_join(*Thread) -> bool`.
-                if callee.0 == u32::MAX - 24 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_expr(f, a);
-                        return format!("((bool)(__maka_try_join((maka_unit*)({}), NULL) != 0))", s);
-                    }
-                    return "0".into();
-                }
-                // Built-in `join_timeout(*Thread, int) -> bool`.
-                if callee.0 == u32::MAX - 25 {
-                    if args.len() == 2 {
-                        let h = self.emit_expr(f, &args[0]);
-                        let ms = self.emit_expr(f, &args[1]);
-                        return format!(
-                            "((bool)(__maka_join_timeout((maka_unit*)({}), (int64_t)({}), NULL) != 0))",
-                            h, ms
-                        );
-                    }
-                    return "0".into();
-                }
-                // once_do(o, init) builtin: split Callable to (code, env).
-                if callee.0 == u32::MAX - 32 {
-                    if args.len() == 2 {
-                        let o = self.emit_expr(f, &args[0]);
-                        let cb = self.emit_expr(f, &args[1]);
-                        return format!(
-                            "(__extension__ ({{ Callable_unit_ __cb = ({1}); (maka_once_do((maka_unit*)({0}), (void*)__cb.code, (void*)__cb.env), MAKA_UNIT); }}))",
-                            o, cb
-                        );
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // par_for_each_float(slice, body)
-                if callee.0 == u32::MAX - 34 {
-                    if args.len() == 2 {
-                        let s = self.emit_expr(f, &args[0]);
-                        let b = self.emit_expr(f, &args[1]);
-                        return format!(
-                            "(__extension__ ({{ Callable_unit_float_ __cb = ({1}); (__maka_par_for_each_f64(({0}), __cb.code, __cb.env), MAKA_UNIT); }}))",
-                            s, b
-                        );
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // par_map_float(slice, fn)
-                if callee.0 == u32::MAX - 35 {
-                    if args.len() == 2 {
-                        let s = self.emit_expr(f, &args[0]);
-                        let b = self.emit_expr(f, &args[1]);
-                        return format!(
-                            "(__extension__ ({{ Callable_float_float_ __cb = ({1}); Slice_maka_float __s = __maka_par_map_float(({0}), __cb.code, __cb.env); (Vec_maka_float){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
-                            s, b
-                        );
-                    }
-                    return "((Vec_maka_float){ .data = NULL, .len = 0, .cap = 0 })".into();
-                }
-                // par_reduce_float(slice, init, combine)
-                if callee.0 == u32::MAX - 36 {
-                    if args.len() == 3 {
-                        let s = self.emit_expr(f, &args[0]);
-                        let init = self.emit_expr(f, &args[1]);
-                        let b = self.emit_expr(f, &args[2]);
-                        return format!(
-                            "(__extension__ ({{ Callable_float_float_float_ __cb = ({2}); __maka_par_reduce_float(({0}), (double)({1}), __cb.code, __cb.env); }}))",
-                            s, init, b
-                        );
-                    }
-                    return "0.0".into();
-                }
-                // par_for_each(slice, body)
-                if callee.0 == u32::MAX - 27 {
-                    if args.len() == 2 {
-                        let s = self.emit_expr(f, &args[0]);
-                        let b = self.emit_expr(f, &args[1]);
-                        return format!(
-                            "(__extension__ ({{ Callable_unit_ __cb = ({1}); (__maka_par_for_each_i64(({0}), __cb.code, __cb.env), MAKA_UNIT); }}))",
-                            s, b
-                        );
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // par_map_int(slice, fn)
-                if callee.0 == u32::MAX - 28 {
-                    if args.len() == 2 {
-                        let s = self.emit_expr(f, &args[0]);
-                        let b = self.emit_expr(f, &args[1]);
-                        return format!(
-                            "(__extension__ ({{ Callable_int_int_ __cb = ({1}); Slice_maka_int __s = __maka_par_map_int_slice(({0}), __cb.code, __cb.env); (Vec_maka_int){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
-                            s, b
-                        );
-                    }
-                    return "((Vec_maka_int){ .data = NULL, .len = 0, .cap = 0 })".into();
-                }
-                // par_reduce_int(slice, init, combine)
-                if callee.0 == u32::MAX - 29 {
-                    if args.len() == 3 {
-                        let s = self.emit_expr(f, &args[0]);
-                        let init = self.emit_expr(f, &args[1]);
-                        let b = self.emit_expr(f, &args[2]);
-                        return format!(
-                            "(__extension__ ({{ Callable_int_int_int_ __cb = ({2}); __maka_par_reduce_int_slice(({0}), (int64_t)({1}), __cb.code, __cb.env); }}))",
-                            s, init, b
-                        );
-                    }
-                    return "0".into();
-                }
-                // par_filter_int(slice, pred)
-                if callee.0 == u32::MAX - 30 {
-                    if args.len() == 2 {
-                        let s = self.emit_expr(f, &args[0]);
-                        let b = self.emit_expr(f, &args[1]);
-                        return format!(
-                            "(__extension__ ({{ Callable_bool_int_ __cb = ({1}); Slice_maka_int __s = __maka_par_filter_int(({0}), __cb.code, __cb.env); (Vec_maka_int){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
-                            s, b
-                        );
-                    }
-                    return "((Vec_maka_int){ .data = NULL, .len = 0, .cap = 0 })".into();
-                }
-                // par_filter_float(slice, pred)
-                if callee.0 == u32::MAX - 39 {
-                    if args.len() == 2 {
-                        let s = self.emit_expr(f, &args[0]);
-                        let b = self.emit_expr(f, &args[1]);
-                        return format!(
-                            "(__extension__ ({{ Callable_bool_float_ __cb = ({1}); __maka_par_filter_float(({0}), __cb.code, __cb.env); }}))",
-                            s, b
-                        );
-                    }
-                    return "(Slice_maka_float){0}".into();
-                }
-                // par_scan_float(slice, combine)
-                if callee.0 == u32::MAX - 40 {
-                    if args.len() == 2 {
-                        let s = self.emit_expr(f, &args[0]);
-                        let b = self.emit_expr(f, &args[1]);
-                        return format!(
-                            "(__extension__ ({{ Callable_float_float_float_ __cb = ({1}); __maka_par_scan_float(({0}), __cb.code, __cb.env); }}))",
-                            s, b
-                        );
-                    }
-                    return "(Slice_maka_float){0}".into();
-                }
-                // par_scan_int(slice, combine)
-                if callee.0 == u32::MAX - 31 {
-                    if args.len() == 2 {
-                        let s = self.emit_expr(f, &args[0]);
-                        let b = self.emit_expr(f, &args[1]);
-                        return format!(
-                            "(__extension__ ({{ Callable_int_int_int_ __cb = ({1}); Slice_maka_int __s = __maka_par_scan_int(({0}), __cb.code, __cb.env); (Vec_maka_int){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
-                            s, b
-                        );
-                    }
-                    return "((Vec_maka_int){ .data = NULL, .len = 0, .cap = 0 })".into();
-                }
-                // Built-in `select_timeout(slice, int) -> int`.
-                if callee.0 == u32::MAX - 26 {
-                    if args.len() == 2 {
-                        let s = self.emit_expr(f, &args[0]);
-                        let ms = self.emit_expr(f, &args[1]);
-                        return format!(
-                            "({{ int64_t __out_i = -1; \
-                                 (void)__maka_select_timeout_i64((maka_unit**)({0}).ptr, ({0}).len, (int64_t)({1}), &__out_i); \
-                                 __out_i; }})",
-                            s, ms
-                        );
-                    }
-                    return "(-1)".into();
-                }
-                // Built-in `par_map_int(start, end, fn)` — produce a `[]int`.
-                if callee.0 == u32::MAX - 22 {
-                    if args.len() == 3 {
-                        let a = self.emit_expr(f, &args[0]);
-                        let b = self.emit_expr(f, &args[1]);
-                        let body = self.emit_expr(f, &args[2]);
-                        return format!(
-                            "(__extension__ ({{ Callable_int_int_ __cb = ({2}); Slice_maka_int __s = __maka_par_map_int((int64_t)({0}), (int64_t)({1}), __cb.code, __cb.env); (Vec_maka_int){{ .data = __s.ptr, .len = __s.len, .cap = __s.len }}; }}))",
-                            a, b, body
-                        );
-                    }
-                    return "((Vec_maka_int){ .data = NULL, .len = 0, .cap = 0 })".into();
-                }
-                // Built-in `par_reduce_int(start, end, init, combine)`.
-                if callee.0 == u32::MAX - 21 {
-                    if args.len() == 4 {
-                        let a = self.emit_expr(f, &args[0]);
-                        let b = self.emit_expr(f, &args[1]);
-                        let init = self.emit_expr(f, &args[2]);
-                        let body = self.emit_expr(f, &args[3]);
-                        return format!(
-                            "(__extension__ ({{ Callable_int_int_int_ __cb = ({3}); __maka_par_reduce_int((int64_t)({0}), (int64_t)({1}), (int64_t)({2}), __cb.code, __cb.env); }}))",
-                            a, b, init, body
-                        );
-                    }
-                    return "0".into();
-                }
-                // Built-in `par_for_range(start, end, closure)` — dispatch
-                // chunks across the job pool.
-                if callee.0 == u32::MAX - 19 {
-                    if args.len() == 3 {
-                        let a = self.emit_expr(f, &args[0]);
-                        let b = self.emit_expr(f, &args[1]);
-                        let body = self.emit_expr(f, &args[2]);
-                        // par_for_range runs the closure synchronously, so a fresh
-                        // capturing closure's env can be freed right after (its
-                        // malloc'd env would otherwise leak).  Only free when the
-                        // arg is a closure literal - never a borrowed fn-ptr value.
-                        let free_env = if matches!(&args[2].kind, HExprKind::Closure { .. }) { " free(__cb.env);" } else { "" };
-                        return format!(
-                            "(__extension__ ({{ Callable_unit_int_ __cb = ({2}); __maka_par_for_range((int64_t)({0}), (int64_t)({1}), __cb.code, __cb.env);{3} MAKA_UNIT; }}))",
-                            a, b, body, free_env
-                        );
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // Built-in `join(*Thread)` — pthread join + free handle.
-                if callee.0 == u32::MAX - 4 {
-                    if let Some(a) = args.first() {
-                        let s = self.emit_expr(f, a);
-                        return format!("(__maka_join((maka_unit*)({})), MAKA_UNIT)", s);
-                    }
-                    return "MAKA_UNIT".into();
-                }
-                // Built-in string concat — four variants depending on whether each
-                // operand is borrowed (`string`) or owned (`own *char` from a prior
-                // concat / `read_line`).  Owned operands are freed inside the helper.
-                if let Some(fname) = match callee.0 {
-                    v if v == u32::MAX - 5 => Some("__maka_str_concat"),
-                    v if v == u32::MAX - 8 => Some("__maka_str_concat_freel"),
-                    v if v == u32::MAX - 9 => Some("__maka_str_concat_freer"),
-                    v if v == u32::MAX - 10 => Some("__maka_str_concat_freeb"),
-                    _ => None,
-                } {
-                    if args.len() == 2 {
-                        let a = self.emit_expr(f, &args[0]);
-                        let b = self.emit_expr(f, &args[1]);
-                        return format!("{}({}, {})", fname, a, b);
-                    }
-                    return "((char*)0)".into();
-                }
-                // Built-in `format(...)` placeholder converters.
-                if let Some(fname) = match callee.0 {
-                    v if v == u32::MAX - 11 => Some("__maka_int_to_str"),
-                    v if v == u32::MAX - 12 => Some("__maka_bool_to_str"),
-                    v if v == u32::MAX - 13 => Some("__maka_float_to_str"),
-                    v if v == u32::MAX - 14 => Some("__maka_char_to_str"),
-                    _ => None,
-                } {
-                    if args.len() == 1 {
-                        let a = self.emit_expr(f, &args[0]);
-                        return format!("{}({})", fname, a);
-                    }
-                    return "((char*)0)".into();
-                }
-                // Built-in `read_line()` — owns a heap NUL-terminated buffer.
-                if callee.0 == u32::MAX - 6 {
-                    return "__maka_read_line()".into();
-                }
-                // Built-in `read_int()` — reads one int from stdin.
-                if callee.0 == u32::MAX - 7 {
-                    return "__maka_read_int()".into();
+                if is_builtin_sentinel(*callee) {
+                    return self.emit_builtin_sentinel(f, *callee, args, e);
                 }
                 let sig = self.sym.func_sig(*callee);
 
@@ -11094,6 +11067,15 @@ fn stmt_contains_local(s: &HStmt, id: u32) -> bool {
 /// Is this place rooted in something we own (a value local/global, or reached
 /// through an owning pointer) rather than a borrow?  Only then is it sound to
 /// null the place on move-out.  Moving out through a `&T`/`*T` borrow is not.
+/// A callee whose `FuncId` is a reserved built-in sentinel (panic/log/format/push/
+/// pop/spawn/channel/atomic/...) rather than a real user function.  Sema reserves the
+/// top `[u32::MAX-1024, u32::MAX]` of the id space for these (see the mirror check in
+/// typeck: `fid.0 < u32::MAX - 1024` == "a real, inline-able function").  Such calls
+/// are lowered by `emit_builtin_sentinel`, never by the `func_sig` path.
+fn is_builtin_sentinel(callee: FuncId) -> bool {
+    callee.0 >= u32::MAX - 1024
+}
+
 fn move_out_owned_place(e: &HExpr) -> bool {
     match &e.kind {
         HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => match &base.ty {

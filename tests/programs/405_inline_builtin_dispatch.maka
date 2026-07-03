@@ -1,0 +1,31 @@
+// Regression (bug J): builtin calls (push / pop / len / format) inside an INLINE
+// fn body crashed the compiler with a func_sig index-out-of-bounds panic.  The
+// inline-expansion emitter handled only a SUBSET of the builtin sentinel ids, so
+// any unhandled one fell through to the real-function path and indexed the func
+// table with a u32::MAX-k sentinel.  Both emitters now share one
+// `emit_builtin_sentinel` dispatch (sub-expressions routed through `emit_sub` so
+// inline-tagged locals still resolve), so every builtin works in an inline body.
+
+import std.str_len;
+
+// push + len builtins inside an inline body, on a borrowed Vec (no local drop).
+inline int fill_ref(&mut Vec<int> v, int n) {
+    mut int i = 0;
+    while (i < n) { push(v, i + 1); i = i + 1; }   // push  (sentinel MAX-60)
+    return v.len as int;                            // len   (sentinel path)
+}
+
+// `format` (a different sentinel family) inside an inline body.
+inline int shout(int x) {
+    string s = format("v={}", x)!;
+    return str_len(s) as int;
+}
+
+unit main() {
+    mut Vec<int> xs = [];
+    log(fill_ref(&mut xs, 4));   // pushes 1,2,3,4 -> len 4
+    int last = pop(xs);          // pop builtin (caller side) -> 4
+    log(last);                   // 4
+    log(xs.len as int);          // 3
+    log(shout(7));               // "v=7" has length 3
+}
