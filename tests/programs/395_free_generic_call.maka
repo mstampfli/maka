@@ -1,0 +1,11 @@
+data Box { mut int v; }
+raw *Box idg<T>(T tag, raw *Box p) {
+    return p;
+}
+unit main() {
+    unsafe {
+        raw *Box p = alloc Box { v = 7 };
+        free idg(true, p);
+    }
+    log(0);
+}

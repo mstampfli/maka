@@ -1084,7 +1084,10 @@ fn rewrite_placeholders(f: &mut HFunc, mapping: &[u32]) {
                     if let Some(v) = &mut a.value { rw_expr(v, mapping); }
                 }
             }
-            HExprKind::HeapAlloc(inner) => rw_expr(inner, mapping),
+            // Free's operand is walked too: a generic call inside `free X;`
+            // (HExprKind::Free) otherwise keeps its placeholder callee FuncId,
+            // which codegen indexes out of bounds -> compiler panic.
+            HExprKind::HeapAlloc(inner) | HExprKind::Free(inner) => rw_expr(inner, mapping),
             HExprKind::CallIndirect { callee, args } => {
                 rw_expr(callee, mapping);
                 for a in args { rw_expr(a, mapping); }
