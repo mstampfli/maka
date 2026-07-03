@@ -547,6 +547,10 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
     // An inline whose body has a `break`/`continue` targeting an enclosing loop must
     // only be called from inside a loop; reject calling it at loop depth 0.
     check_inline_loop_jumps(&sym, &funcs, &mut errors);
+    // A `mut` module global written (transitively) from a real OS-thread / job /
+    // pool body is an unsynchronized data race: globals are referenced by name, not
+    // captured, so the cross-thread capture check never sees them.  Reject it.
+    check_cross_thread_global_races(&sym, &funcs, &mut errors);
 
     // Interprocedural pass — runs after every function (including instantiations)
     // is fully lowered.  First compute "never returns null" summaries by fixpoint
@@ -892,6 +896,215 @@ fn check_inline_loop_jumps(sym: &SymTab, funcs: &[HFunc], errors: &mut Vec<SemaE
             HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields { wexpr(fe, depth, funcs, errors); },
             HExprKind::ArrayLit(es) => for ee in es { wexpr(ee, depth, funcs, errors); },
             _ => {}
+        }
+    }
+}
+
+/// The root module global a place ultimately reads/writes through, if any.
+fn place_root_global(e: &HExpr) -> Option<u32> {
+    match &e.kind {
+        HExprKind::GlobalRef(g) => Some(g.0),
+        HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => place_root_global(base),
+        HExprKind::Unwrap { expr, .. } | HExprKind::DerefRef(expr) => place_root_global(expr),
+        _ => None,
+    }
+}
+
+/// Is `c` a REAL-parallelism spawn tier (own OS thread / job / background pool)?
+/// The fiber tier (`spawn`, MAX-3) multiplexes cooperatively on one thread and
+/// never races, so it is excluded.
+fn is_real_thread_callee(c: FuncId) -> bool {
+    c.0 == u32::MAX - 15 || c.0 == u32::MAX - 16 || c.0 == u32::MAX - 37
+}
+
+/// The lifted body FuncId a spawn's callable argument runs, unwrapping the
+/// Callable coercion / transfer wrapper.  A capturing closure is `Closure { lifted }`;
+/// a non-capturing one is a bare `FnRef(fid)`.
+fn spawn_target_fid(e: &HExpr) -> Option<u32> {
+    match &e.kind {
+        HExprKind::Closure { lifted, .. } => Some(lifted.0),
+        HExprKind::FnRef(fid) => Some(fid.0),
+        HExprKind::Cast { expr, .. } | HExprKind::Transfer(expr) => spawn_target_fid(expr),
+        _ => None,
+    }
+}
+
+/// Collect, for one function body: the mut-global ids it DIRECTLY writes (an
+/// assignment to a global place, or a `&mut` borrow of one - a borrow hands out
+/// write capability), the real functions it DIRECTLY calls (for the transitive
+/// fixpoint), and every real-thread spawn site as `(lifted closure fid, span)`.
+fn collect_thread_effects(
+    sym: &SymTab, b: &HBlock,
+    writes: &mut std::collections::HashSet<u32>,
+    calls: &mut std::collections::HashSet<u32>,
+    spawns: &mut Vec<(u32, Span)>,
+) {
+    for s in &b.stmts { collect_thread_effects_stmt(sym, s, writes, calls, spawns); }
+}
+
+fn collect_thread_effects_stmt(
+    sym: &SymTab, s: &HStmt,
+    writes: &mut std::collections::HashSet<u32>,
+    calls: &mut std::collections::HashSet<u32>,
+    spawns: &mut Vec<(u32, Span)>,
+) {
+    match s {
+        HStmt::Let { init, .. } => collect_thread_effects_expr(sym, init, writes, calls, spawns),
+        HStmt::Assign { place, value, .. } => {
+            if let Some(g) = place_root_global(place) { writes.insert(g); }
+            collect_thread_effects_expr(sym, place, writes, calls, spawns);
+            collect_thread_effects_expr(sym, value, writes, calls, spawns);
+        }
+        HStmt::ExprStmt(e) => collect_thread_effects_expr(sym, e, writes, calls, spawns),
+        HStmt::Return { value: Some(v), .. } | HStmt::Propagate { value: Some(v), .. } =>
+            collect_thread_effects_expr(sym, v, writes, calls, spawns),
+        HStmt::Return { .. } | HStmt::Propagate { .. } | HStmt::Break { .. } | HStmt::Continue { .. } => {}
+        HStmt::If { cond, then_b, else_b, .. } => {
+            collect_thread_effects_expr(sym, cond, writes, calls, spawns);
+            collect_thread_effects(sym, then_b, writes, calls, spawns);
+            if let Some(b) = else_b { collect_thread_effects(sym, b, writes, calls, spawns); }
+        }
+        HStmt::While { cond, body, .. } => {
+            collect_thread_effects_expr(sym, cond, writes, calls, spawns);
+            collect_thread_effects(sym, body, writes, calls, spawns);
+        }
+        HStmt::Block(b) | HStmt::Unsafe(b, _) => collect_thread_effects(sym, b, writes, calls, spawns),
+        HStmt::ForC { init, cond, step, body, .. } => {
+            collect_thread_effects_stmt(sym, init, writes, calls, spawns);
+            collect_thread_effects_expr(sym, cond, writes, calls, spawns);
+            collect_thread_effects_stmt(sym, step, writes, calls, spawns);
+            collect_thread_effects(sym, body, writes, calls, spawns);
+        }
+        HStmt::ForEach { src, body, .. } => {
+            collect_thread_effects_expr(sym, src, writes, calls, spawns);
+            collect_thread_effects(sym, body, writes, calls, spawns);
+        }
+    }
+}
+
+fn collect_thread_effects_expr(
+    sym: &SymTab, e: &HExpr,
+    writes: &mut std::collections::HashSet<u32>,
+    calls: &mut std::collections::HashSet<u32>,
+    spawns: &mut Vec<(u32, Span)>,
+) {
+    // A `&mut` borrow of a global place grants write capability across whatever
+    // receives it, so treat it as a write of that global.
+    if let HExprKind::AddrOfRef { mutable: true, place } = &e.kind {
+        if let Some(g) = place_root_global(place) { writes.insert(g); }
+    }
+    match &e.kind {
+        HExprKind::Call { callee, args } => {
+            // Real-thread spawn site: the callable argument's body is what runs on
+            // the new thread.  A capturing closure is a `Closure { lifted }`; a
+            // non-capturing one lowers to a bare `FnRef(fid)`.
+            if is_real_thread_callee(*callee) {
+                if let Some(fid) = args.first().and_then(spawn_target_fid) {
+                    spawns.push((fid, e.span));
+                }
+            } else if (callee.0 as usize) < sym.sigs.len() {
+                calls.insert(callee.0);
+            }
+            for a in args { collect_thread_effects_expr(sym, a, writes, calls, spawns); }
+        }
+        HExprKind::InlineCall { callee, args, .. } => {
+            if (callee.0 as usize) < sym.sigs.len() { calls.insert(callee.0); }
+            for a in args { collect_thread_effects_expr(sym, a, writes, calls, spawns); }
+        }
+        HExprKind::CallIndirect { callee, args } => {
+            collect_thread_effects_expr(sym, callee, writes, calls, spawns);
+            for a in args { collect_thread_effects_expr(sym, a, writes, calls, spawns); }
+        }
+        HExprKind::Bin { lhs, rhs, .. } => {
+            collect_thread_effects_expr(sym, lhs, writes, calls, spawns);
+            collect_thread_effects_expr(sym, rhs, writes, calls, spawns);
+        }
+        HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. }
+        | HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. }
+        | HExprKind::DropWrite(expr) => collect_thread_effects_expr(sym, expr, writes, calls, spawns),
+        HExprKind::AddrOfRef { place, .. } => collect_thread_effects_expr(sym, place, writes, calls, spawns),
+        HExprKind::Field { base, .. } | HExprKind::ArrayToSlice { base, .. } =>
+            collect_thread_effects_expr(sym, base, writes, calls, spawns),
+        HExprKind::Index { base, idx } => {
+            collect_thread_effects_expr(sym, base, writes, calls, spawns);
+            collect_thread_effects_expr(sym, idx, writes, calls, spawns);
+        }
+        HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner) | HExprKind::Free(inner)
+        | HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) =>
+            collect_thread_effects_expr(sym, inner, writes, calls, spawns),
+        HExprKind::Closure { env_values, .. } =>
+            for v in env_values { collect_thread_effects_expr(sym, v, writes, calls, spawns); },
+        HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } =>
+            for (_, fe) in fields { collect_thread_effects_expr(sym, fe, writes, calls, spawns); },
+        HExprKind::ArrayLit(es) => for x in es { collect_thread_effects_expr(sym, x, writes, calls, spawns); },
+        HExprKind::Match { scrutinee, arms, .. } => {
+            collect_thread_effects_expr(sym, scrutinee, writes, calls, spawns);
+            for a in arms {
+                if let Some(g) = &a.guard { collect_thread_effects_expr(sym, g, writes, calls, spawns); }
+                collect_thread_effects(sym, &a.body, writes, calls, spawns);
+                if let Some(v) = &a.value { collect_thread_effects_expr(sym, v, writes, calls, spawns); }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A `mut` module global written (transitively) from inside a real OS-thread /
+/// job / pool body is an unsynchronized data race: the cross-thread capture check
+/// never inspects globals (they are referenced by name, not captured), so two
+/// threads doing an unlocked read-modify-write on one static otherwise compiles
+/// clean.  Compute each function's transitive mut-global write set by fixpoint
+/// over the call graph, then reject any real-thread spawn whose body writes one.
+fn check_cross_thread_global_races(sym: &SymTab, funcs: &[HFunc], errors: &mut Vec<SemaError>) {
+    use std::collections::{HashMap, HashSet};
+    let mut writes: HashMap<u32, HashSet<u32>> = HashMap::new();
+    let mut calls: HashMap<u32, HashSet<u32>> = HashMap::new();
+    let mut spawns: Vec<(u32, Span)> = Vec::new();
+    for f in funcs {
+        let mut w = HashSet::new();
+        let mut c = HashSet::new();
+        collect_thread_effects(sym, &f.body, &mut w, &mut c, &mut spawns);
+        writes.insert(f.id.0, w);
+        calls.insert(f.id.0, c);
+    }
+    // Fixpoint: a function transitively writes what it writes directly plus what
+    // anything it calls transitively writes.  Iterate to convergence (handles
+    // mutual recursion).
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let fids: Vec<u32> = calls.keys().copied().collect();
+        for fid in fids {
+            let callee_writes: HashSet<u32> = calls[&fid].iter()
+                .filter_map(|c| writes.get(c))
+                .flatten()
+                .copied()
+                .collect();
+            let entry = writes.get_mut(&fid).unwrap();
+            for g in callee_writes {
+                if entry.insert(g) { changed = true; }
+            }
+        }
+    }
+    // Report each racy global once, at the first spawn site that writes it.
+    let mut reported: HashSet<u32> = HashSet::new();
+    for (lifted, span) in &spawns {
+        if let Some(gs) = writes.get(lifted) {
+            let mut gids: Vec<u32> = gs.iter().copied().collect();
+            gids.sort_unstable();
+            for gid in gids {
+                let g = &sym.globals[gid as usize];
+                if g.is_mut && reported.insert(gid) {
+                    errors.push(SemaError {
+                        msg: format!(
+                            "data race: mutable global `{}` is written from a thread body. \
+                             Concurrent unsynchronized access to a non-atomic mutable global is undefined behavior. \
+                             Make it an `Atomic<{}>`, pass the state through a channel, or confine it to one thread.",
+                            g.name, type_str(&g.ty)),
+                        span: *span,
+                    });
+                }
+            }
         }
     }
 }
