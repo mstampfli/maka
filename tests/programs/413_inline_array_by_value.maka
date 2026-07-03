@@ -1,0 +1,45 @@
+// Regression (last inline-emitter gap): an array declared, passed by value,
+// reassigned, or iterated inside an `inline` body emitted invalid C - a C array is
+// neither declarable as `T[N] name` in the expansion's split decl/init form nor
+// `=`-assignable.  Now, mirroring the non-inline emitter:
+//   - an array LOCAL is declared up front (c_decl) and initialised via memcpy;
+//   - an array PARAMETER decays to a pointer (an alias, like the `T a[N]` sig);
+//   - a whole-array reassignment copies via memcpy;
+//   - foreach over an array local/param and multi-dimensional arrays all work.
+
+inline int local_arr() {
+    [4]int a = [1, 2, 3, 4];
+    return a[0] + a[3];                 // 5
+}
+
+inline int sum4([4]int a) {             // array param (by value)
+    return a[0] + a[1] + a[2] + a[3];
+}
+
+inline int copy_and_reassign([4]int src) {
+    [4]int b = src;                     // copy another array
+    mut [4]int c = [0, 0, 0, 0];
+    c = [5, 6, 7, 8];                   // whole-array reassignment
+    return b[1] + c[2];                 // 2 + 7 = 9
+}
+
+inline int foreach_arr() {
+    [4]int a = [2, 4, 6, 8];
+    mut int t = 0;
+    for (int x in a) { t = t + x; }     // foreach over an array local
+    return t;                           // 20
+}
+
+inline int grid_sum() {
+    [2][2]int g = [[1, 2], [3, 4]];     // multi-dimensional array
+    return g[0][0] + g[0][1] + g[1][0] + g[1][1];   // 10
+}
+
+unit main() {
+    log(local_arr());                   // 5
+    [4]int x = [10, 20, 30, 40];
+    log(sum4(x));                        // 100
+    log(copy_and_reassign(x));           // 9
+    log(foreach_arr());                  // 20
+    log(grid_sum());                     // 10
+}

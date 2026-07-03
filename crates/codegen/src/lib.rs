@@ -8239,9 +8239,20 @@ impl<'a> Cx<'a> {
         for (i, &pid) in inline_f.params.iter().enumerate() {
             let li = &inline_f.locals[pid.0 as usize];
             let pname = inline_local_name(&inline_f, pid, &tag);
-            let ty = self.c_type(&li.ty);
             let arg_s = arg_strs.get(i).cloned().unwrap_or_else(|| "0".into());
-            out.push_str(&format!("{} {} = {}; ", ty, pname, arg_s));
+            match &li.ty {
+                // An array parameter decays to a pointer, matching the non-inline
+                // `T a[N]` signature (an alias, not a copy) - a C array is neither
+                // declarable as `T[N] name` nor `=`-assignable in this binding.
+                // Reads (`a[i]`) then index the caller's array directly.
+                HType::Array { elem, .. } => {
+                    out.push_str(&format!("{}* {} = ({}); ", self.c_type(elem), pname, arg_s));
+                }
+                _ => {
+                    let ty = self.c_type(&li.ty);
+                    out.push_str(&format!("{} {} = {}; ", ty, pname, arg_s));
+                }
+            }
         }
 
         // Declare result var if needed.
@@ -8329,6 +8340,16 @@ impl<'a> Cx<'a> {
                         let ic = self.c_type(inner);
                         format!("{} = ({}*)malloc(sizeof({})); *{} = ({}); ", n, ic, ic, n, v)
                     }
+                    // An array local is DECLARED up front (c_decl, a real array); a C
+                    // array is not `=`-assignable, so initialise it via memcpy - an
+                    // array-literal RHS becomes a compound literal to copy from
+                    // (mirrors emit_assign's whole-array path).
+                    HType::Array { .. } => {
+                        let src = if matches!(&init.kind, HExprKind::ArrayLit(_)) {
+                            format!("(__typeof__({})){}", n, v)
+                        } else { v };
+                        format!("memcpy({}, {}, sizeof({})); ", n, src, n)
+                    }
                     _ => format!("{} = {}; ", n, v),
                 }
             }
@@ -8340,6 +8361,15 @@ impl<'a> Cx<'a> {
                     self.yield_exit.iter().rev().find(|(yv, _)| *yv == id)
                         .map(|(_, l)| format!("goto {}; ", l)).unwrap_or_default()
                 } else { String::new() };
+                // A whole-array reassignment is not `=`-assignable in C; copy it
+                // (mirrors emit_assign's array path).  Only for a plain Assign.
+                if matches!(op, HAssignOp::Assign) && matches!(&place.ty, HType::Array { .. }) {
+                    let lhs = self.emit_inline_place(inline_f, place, tag);
+                    let src = if matches!(&value.kind, HExprKind::ArrayLit(_)) {
+                        format!("(__typeof__({})){}", lhs, v)
+                    } else { v };
+                    return format!("memcpy({}, {}, sizeof({})); {}", lhs, src, lhs, goto);
+                }
                 // Write THROUGH a `&mut T` local, or a pointer-unwrap place `p!`: the
                 // place renders as the POINTER, so it must be dereferenced (mirrors
                 // emit_assign).  Without this an `&mut` mutation in an inline body -
