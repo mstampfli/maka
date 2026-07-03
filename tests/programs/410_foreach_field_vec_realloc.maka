@@ -1,0 +1,22 @@
+// Regression (bug M): iterating a FIELD-reached Vec while pushing to it mid-loop
+// read freed memory.  The foreach codegen only re-read the container live (to see
+// a realloc'd buffer) when the source was a BARE Vec local; a field- or
+// index-reached source (`b.xs`) fell to the snapshot path, caching `.data`, which
+// dangled the instant a `push` realloc'd the buffer (ASan: heap-use-after-free).
+// The reread guard (and the alias-elision guard) now root the source place to its
+// base local, so a field/index source is covered, and bind a pointer to the
+// container so `.data`/`.len` are read live each access.
+
+data Bag { mut Vec<int> xs; }
+
+unit main() {
+    Bag b = { xs = [] };
+    b.xs.push(10);
+    b.xs.push(20);
+    b.xs.push(30);
+    for (int x in b.xs) {
+        b.xs.push(x + 100);   // realloc mid-loop; the snapshot .data used to dangle
+        log(x);
+    }
+    log(b.xs.len as int);     // 3 originals + 3 pushed = 6
+}

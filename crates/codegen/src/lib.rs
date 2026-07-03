@@ -7843,18 +7843,29 @@ impl<'a> Cx<'a> {
                         // clamp the bound (see below) so iteration stays both
                         // memory-safe and terminating.  Non-mutating loops keep the
                         // cached snapshot (cheaper, and identical for them).
+                        // Reread when the body may mutate the source container
+                        // (push/realloc or a reassignment).  Root the source PLACE to
+                        // its base local so a FIELD- or index-reached Vec
+                        // (`for (x in b.xs) { b.xs.push(..) }`) is covered too, not
+                        // just a bare Vec local - the field case snapshotted `.data`
+                        // and dangled on the mid-loop realloc.
                         let reread = matches!(&src.ty, HType::Vec { .. })
-                            && matches!(&src.kind, HExprKind::Local(s) if block_mutates_local(body, s.0));
+                            && place_root_local(src).map_or(false, |r| block_mutates_local(body, r));
                         if reread {
-                            self.wl(&format!("maka_int __flen = (maka_int){}.len;", src_c));
+                            // Bind a pointer to the container ONCE (so the source path
+                            // is evaluated a single time) and read `.data`/`.len`
+                            // through it each access, so a realloc is always seen.
+                            let src_c_ty = self.c_type(&src.ty);
+                            self.wl(&format!("{}* __vp = &({});", src_c_ty, src_c));
+                            self.wl("maka_int __flen = (maka_int)__vp->len;");
                             // Bound = min(current len, snapshot len).  The snapshot
                             // cap gives snapshot semantics so a push cannot grow the
                             // iteration unboundedly (no infinite loop); the live cap
                             // keeps every index within the current buffer so a
                             // shrink/reassign cannot read out of bounds.  Data is
                             // read live each access.
-                            (format!("((maka_int){sc}.len < __flen ? (maka_int){sc}.len : __flen)", sc = src_c),
-                             format!("{}.data", src_c))
+                            ("((maka_int)__vp->len < __flen ? (maka_int)__vp->len : __flen)".to_string(),
+                             "__vp->data".to_string())
                         } else {
                             let src_c_ty = self.c_type(&src.ty);
                             self.wl(&format!("{} __src = {};", src_c_ty, src_c));
@@ -7906,10 +7917,11 @@ impl<'a> Cx<'a> {
                 // element owns no heap (so a move can't double-free), the loop var
                 // isn't reassigned/`&mut`-borrowed, and the source isn't mutated
                 // (which could realloc the backing buffer mid-iteration).
-                let src_local_ok = match &src.kind {
-                    HExprKind::Local(s) => !block_mutates_local(body, s.0),
-                    _ => true,
-                };
+                // The element may be aliased (not copied) only if the source
+                // container is not mutated mid-loop - rooted to the base local so a
+                // field/index-reached source is guarded too (else a realloc would
+                // dangle the alias).
+                let src_local_ok = place_root_local(src).map_or(true, |r| !block_mutates_local(body, r));
                 // An explicit reference binding (`for (&mut T x in &mut vec)`):
                 // the loop var is a reference TO the element, not the element by
                 // value, so bind it to the element's address.  Distinguished from
