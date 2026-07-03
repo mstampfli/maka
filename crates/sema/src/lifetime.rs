@@ -2046,7 +2046,16 @@ fn hoist_block_temps(sym: &SymTab, b: &mut HBlock, locals: &mut Vec<LocalInfo>) 
             }
             HStmt::Return { value: Some(v), .. } => hoist_in_expr(sym, v, locals, &mut pre),
             HStmt::Propagate { value: Some(v), .. } => hoist_in_expr(sym, v, locals, &mut pre),
-            HStmt::ForEach { src, .. } => hoist_in_expr(sym, src, locals, &mut pre),
+            HStmt::ForEach { src, .. } => {
+                hoist_in_expr(sym, src, locals, &mut pre);
+                // A temporary owning CONTAINER as the loop source (`for (x in
+                // make_vec())`) has no binding, so nothing drops it - it leaks on
+                // normal loop exit AND on any early return/break out of the body.
+                // Bind it to a hidden owning local so the scope-exit / early-exit
+                // drop machinery frees it exactly once on every path (shares the
+                // hoist mechanism with owning call-argument temps).
+                if is_droppable_temp(sym, src) { hoist_one(sym, src, locals, &mut pre); }
+            }
             _ => {}
         }
         out.extend(pre);

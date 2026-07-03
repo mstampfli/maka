@@ -1,0 +1,34 @@
+// Regression (bug L): iterating a TEMPORARY owning container - a Vec returned by
+// a call, `for (x in make_vec())`, with no binding of its own - leaked it.  An
+// early `return` out of the loop body bypassed the only place the temp could be
+// freed (loop exit), so the whole Vec and its owning elements leaked on that path.
+// The owning loop source is now hoisted into a hidden owning local, so the
+// scope-exit / early-return drop machinery frees it exactly once on every path.
+// Leak-freedom is verified out of band with LeakSanitizer.
+
+import std.{Vec, push};
+
+data Box { int v; }
+
+Vec<own *Box> make_vec(int n) {
+    Vec<own *Box> xs = [];
+    mut int i = 0;
+    while (i < n) { push(xs, alloc Box { v = i * i }); i = i + 1; }
+    return xs;
+}
+
+int first_square_over(int threshold) {
+    for (*Box b in make_vec(8)) {         // temporary owning Vec source
+        if (b != null) {
+            if (b!.v > threshold) { return b!.v; }   // early return out of the loop
+        }
+    }
+    return -1;
+}
+
+unit main() {
+    mut int t = 0;
+    mut int j = 0;
+    while (j < 100) { t = t + first_square_over(10); j = j + 1; }
+    log(t);   // first square > 10 is 16; 16 * 100 = 1600
+}
