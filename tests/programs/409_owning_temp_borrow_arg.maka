@@ -1,0 +1,19 @@
+// Regression (bug K): a pure-Maka owning temporary - `make()` returning `own *Box`
+// passed DIRECTLY as a borrow argument (`peek(*Box)`), never bound to a local -
+// leaked.  The temp IS hoisted into a hidden local, but that local was declared
+// with the argument's COERCED type (`*Box`, a non-owning alias produced by the
+// own->borrow coercion at the call site), so it was never recognised as owning and
+// never dropped.  owning_type_of now recovers the producer's true owning return
+// type, so the hidden local owns the temp and drops it at scope exit.
+// Leak-freedom is verified out of band with LeakSanitizer.
+
+data Box { mut int v; }
+own *Box make(int k) { return alloc Box { v = k }; }
+int peek(*Box b) { if (b == null) { return -1; } return b!.v; }
+
+unit main() {
+    mut int i = 0;
+    mut int t = 0;
+    while (i < 5) { t = t + peek(make(i)); i = i + 1; }   // 0+1+2+3+4 = 10
+    log(t);
+}

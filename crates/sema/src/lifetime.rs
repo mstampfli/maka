@@ -2036,7 +2036,7 @@ fn hoist_block_temps(sym: &SymTab, b: &mut HBlock, locals: &mut Vec<LocalInfo>) 
         match &mut s {
             HStmt::ExprStmt(e) => {
                 hoist_in_expr(sym, e, locals, &mut pre);
-                if is_owning_temp(sym, e) { hoist_one(e, locals, &mut pre); }
+                if is_owning_temp(sym, e) { hoist_one(sym, e, locals, &mut pre); }
             }
             HStmt::If { cond, .. } => hoist_in_expr(sym, cond, locals, &mut pre),
             HStmt::Let { init, .. } => hoist_in_expr(sym, init, locals, &mut pre),
@@ -2096,7 +2096,7 @@ fn hoist_in_expr(sym: &SymTab, e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: 
             for a in args.iter_mut() { hoist_in_expr(sym, a, locals, pre); }
             if !is_concat {
                 for a in args.iter_mut() {
-                    if is_owning_temp(sym, a) { hoist_one(a, locals, pre); }
+                    if is_owning_temp(sym, a) { hoist_one(sym, a, locals, pre); }
                 }
             }
         }
@@ -2104,7 +2104,7 @@ fn hoist_in_expr(sym: &SymTab, e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: 
             hoist_in_expr(sym, callee, locals, pre);
             for a in args.iter_mut() { hoist_in_expr(sym, a, locals, pre); }
             for a in args.iter_mut() {
-                if is_owning_temp(sym, a) { hoist_one(a, locals, pre); }
+                if is_owning_temp(sym, a) { hoist_one(sym, a, locals, pre); }
             }
         }
         HExprKind::Bin { lhs, rhs, .. } => { hoist_in_expr(sym, lhs, locals, pre); hoist_in_expr(sym, rhs, locals, pre); }
@@ -2114,7 +2114,7 @@ fn hoist_in_expr(sym: &SymTab, e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: 
         // like the field/element projections below.
         HExprKind::Unwrap { expr, .. } => {
             hoist_in_expr(sym, expr, locals, pre);
-            if is_droppable_temp(sym, expr) { hoist_one(expr, locals, pre); }
+            if is_droppable_temp(sym, expr) { hoist_one(sym, expr, locals, pre); }
         }
         HExprKind::Un { expr, .. }
         | HExprKind::Cast { expr, .. }
@@ -2138,7 +2138,7 @@ fn hoist_in_expr(sym: &SymTab, e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: 
             if !matches!(place.ty, HType::Dyn { .. })
                 && (is_droppable_temp(sym, place) || !is_lvalue_expr(place))
             {
-                hoist_one(place, locals, pre);
+                hoist_one(sym, place, locals, pre);
             }
         }
         // Projecting a field/element off a temporary (`make().field`,
@@ -2147,12 +2147,12 @@ fn hoist_in_expr(sym: &SymTab, e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: 
         // standard move-tracking + scope-exit drop handle it.
         HExprKind::Field { base, .. } => {
             hoist_in_expr(sym, base, locals, pre);
-            if is_droppable_temp(sym, base) { hoist_one(base, locals, pre); }
+            if is_droppable_temp(sym, base) { hoist_one(sym, base, locals, pre); }
         }
         HExprKind::Index { base, idx } => {
             hoist_in_expr(sym, base, locals, pre);
             hoist_in_expr(sym, idx, locals, pre);
-            if is_droppable_temp(sym, base) { hoist_one(base, locals, pre); }
+            if is_droppable_temp(sym, base) { hoist_one(sym, base, locals, pre); }
         }
         HExprKind::ArrayLit(es) => { for e2 in es.iter_mut() { hoist_in_expr(sym, e2, locals, pre); } }
         HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => {
@@ -2215,7 +2215,21 @@ fn is_owning_temp(sym: &SymTab, e: &HExpr) -> bool {
 /// The owning type to declare the hidden local with (so it auto-frees).  Owning
 /// pointers keep their type; string temps (`Str`-typed but a malloc'd `char*`)
 /// become `own *char`.
-fn owning_type_of(e: &HExpr) -> HType {
+fn owning_type_of(sym: &SymTab, e: &HExpr) -> HType {
+    // Recover the PRODUCER's true owning type, not the expression's `e.ty`: an
+    // `own *T` temp passed to a `*T` borrow parameter has been coerced to the
+    // non-owning alias `*T` at the arg position, so `e.ty` is `*T` (which owns
+    // nothing).  Declaring the hidden local with that coerced type would leave it
+    // un-owning and un-dropped -> leak (`peek(make())`).  A call's owning return
+    // type is the authority.
+    if let HExprKind::Call { callee, .. } = &e.kind {
+        if (callee.0 as usize) < sym.sigs.len() {
+            let ret = &sym.func_sig(*callee).ret;
+            if matches!(ret, HType::OwnPtr { .. } | HType::Heap { .. }) {
+                return ret.clone();
+            }
+        }
+    }
     match &e.ty {
         HType::OwnPtr { .. } | HType::Heap { .. } => e.ty.clone(),
         // A `Str`-typed temp is really a malloc'd `char*` (e.g. a concat result
@@ -2259,9 +2273,9 @@ fn is_droppable_temp(sym: &SymTab, e: &HExpr) -> bool {
 /// Replace `e` with a read of a fresh owning local, and append the binding to
 /// `pre`.  The read keeps `e`'s original (possibly coerced) type so downstream
 /// dispatch (e.g. `log`) and the move analysis behave exactly as before.
-fn hoist_one(e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: &mut Vec<HStmt>) {
+fn hoist_one(sym: &SymTab, e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: &mut Vec<HStmt>) {
     let lid = LocalId(locals.len() as u32);
-    let own_ty = owning_type_of(e);
+    let own_ty = owning_type_of(sym, e);
     let orig_ty = e.ty.clone();
     let sp = e.span;
     locals.push(LocalInfo {
