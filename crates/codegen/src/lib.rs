@@ -1386,7 +1386,10 @@ impl<'a> Cx<'a> {
         self.w("static maka_sched_tick_t* __maka_ticks_head = NULL;\n");
         self.w("static __thread maka_sched_tick_t* __maka_my_tick = NULL;\n");
         self.w("static _Atomic int __maka_watchdog_started = 0;\n");
-        self.w("static int64_t __maka_watchdog_threshold_ns = 0;\n");
+        // _Atomic: several scheduler-init threads check-then-set this concurrently
+        // (each computes the same value from MAKA_WATCHDOG_MS, so it is idempotent,
+        // but the plain accesses are a C11 data race).  Atomic access is TSan-clean.
+        self.w("static _Atomic int64_t __maka_watchdog_threshold_ns = 0;\n");
         // The awaited completion (a refcounted Thread, NOT the fiber): the
         // fiber is freed by the completion handler as soon as it finishes, so
         // holding the fiber here and reading `->completion` later is a
@@ -2676,7 +2679,10 @@ impl<'a> Cx<'a> {
         self.w("    _Atomic int64_t bottom;\n");
         self.w("    __maka_job_entry_t buf[MAKA_WS_CAP];\n");
         self.w("} __maka_ws_deque_t;\n");
-        self.w("static long __maka_n_workers = 0;\n");
+        // _Atomic: the job-pool init writes this after spawning the work-stealing
+        // workers, which read it concurrently in their steal loop (a C11 data
+        // race on the plain global).  Atomic access is TSan-clean.
+        self.w("static _Atomic long __maka_n_workers = 0;\n");
         self.w("static __maka_ws_deque_t* __maka_ws_deques = NULL;\n");
         self.w("static __thread int __maka_ws_worker_id = -1;\n");
         // Idle workers sleep on this condvar.  job() (and steal-source pushes)
@@ -3015,7 +3021,13 @@ impl<'a> Cx<'a> {
         self.w("            maka_anchor_deadline_ns = prev_anchor_deadline;\n");
         self.w("            return 0;\n");
         self.w("        }\n");
-        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        // A spawned (non-anchor) fiber must NOT swapcontext through the anchor's
+        // context slot - that clobbers the anchor's saved continuation and strands
+        // this fiber (it is on no ready/sleep queue) -> deadlock.  Yield as a fiber
+        // (re-enqueue self, run the scheduler) and re-check the loop.
+        self.w("        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
+        self.w("            __maka_yield_now();\n");
+        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
@@ -3194,10 +3206,15 @@ impl<'a> Cx<'a> {
         self.w("    } else if (!t->is_job) {\n");
         self.w("        pthread_cancel(t->handle);\n");
         self.w("        if (!atomic_load(&t->is_failed)) pthread_join(t->handle, NULL);\n");
-        // pthread_cancel + join: the canceled thread's epilogue would have
-        // unref'd its runner-side ref normally; with pthread_cancel it may
-        // not have run cleanup, so drop the runner ref here.
-        self.w("        __maka_thread_unref(t);  /* runner-side ref */\n");
+        // pthread cancellation is DEFERRED, and a compute body has no cancellation
+        // points, so the thread almost always runs its epilogue to completion -
+        // and the epilogue (__maka_handle_entry) sets done_flag=1 THEN drops the
+        // runner-side ref.  Dropping it again here double-drops the refcount -> a
+        // heap-use-after-free on the trailing spawner unref.  Only drop the runner
+        // ref if the thread was actually cancelled BEFORE its epilogue ran
+        // (done_flag still 0); pthread_join has fully reaped it so this read is
+        // unsynchronized-safe.
+        self.w("        if (!t->done_flag) __maka_thread_unref(t);  /* runner ref (cancelled early) */\n");
         self.w("    }\n");
         // Drop the spawner-side ref — caller is giving up the handle.
         self.w("    __maka_thread_unref(t);\n");
@@ -3285,7 +3302,11 @@ impl<'a> Cx<'a> {
         self.w("            return r;\n");
         self.w("        }\n");
         self.w("        /* No winner yet — drive scheduler so fibers can progress. */\n");
-        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head)) {\n");
+        // Non-anchor fiber: yield as a fiber (see join_timeout) instead of driving
+        // through the anchor context slot.
+        self.w("        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
+        self.w("            __maka_yield_now();\n");
+        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head)) {\n");
         self.w("            maka_anchor_wake_on_finish = 1;\n");
         self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_anchor_wake_on_finish = 0;\n");
@@ -3325,7 +3346,11 @@ impl<'a> Cx<'a> {
         self.w("            if (out_index) *out_index = -1;\n");
         self.w("            return -1;\n");
         self.w("        }\n");
-        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        // Non-anchor fiber: yield as a fiber (see join_timeout) instead of driving
+        // through the anchor context slot.
+        self.w("        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
+        self.w("            __maka_yield_now();\n");
+        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            maka_anchor_wake_on_finish = 1;\n");
         self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_anchor_wake_on_finish = 0;\n");
@@ -4050,9 +4075,23 @@ impl<'a> Cx<'a> {
         self.w("        pthread_mutex_lock(&c->m);\n");
         self.w("        c->waiters++;\n");
         self.w("        while (!c->head && !c->closed) pthread_cond_wait(&c->c, &c->m);\n");
+        // Handle the wake WHILE STILL HOLDING c->m and RETURN - do NOT decrement
+        // waiters, unlock, then loop back to re-acquire c: a concurrent destroy
+        // (whose drain condition is satisfied the instant waiters hits 0) would
+        // free(c) in that gap, and the re-lock/re-read would be a use-after-free.
+        self.w("        maka_bnode_t* wn = c->head;\n");
+        self.w("        if (wn) {\n");
+        self.w("            c->head = wn->next; if (!c->head) c->tail = NULL;\n");
+        self.w("            c->count--;\n");
+        self.w("            memcpy((void*)dst, wn->data, (size_t)c->item_size);\n");
+        self.w("        } else {\n");
+        self.w("            memset((void*)dst, 0, (size_t)c->item_size);\n");
+        self.w("        }\n");
         self.w("        c->waiters--;\n");
         self.w("        if (c->waiters == 0) pthread_cond_signal(&c->drained_cv);\n");
         self.w("        pthread_mutex_unlock(&c->m);\n");
+        self.w("        if (wn) free(wn);\n");
+        self.w("        return;\n");
         self.w("    }\n");
         self.w("}\n");
         // Non-blocking dequeue: takes c->m ONCE, pops head if present (returns 1),

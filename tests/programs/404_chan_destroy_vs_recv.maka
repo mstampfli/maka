@@ -1,0 +1,12 @@
+// Destroying a channel while blocked receivers are woken by the close must not
+// free the channel out from under a receiver re-reading it.  Stress it; the
+// program must finish (no hang / crash / UAF).
+import std.{IntChan, chan_int_new, chan_int_recv, chan_int_destroy, sleep_ms};
+unit consumer(IntChan c) { _ = chan_int_recv(c); }
+unit round() {
+    IntChan c = chan_int_new();
+    *Thread a = thread(unit() [c] { consumer(c); });
+    *Thread b = thread(unit() [c] { consumer(c); });
+    sleep_ms(2); chan_int_destroy(c); join(a); join(b);
+}
+unit main() { mut int i = 0; while (i < 60) { round(); i = i + 1; } log(999); }

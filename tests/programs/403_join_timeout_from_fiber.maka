@@ -1,0 +1,13 @@
+// join_timeout / select / select_timeout must work from inside a spawned fiber:
+// they used to swapcontext through the anchor's context slot, stranding the
+// sub-fiber (deadlock).  Now a non-anchor fiber yields as a fiber.
+import std.sleep_ms;
+unit main() {
+    *Thread outer = spawn(unit() {
+        *Thread inner = spawn(unit() { sleep_ms(10); });
+        _ = join_timeout(inner, 1000);
+        log(42);
+    });
+    join(outer);
+    log(99);
+}
