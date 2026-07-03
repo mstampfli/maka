@@ -8275,29 +8275,16 @@ impl<'a> Cx<'a> {
         // in via parameters lands here too: the lifetime pass marks the OUTER
         // binding as moved at the InlineCall site, so the outer scope-exit drop
         // is suppressed and the only free happens here, inside the splice.
-        for id in &inline_f.body.heap_to_free {
-            let n = inline_local_name(&inline_f, *id, &tag);
-            let ty = inline_f.locals[id.0 as usize].ty.clone();
-            match &ty {
-                // `own &[*]T` / by-value owning Vec: the buffer is a flat malloc.
-                HType::Heap { inner } if matches!(inner.as_ref(), HType::Vec { .. }) => {
-                    out.push_str(&format!("free({}.data); ", n));
-                }
-                // An owning struct/enum value passed in or built here (e.g. the
-                // `Result<String,E>` consumed by try_ok): use the recursive drop
-                // glue, which honors fields nulled out by a move (see the match
-                // scrutinee nulling above) instead of a crude `free` on a struct.
-                HType::Struct(sid) if self.drop_ty_owns(&ty) => {
-                    out.push_str(&format!("__maka_drop_{}(&({})); ",
-                        c_ident(&self.sym.struct_info(*sid).name), n));
-                }
-                HType::Enum(eid) if self.drop_ty_owns(&ty) => {
-                    out.push_str(&format!("__maka_drop_{}(&({})); ",
-                        c_ident(&self.sym.enum_info(*eid).name), n));
-                }
-                _ => out.push_str(&format!("free({}); ", n)),
-            }
-        }
+        //
+        // Route through the canonical recursive drop (emit_field_drop via
+        // capture_drops), NOT a hand-rolled per-type match: an `own *Struct` whose
+        // struct owns heap, or a by-value `Vec<own *T>`, must have its pointee /
+        // elements dropped first - a bare `free` on the outer pointer/buffer leaks
+        // everything they transitively own.  Same mechanism as inline_block_drops.
+        let scope_drops: Vec<(String, HType)> = inline_f.body.heap_to_free.iter().map(|id| {
+            (inline_local_name(&inline_f, *id, &tag), inline_f.locals[id.0 as usize].ty.clone())
+        }).collect();
+        out.push_str(&self.capture_drops(&scope_drops));
 
         if needs_value { out.push_str(&format!("__r_{}; ", tag)); }
         else { out.push_str("MAKA_UNIT; "); }

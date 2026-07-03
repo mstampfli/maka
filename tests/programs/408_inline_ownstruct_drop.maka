@@ -1,0 +1,22 @@
+// Regression (bug I): an `own *Struct` local built inside an `inline` fn, whose
+// struct transitively owns heap (here `Box.p : own *int`), was freed SHALLOWLY at
+// the inline body's scope exit - a bare `free(b)` that reclaimed the Box but never
+// dropped `b.p`, leaking the inner allocation every call.  The inline scope-exit
+// drop now routes through the canonical recursive drop (emit_field_drop), so the
+// pointee's owned fields are dropped before the pointer is freed.
+// Leak-freedom is verified out of band with LeakSanitizer.
+
+data Box { own *int p; int v; }
+
+inline int mk(int k) {
+    own *Box b = alloc Box { p = alloc k, v = 7 };
+    if (b != null) { return b!.v; }
+    return 0;
+}
+
+unit main() {
+    mut int i = 0;
+    mut int t = 0;
+    while (i < 10) { t = t + mk(i); i = i + 1; }
+    log(t);   // 7 * 10 = 70
+}
