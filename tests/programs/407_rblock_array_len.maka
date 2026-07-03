@@ -1,0 +1,17 @@
+// Regression (bug U): an rblock fn using a fixed-size array type `[T; N]` erased
+// the length when rendering the Rust type for the auto-generated drop shim,
+// emitting `Box::<[u8; _]>::from_raw(...)` - which does not compile (the const
+// length cannot be inferred) - AND mangling every `[T; N]` to the same name, so
+// `[u8; 4]` and `[i32; 8]` collided on one shim.  The length is now rendered
+// verbatim, so the shim compiles and distinct lengths get distinct names.
+rblock "
+    pub fn mk4() -> [u8; 4] { [1, 2, 3, 4] }
+    pub fn mk8() -> [i32; 8] { [10, 20, 30, 40, 50, 60, 70, 80] }
+    pub fn sum4(a: [u8; 4]) -> i64 { a.iter().map(|&x| x as i64).sum() }
+    pub fn sum8(a: [i32; 8]) -> i64 { a.iter().map(|&x| x as i64).sum() }
+";
+
+unit main() {
+    log(sum4(mk4()));   // 1+2+3+4 = 10
+    log(sum8(mk8()));   // 10+20+...+80 = 360
+}

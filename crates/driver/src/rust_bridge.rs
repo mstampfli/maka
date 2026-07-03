@@ -737,6 +737,24 @@ fn build_extern_decl(f: &RustFn) -> ExternDecl {
     }
 }
 
+/// Maka type for a `#[repr(C)]` struct FIELD.  A param/return primitive is
+/// normalised to Maka `int`/`float` (i64/f64) at the ABI boundary and narrowed
+/// back inside the shim, which is ergonomic and harmless.  But a by-value struct
+/// field is memcpy'd across the ABI with NO per-field conversion, so its Maka
+/// mirror MUST have the exact Rust width, or the two structs disagree on size and
+/// on the struct-return ABI class and silently corrupt (e.g. `i32` -> Maka `int`
+/// makes a 2-field struct 16 bytes on the Maka side vs 8 on the Rust side).
+/// Every Rust primitive name (i8/i16/i32/i64/u8/u16/u32/u64/isize/usize/f32/f64)
+/// is also a valid Maka sized-type name with the matching C width, so a primitive
+/// field maps to the same-named sized type; other field kinds are pointer-width
+/// or a nested faithful mirror and defer to the ordinary mapping.
+fn rust_to_maka_field_ty(ty: &RustType, sp: Span) -> Type {
+    match ty {
+        RustType::Prim(s) => Type::Named(s.clone(), sp),
+        _ => rust_to_maka_ty(ty, sp, false),
+    }
+}
+
 fn rust_to_maka_ty(ty: &RustType, sp: Span, is_return: bool) -> Type {
     match ty {
         RustType::Prim(s) => Type::Named(rust_prim_to_maka(s).to_string(), sp),
@@ -1406,9 +1424,17 @@ fn write_syn_type(t: &syn::Type, out: &mut String) {
             out.push(']');
         }
         syn::Type::Array(a) => {
+            // The length is load-bearing: it is part of the type's SIZE (so the
+            // generated `Box::<[T; N]>::from_raw` drop shim needs the real N to
+            // compile) AND part of the mangled shim name (dropping it collides
+            // `[u8; 4]` with `[u8; 8]`).  Render the const-length expression
+            // verbatim rather than erasing it to `_`.
             out.push('[');
             write_syn_type(&a.elem, out);
-            out.push_str("; _]");
+            out.push_str("; ");
+            let len = &a.len;
+            out.push_str(&quote::quote!(#len).to_string().replace(' ', ""));
+            out.push(']');
         }
         _ => out.push('_'),
     }
@@ -1633,7 +1659,7 @@ fn build_data_decl(s: &RustStruct) -> DataDecl {
         .iter()
         .map(|f| FieldDecl {
             mutness: Mutness::Mut,
-            ty: rust_to_maka_ty(&f.ty, sp, false),
+            ty: rust_to_maka_field_ty(&f.ty, sp),
             name: f.name.clone(),
             default: None,
             is_embed: false,

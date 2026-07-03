@@ -1,0 +1,28 @@
+// Regression (bug T): a #[repr(C)] struct with SUB-64-bit primitive fields
+// (i32/u8/f32) was mirrored on the Maka side with all-64-bit fields, so the two
+// structs disagreed on size (and on the struct-return ABI class) and silently
+// corrupted every by-value pass/return - a struct of two i32 is 8 bytes in Rust
+// but the Maka mirror made it 16.  Field mirrors now use the faithful sized Maka
+// type (i32 -> int32_t, u8 -> uint8_t, f32 -> float), matching the repr(C) layout,
+// including mixed-width structs where repr(C) inserts alignment padding.
+rblock "
+    #[repr(C)] pub struct Px { pub r: u8, pub g: u8, pub b: u8, pub a: u8 }
+    #[repr(C)] pub struct Mix { pub tag: u8, pub n: i32, pub f: f32 }
+    pub fn px_sum(p: Px) -> i64 { p.r as i64 + p.g as i64 + p.b as i64 + p.a as i64 }
+    pub fn mk_px(r: i64, g: i64, b: i64, a: i64) -> Px { Px { r: r as u8, g: g as u8, b: b as u8, a: a as u8 } }
+    pub fn mix_n(m: Mix) -> i64 { m.n as i64 }
+    pub fn mk_mix(t: i64, n: i64, f: f64) -> Mix { Mix { tag: t as u8, n: n as i32, f: f as f32 } }
+";
+
+unit main() {
+    Px p = mk_px(10, 20, 30, 40);
+    log(px_sum(p));      // 100 (proves the 4-byte struct round-trips by value)
+    log(p.r as int);     // 10
+    log(p.a as int);     // 40
+
+    Mix m = mk_mix(1, 12345, 2.5);   // padded: u8 + i32 + f32
+    log(mix_n(m));       // 12345 (proves the field offsets match after padding)
+    log(m.tag as int);   // 1
+    log(m.n);            // 12345
+    log(m.f as int);     // 2
+}
