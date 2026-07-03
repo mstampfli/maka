@@ -8333,7 +8333,6 @@ impl<'a> Cx<'a> {
                 }
             }
             HStmt::Assign { op, place, value, .. } => {
-                let p = self.emit_inline_place(inline_f, place, tag);
                 let v = self.emit_inline_expr(inline_f, value, tag);
                 // A `yield` assigns an arm's synthetic `__yield` local; terminate
                 // the arm so a yield nested in an if/while wins (mirrors emit_stmt).
@@ -8341,7 +8340,23 @@ impl<'a> Cx<'a> {
                     self.yield_exit.iter().rev().find(|(yv, _)| *yv == id)
                         .map(|(_, l)| format!("goto {}; ", l)).unwrap_or_default()
                 } else { String::new() };
-                format!("{} = {}; {}", p, self.compound_rhs(&p, *op, &v, &place.ty), goto)
+                // Write THROUGH a `&mut T` local, or a pointer-unwrap place `p!`: the
+                // place renders as the POINTER, so it must be dereferenced (mirrors
+                // emit_assign).  Without this an `&mut` mutation in an inline body -
+                // `inline f(&mut int p) { p = v }`, or a by-ref foreach binding -
+                // silently overwrites the pointer instead of the referent.
+                let (lhs, slot_ty) = if let HExprKind::Local(id) = place.kind {
+                    if let HType::Ref { mutable: true, inner } = &inline_f.locals[id.0 as usize].ty {
+                        (format!("*{}", self.emit_inline_place(inline_f, place, tag)), (**inner).clone())
+                    } else {
+                        (self.emit_inline_place(inline_f, place, tag), place.ty.clone())
+                    }
+                } else if let HExprKind::Unwrap { expr, .. } = &place.kind {
+                    (format!("*({})", self.emit_inline_expr(inline_f, expr, tag)), place.ty.clone())
+                } else {
+                    (self.emit_inline_place(inline_f, place, tag), place.ty.clone())
+                };
+                format!("{} = {}; {}", lhs, self.compound_rhs(&lhs, *op, &v, &slot_ty), goto)
             }
             HStmt::ExprStmt(e) => {
                 let v = self.emit_inline_expr(inline_f, e, tag);
@@ -8467,8 +8482,84 @@ impl<'a> Cx<'a> {
                 s.push_str("} ");
                 s
             }
-            HStmt::ForEach { .. } => {
-                "/* for-each in inline not supported */ ".into()
+            HStmt::ForEach { var, src, body, .. } => {
+                // Inline analogue of the non-inline ForEach (emit_stmt), emitted as
+                // a statement-expression string with tag-threaded local names.  The
+                // alias-elision optimisation is dropped here (elements are copied by
+                // value or bound by reference), keeping the lowering simple and safe.
+                let li = &inline_f.locals[var.0 as usize];
+                let var_name = inline_local_name(inline_f, *var, tag);
+                let var_ty = self.c_type(&li.ty);
+                let src_c = self.emit_inline_expr(inline_f, src, tag);
+                let mut s = String::from("{ ");
+                let (len_str, elem_access) = match &src.ty {
+                    HType::Array { len, .. } => (format!("(maka_int){}", len), src_c.clone()),
+                    HType::Slice { .. } => {
+                        s.push_str(&format!("{} __src = {}; ", self.c_type(&src.ty), src_c));
+                        ("__src.len".to_string(), "__src.ptr".to_string())
+                    }
+                    HType::Vec { .. } => {
+                        s.push_str(&format!("{} __src = {}; ", self.c_type(&src.ty), src_c));
+                        ("__src.len".to_string(), "__src.data".to_string())
+                    }
+                    HType::Heap { inner } if matches!(inner.as_ref(), HType::Vec { .. }) => {
+                        s.push_str(&format!("{} __src = {}; ", self.c_type(&src.ty), src_c));
+                        ("__src.len".to_string(), "__src.data".to_string())
+                    }
+                    HType::Ref { inner, .. } | HType::Ptr { inner, .. }
+                    | HType::OwnPtr { inner, .. } | HType::RawPtr { inner, .. }
+                        if matches!(inner.as_ref(), HType::Vec { .. } | HType::Slice { .. }) =>
+                    {
+                        s.push_str(&format!("{} __src = *({}); ", self.c_type(inner), src_c));
+                        if matches!(inner.as_ref(), HType::Slice { .. }) {
+                            ("__src.len".to_string(), "__src.ptr".to_string())
+                        } else {
+                            ("__src.len".to_string(), "__src.data".to_string())
+                        }
+                    }
+                    HType::Ref { inner, .. } | HType::Ptr { inner, .. }
+                    | HType::OwnPtr { inner, .. } | HType::RawPtr { inner, .. }
+                        if matches!(inner.as_ref(), HType::Array { .. }) =>
+                    {
+                        if let HType::Array { len, .. } = inner.as_ref() {
+                            (format!("(maka_int){}", len), src_c.clone())
+                        } else { unreachable!() }
+                    }
+                    _ => ("0".to_string(), src_c.clone()),
+                };
+                let li_inner: Option<&HType> = match &li.ty {
+                    HType::Ref { inner, .. } | HType::Ptr { inner, .. }
+                    | HType::OwnPtr { inner, .. } | HType::RawPtr { inner, .. } => Some(inner),
+                    _ => None,
+                };
+                let elem_ty = foreach_elem_ty(&src.ty);
+                let bind_by_ref = match (li_inner, elem_ty) {
+                    (Some(inner), Some(et)) =>
+                        self.c_type(inner) == self.c_type(et) && self.c_type(&li.ty) != self.c_type(et),
+                    _ => false,
+                };
+                let body_s: String = body.stmts.iter()
+                    .map(|st| self.emit_inline_stmt(inline_f, st, tag, result_ty)).collect();
+                if bind_by_ref {
+                    s.push_str(&format!("for (maka_int __i = 0; __i < {}; __i += 1) {{ {} {} = &({}[__i]); {}}} ",
+                        len_str, var_ty, var_name, elem_access, body_s));
+                } else if matches!(&li.ty, HType::Array { .. }) {
+                    s.push_str(&format!("for (maka_int __i = 0; __i < {}; __i += 1) {{ {}; memcpy({}, {}[__i], sizeof({})); {}}} ",
+                        len_str, self.c_decl(&li.ty, &var_name), var_name, elem_access, var_name, body_s));
+                } else {
+                    s.push_str(&format!("{} {} = {{0}}; for (maka_int __i = 0; __i < {}; __i += 1) {{ {} = {}[__i]; {}}} ",
+                        var_ty, var_name, len_str, var_name, elem_access, body_s));
+                }
+                // A temporary owning container source (`for x in make_vec()`) has no
+                // other owner: free it (elements + buffer) after the loop.
+                if matches!(&src.kind, HExprKind::Call { .. } | HExprKind::Match { .. })
+                    && matches!(&src.ty, HType::Vec { .. } | HType::Heap { .. })
+                    && self.drop_ty_owns(&src.ty)
+                {
+                    s.push_str(&self.capture_drops(&[("__src".to_string(), src.ty.clone())]));
+                }
+                s.push_str("} ");
+                s
             }
         }
     }

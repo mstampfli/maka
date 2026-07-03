@@ -1,0 +1,54 @@
+// Two fixes to the inline-body emitter, exposed while enabling foreach in inline
+// functions:
+//   1. foreach was emitted as `/* not supported */`, producing broken C.  It now
+//      lowers like the non-inline foreach (Vec / slice / array / refs, by-value and
+//      by-ref element binding, dropping a temporary owning container source).
+//   2. an assignment through a `&mut T` place (a `&mut` parameter, or a `&mut`
+//      foreach binding) inside an inline body silently overwrote the POINTER
+//      instead of the referent - `inline f(&mut int p){ p = v }` was a no-op.  The
+//      place is now dereferenced, mirroring the non-inline emit_assign.
+// Leak-freedom is verified out of band with LeakSanitizer.
+
+import std.{Vec, push};
+
+// by-value foreach over a borrowed Vec
+inline int sum_vec(&Vec<int> v) {
+    mut int t = 0;
+    for (int x in v) { t = t + x; }
+    return t;
+}
+
+// by-ref foreach: mutate each element through a `&mut` binding
+inline unit double_all(&mut Vec<int> v) {
+    for (&mut int x in v) { x = x * 2; }
+}
+
+// `&mut` parameter assignment inside an inline body
+inline unit set_to(&mut int p, int val) { p = val; }
+
+// foreach over a TEMPORARY owning Vec inside an inline (must drop it)
+Vec<int> mk(int n) {
+    Vec<int> v = []; mut int i = 0;
+    while (i < n) { push(v, i); i = i + 1; }
+    return v;
+}
+inline int sum_temp(int n) {
+    mut int t = 0;
+    for (int x in mk(n)) { t = t + x; }
+    return t;
+}
+
+unit main() {
+    Vec<int> xs = [];
+    push(xs, 10); push(xs, 20); push(xs, 30);
+    log(sum_vec(&xs));       // 60
+
+    double_all(&mut xs);     // [20, 40, 60]
+    log(sum_vec(&xs));       // 120
+
+    mut int a = 5;
+    set_to(&mut a, 99);
+    log(a);                  // 99
+
+    log(sum_temp(6));        // 0+1+2+3+4+5 = 15
+}
