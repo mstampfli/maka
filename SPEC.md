@@ -42,10 +42,10 @@ A `.maka` source file consists of:
 ```
 mut const constexpr unsafe inline propagate
 extern cinclude cblock rblock rdep raw own alloc free
-data enum logic attr has where dyn type
+data enum logic attr has where dyn some type
 if else while for in break continue match yield return
 gate transfer share thread_local module import use pub
-spawn join
+spawn thread job spawn_pool join detach cancel select
 ```
 
 The `_` identifier is a reserved placeholder usable only as a type inside
@@ -55,7 +55,9 @@ Built-in type names that are also reserved: `int` `float` `bool` `char` `unit`
 `string` `i8 i16 i32 i64 u8 u16 u32 u64 isize usize` `f32 f64` `Thread`.
 
 Built-in function names (callable like normal functions, recognized by typeck):
-`log` `panic` `spawn` `join`.
+`log` `panic` `format`, the spawn tiers `spawn` `thread` `job` `spawn_pool`, and
+the handle ops `join` `detach` `cancel` `select` (plus `push` / `pop` and the
+`str_*` / container / file builtins from the stdlib prelude).
 
 ### 1.5 Operators
 
@@ -236,11 +238,42 @@ automatically.
 reaches the same field name (or method-receiver type), the access is rejected;
 disambiguate by writing the qualified path explicitly (e.g. `outer.a.common`).
 
-### 2.5 Dynamic dispatch
+### 2.5 Dynamic dispatch and existentials
 
-`dyn Trait` and `dyn (T1 + T2)` produce fat pointers (data + vtable). Trait
-implementations live in `logic Name { ... }` blocks. Calls dispatched via the
-first `dyn` argument.
+Two existential forms hide a concrete type behind a trait's interface. Both
+allow calling only the trait's methods (`Trait.method(&x)` qualified dispatch);
+field access is rejected because the concrete type is unknown. Trait
+implementations live in `logic Name { ... }` blocks (concrete-receiver methods).
+
+**`dyn Trait`** (and `dyn (T1 + T2)`) is a **per-value** existential: a fat
+pointer `{ data, vtbl }`, each value independently typed. `x as dyn Trait` packs
+a value; calls dispatch via the first `dyn` argument's vtable. `Vec<&dyn Trait>`
+holds differently-typed elements mixed in one buffer (a witness per element).
+
+**`some X`** (and `some (T1 + T2)`) is a **per-collection** existential: a single
+`some X` value is the same fat pointer as `dyn X`, but `Vec<some X>` is a
+**dense, homogeneous column** locked to ONE hidden concrete type implementing X.
+The buffer stores raw `T` contiguously (zero per-element erasure) with ONE
+hoisted witness (the trait vtable for `T` plus its element size). Therefore
+`Vec<Vec<some X>>` is a heterogeneous vec of homogeneous columns - each inner vec
+a possibly-different hidden type - the "heterogeneous outside / homogeneous
+inside" shape with no `dyn`-per-element and no runtime type map.
+
+- **Packing** `Vec<T> -> Vec<some X>` is implicit when `T` implements `X` (an
+  automatic coercion at assignment / argument / `push`). It MOVES the source Vec
+  into the column (the column owns the buffer); using the source afterwards is a
+  use-after-move error. Distinct hidden types coexist across the outer vec's
+  slots; each inner column is homogeneous by construction.
+- **Iterating** a `Vec<some X>` yields each element as a `some X` value (a fat
+  pointer built from the column's witness), so `Trait.method(&item)` dispatches
+  normally. No field access on a hidden element.
+- **Downcast** `col as *Vec<T>` is a witness-checked recovery: it yields a
+  nullable `*Vec<T>` aliasing the column iff its hidden type is `T`, else `null`
+  (fallibility rides in the `*`, per §6.6). In the non-null branch the concrete
+  column - fields and all - is fully accessible.
+- **Drop** frees the column's buffer and runs a per-element drop (via the witness
+  drop-fn) when the element type owns heap, so an owning-element column is
+  leak-free and double-free-free.
 
 ---
 
@@ -272,6 +305,9 @@ Standard infix and unary operators with conventional precedence. Maka-specific:
     The "pointer is the nullable carrier" convention.
   - **`*Enum → *int`**: unconditional reinterpret.  Every enum variant
     has a valid `int` representation, so no check is required.
+  - **`Vec<some X> → *Vec<T>`**: witness-checked existential downcast (§2.5).
+    Yields a `*Vec<T>` aliasing the column iff its hidden type is `T`, else
+    `null` — fallibility rides in the `*`, no panic.
   - **`int → *T`**, **`raw *T` observation**, etc.: unchanged per §6.5.
 - `transfer x` / `share x` - only at direct argument positions of `gate`
   function calls (see §7).
@@ -807,11 +843,21 @@ The fiber tier (`spawn`) runs on the same thread as the caller, so
 captures are unrestricted — borrows are fine because the fiber's
 lifetime is bounded by its caller.
 
-**Implementation status**: all three are currently `pthread_create`-backed.
-The real fiber runtime (slab pool + scheduler + epoll reactor) and the
-real job runtime (work-stealing pool) replace the backings without
-changing the surface.  User code written today against `thread` /
-`spawn` / `job` will keep working.
+**Cross-thread mut-global rule** — a `mut` module global that is written
+(transitively — computed by a whole-program fixpoint over the call graph) from
+inside a `thread` / `job` / `spawn_pool` body is a **compile error**: globals are
+referenced by name, not captured, so the cross-thread capture rule above never
+sees them, and two threads doing an unsynchronized read-modify-write on one
+static is a data race.  The fiber tier is exempt (cooperative, single OS thread).
+The fix is an `Atomic<T>` global, a channel, or confining the state to one thread.
+The check is conservative: it flags thread *writes* of a mut global (a thread
+that only *reads* one is allowed).
+
+**Implementation status**: `spawn` runs on a real cooperative fiber runtime
+(anchor fiber + `swapcontext`; blocking primitives park the fiber and drive the
+scheduler rather than blocking the OS thread).  `thread` is a kernel thread and
+`job` a work-pool item; both are `pthread`-backed.  User code is written against
+the `thread` / `spawn` / `job` surface regardless of backing.
 
 Composition helpers documented in `CONCURRENCY.md`:
   - `join(&[]Handle<T>) -> []T` — homogeneous wait-all
@@ -1065,6 +1111,18 @@ style (§10.2).
 See `181_attr_qualified_call.maka` (the qualified forms) and
 `182_local_shadows_attr.maka` (shadowing rule) for worked examples.
 No `T::` prefix — the receiver type is already at the call site.
+
+**Return-type-directed dispatch.** When a call is still ambiguous after
+argument-based resolution and the surrounding `where`-bound narrowing — because
+the type parameter that distinguishes the candidates appears only in the RETURN
+type (`column() -> &Vec<T>`, `parse() -> T`, `default() -> T`) — the call's
+**expected type** is consulted as a final tie-breaker: the candidate whose return
+type matches the expected type is kept. So `&Vec<Position> ps = column(&w);`
+selects the `HasColumn<Position>` impl. This runs ONLY on a call that would
+otherwise be a hard "ambiguous" error and narrows only when exactly one candidate
+matches, so it never changes the meaning of a call that already resolved. There
+is no turbofish (`f<T>(x)` parses as comparison); a return-only type parameter is
+pinned by the expected type. See `414_return_type_directed_dispatch.maka`.
 
 **Visibility.** `has` impls are file-private by default. To use a `has` impl
 in another module:
@@ -1808,13 +1866,21 @@ A worked stub runtime + smoke test live at `tests/freestanding/`.
 
 ### 14.0 String types and the stdlib
 
-- **`string`** - a borrowed view of NUL-terminated bytes (`const char*`).
-  Stack-only handle, never owns heap.  Literals, slices of buffers, and
-  borrowed views of `String` all have this type.  Hardcoded type name.
-- **`String`** - a compiler alias for `own *char`: heap-owned, NUL-terminated,
-  auto-freed at scope exit.  Returned by constructors (`a + b`, `read_line()`)
-  and stored in `String` bindings.  Coerces to `string` for reads, log, and
-  function arguments.  Hardcoded type name in the compiler.
+- **`string`** - an `[N]char` VALUE (arrays are values in Maka, so a `string` is
+  copied on pass/assign; its C representation is a `char*` to NUL-terminated
+  bytes, but conceptually it is the char array, not a pointer).  Never owns heap,
+  never nullable.  The borrow / view is **`&string`** - use it for reads and
+  in-place work so you do not copy.  The nullable pointer family is `*string` /
+  `own *string` / `own &string` (§2.2 pointer rules).  There is no implicit
+  `own *string -> string` coercion - get the value with `!` after a non-null
+  proof.  Hardcoded type name.
+- **`String`** - a real stdlib `data` type, NOT an `own *char` alias:
+  `pub data String { mut Vec<char> buf; }` (in `stdlib/std.maka`) - growable,
+  heap-backed, NUL-terminated (`length() == buf.len - 1`), auto-frees on drop via
+  its `Vec<char>`.  Construct with `string_new()` / `string_from(s)`; methods live
+  in `attr StringOps` (`s.length()`, `s.as_str()`, `s.push('x')`,
+  `s.push_str("...")`).  `a + b` / `format(...)` produce an always-allocated
+  owning string.
 
 Everything else stdlib lives in `stdlib/std.maka` (real Maka source,
 embedded into the compiler via `include_str!` at build time) and every
@@ -1831,8 +1897,10 @@ Currently provided by `stdlib/std.maka`:
 - `str_eq(string, string) -> bool` - byte-equal comparison.
 
 Genuine compiler builtins (always in scope, never declared in Maka source):
-`log`, `panic`, `spawn`, `join`, `read_line`, `read_int`, `+` on strings,
-and `.len` on slices / arrays / vectors.
+`log`, `panic`, `format`, the spawn tiers (`spawn` / `thread` / `job` /
+`spawn_pool`) and handle ops (`join` / `detach` / `cancel` / `select`),
+`read_line`, `read_int`, `push` / `pop` on `Vec`, `+` on strings, and `.len`
+on slices / arrays / vectors.
 
 One ergonomic exception: the `for x in user_iterator` desugaring references
 `Option<T>`, so the compiler injects a synthetic `import std.Option;` for
@@ -1917,13 +1985,18 @@ These are real limitations the implementation is honest about:
   a parameter is rejected, since the compiler can't prove the borrow's source
   outlives the struct.  Lifetime annotations would let this loosen; v1 takes
   the safe-by-default rejection.
-- **No qualified-call dispatch syntax for `has` methods.** `Attr.method(x)` is
-  not accepted as a forced-dispatch form.  Within a generic with bounds,
-  ambiguity is resolved by the surrounding `where T has Attr<U>` clause; but
-  outside that context, two identically-named methods on the same type need
-  the surrounding where-bound to disambiguate.
 - **No auto-borrow on method calls.** `p.method()` requires `p` to match the
   receiver's type exactly; if the method takes `&_ self`, the call site must
-  write `(&p).method()`.  No magic `&` insertion at dispatch.
+  write `(&p).method()`.  No magic `&` insertion at dispatch.  (Qualified
+  dispatch — `A::run(&f)` / `f.A::run()` / the legacy `Attr.method(&x)` dot form,
+  and return-type-directed disambiguation — IS supported now; see §10.1.  The
+  remaining gap is only the receiver auto-borrow above.)
+- **No turbofish.** A return-only generic type parameter is pinned by the
+  expected type (§10.1), not by `f<T>(x)` — `<` at a call site parses as a
+  comparison operator.
+- **`some X` traits must be `logic`.** A `Vec<some X>` existential column
+  dispatches through a vtable, which is generated for `logic`-shaped traits
+  (concrete-receiver methods); `attr` + `has` is not (yet) a valid `some`/`dyn`
+  bound.
 
 These are tractable to fix; they are not architectural blockers.
