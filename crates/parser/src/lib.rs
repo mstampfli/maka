@@ -1137,8 +1137,12 @@ impl Parser {
             }
             return Err(ParseError { msg: "expected `*` or `&` after `own`".into(), span: self.peek_span() });
         }
-        // `dyn Trait` or `dyn (Trait + Trait + ...)`
-        if self.eat(&TokKind::Dyn) {
+        // `dyn Trait` / `dyn (T1 + T2)` (per-value existential), and its locked
+        // sibling `some Trait` / `some (T1 + T2)` (per-collection existential -
+        // one hidden concrete type for the whole container).
+        let is_dyn = self.eat(&TokKind::Dyn);
+        if is_dyn || self.eat(&TokKind::Some) {
+            let locked = !is_dyn;
             let mut traits = Vec::new();
             if self.eat(&TokKind::LParen) {
                 loop {
@@ -1151,7 +1155,7 @@ impl Parser {
                 let (n, _) = self.expect_ident("trait name")?;
                 traits.push(n);
             }
-            return Ok(Type::Dyn { traits, span: start });
+            return Ok(Type::Dyn { traits, locked, span: start });
         }
         // mut/const without sigil — applies to the *next* type's payload mutness (handled in normalisation)
         // but allowed at top: e.g. `mut int x` means mut binding of int.
@@ -1475,7 +1479,7 @@ impl Parser {
                 }
                 Some(p)
             }
-            TokKind::Dyn => {
+            TokKind::Dyn | TokKind::Some => {
                 p += 1;
                 if matches!(kinds.get(p), Some(TokKind::LParen)) {
                     let mut q = p + 1;

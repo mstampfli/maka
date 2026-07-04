@@ -1,0 +1,12 @@
+// The concrete type behind `some X` is hidden, so field access must be rejected -
+// only X's methods are callable.
+import std.{Vec, push};
+data Gram { int g; }
+logic Weigh { int weight(&Gram g) { return g.g; } }
+unit main() {
+    Vec<Gram> grams = []; push(grams, Gram { g = 2 });
+    Vec<Vec<some Weigh>> cols = []; push(cols, grams);
+    for (Vec<some Weigh> col in cols) {
+        for (some Weigh item in col) { log(item.g); }   // REJECTED: type hidden
+    }
+}

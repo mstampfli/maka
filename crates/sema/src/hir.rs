@@ -52,7 +52,9 @@ pub enum HType {
     /// `null` literal before context-driven coercion.
     NullT,
     /// `dyn Trait` (or `dyn (A + B)`) — fat pointer (data, vtable[s]).
-    Dyn { traits: Vec<String> },
+    /// `dyn Trait` (`locked: false`, per-value existential) or `some Trait`
+    /// (`locked: true`, per-collection existential locked to one hidden type).
+    Dyn { traits: Vec<String>, locked: bool },
     /// Function pointer: `RetType(P1, P2, ...)`.
     FnPtr { ret: Box<HType>, params: Vec<HType> },
     /// Unresolved type variable from a generic decl (used during sema's pre-monomorphization phase).
@@ -155,7 +157,7 @@ impl HType {
             HType::Array { len, elem } => format!("A{}_{}", len, elem.key()),
             HType::Slice { mutable, elem } => format!("Sl{}{}", if *mutable {"m"} else {"c"}, elem.key()),
             HType::Vec { elem } => format!("V{}", elem.key()),
-            HType::Dyn { traits } => format!("D{}", traits.join("+")),
+            HType::Dyn { traits, locked } => format!("{}{}", if *locked { "S" } else { "D" }, traits.join("+")),
             HType::FnPtr { ret, params } => {
                 let mut s = format!("F{}_", ret.key());
                 for p in params { s.push_str(&p.key()); s.push('_'); }
@@ -592,6 +594,12 @@ pub enum CastKind {
     Identity,
     /// `&T as dyn Trait` / `&mut T as dyn Trait` / `T as dyn Trait`: produces a fat pointer.
     ToDyn { trait_name: String, struct_id: StructId },
+    /// `Vec<T> -> Vec<some X>`: pack a concrete homogeneous column into a dense
+    /// existential column (attach the `X`-vtable for `T` and `sizeof(T)`).
+    PackSomeVec { trait_name: String, struct_id: StructId },
+    /// `Vec<some X> as *Vec<T>`: witness-checked downcast.  Yields a nullable
+    /// `*Vec<T>` aliasing the column iff its hidden type is `T`, else null.
+    DowncastSomeVec { trait_name: String, struct_id: StructId },
     /// Reinterpret cast: `*T` ↔ `*U`, `*T` ↔ `usize`/`isize`. The user takes responsibility.
     /// For `*T ↔ *U` the lifetime pass still propagates dep edges (both sides alias the
     /// same memory).  For `*T → usize → *T` round-trips the integer step breaks the chain,

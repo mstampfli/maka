@@ -4193,7 +4193,7 @@ impl<'a> TypeChecker<'a> {
         let to = self.resolve_local_ty(ty);
 
         // `as dyn Trait` — special: produces a dyn fat pointer or `&dyn` / `&mut dyn`.
-        if let HType::Dyn { traits } = &to {
+        if let HType::Dyn { traits, .. } = &to {
             return self.check_to_dyn(h, traits.clone(), false, sp);
         }
         // `own &T` (Heap) is never a valid cast target — synthesizing an
@@ -4202,6 +4202,24 @@ impl<'a> TypeChecker<'a> {
         // (only allowed from `own &T`; nullable sources must use `&(p!)`).
         if matches!(to, HType::Heap { .. }) {
             self.err("cannot cast to `own &T` — owning bindings come only from `alloc` or moves", sp);
+        }
+        // `some`-column downcast: `<Vec<some X>> as *Vec<T>` -> a nullable
+        // `*Vec<T>` that aliases the column iff its hidden type is `T` (a runtime
+        // witness check), else null.  Fallibility rides in the `*` (Maka convention).
+        if let HType::Vec { elem: se } = &h.ty {
+            if let HType::Dyn { traits, locked: true } = se.as_ref() {
+                if let HType::Ptr { inner: ti, .. } = &to {
+                    if let HType::Vec { elem: te } = ti.as_ref() {
+                        if let HType::Struct(sid) = te.as_ref() {
+                            let sid = *sid;
+                            if traits.iter().all(|tn| self.struct_satisfies_trait(sid, tn)) {
+                                let kind = CastKind::DowncastSomeVec { trait_name: traits[0].clone(), struct_id: sid };
+                                return HExpr { kind: HExprKind::Cast { expr: Box::new(h), kind, to: to.clone() }, ty: to, span: sp };
+                            }
+                        }
+                    }
+                }
+            }
         }
         // Bool ↔ int forbidden per §7.4
         let from = &h.ty;
@@ -4217,6 +4235,25 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Handle `expr as dyn Trait`. The source must be a reference or a value whose underlying
+    /// Does concrete struct `struct_id` satisfy trait/logic `trait_name` - i.e. does
+    /// every distinct method name in the logic have an overload taking that struct
+    /// (by `&`-ref) as its receiver?  Same rule check_to_dyn enforces.
+    fn struct_satisfies_trait(&self, struct_id: StructId, trait_name: &str) -> bool {
+        let Some(linfo) = self.sym.logic_by_name(trait_name) else { return false; };
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut ok: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for fid in &linfo.funcs {
+            let sig = self.sym.func_sig(*fid);
+            seen.insert(sig.name.clone());
+            if let Some(HType::Ref { inner, .. }) = sig.param_tys.first() {
+                if let HType::Struct(sid) = inner.as_ref() {
+                    if *sid == struct_id { ok.insert(sig.name.clone()); }
+                }
+            }
+        }
+        !seen.is_empty() && seen.iter().all(|n| ok.contains(n))
+    }
+
     /// concrete type is known; verify trait satisfaction and produce a Dyn fat pointer.
     fn check_to_dyn(&mut self, h: HExpr, traits: Vec<String>, _checked: bool, sp: Span) -> HExpr {
         // Determine the concrete struct id from `h.ty`. Allow `&T`, `&mut T`, `T`.
@@ -4264,7 +4301,7 @@ impl<'a> TypeChecker<'a> {
         }
 
         // Result type: keep `dyn Trait` value form; downstream coercion adapts to `&dyn`/`&mut dyn`.
-        let dyn_ty = HType::Dyn { traits: traits.clone() };
+        let dyn_ty = HType::Dyn { traits: traits.clone(), locked: false };
         let kind = CastKind::ToDyn { trait_name: traits[0].clone(), struct_id };
         let result_ty = match want_mut_ref {
             Some(true) => HType::Ref { mutable: true, inner: Box::new(dyn_ty.clone()) },
@@ -5337,6 +5374,29 @@ impl<'a> TypeChecker<'a> {
     fn coerce(&mut self, e: HExpr, target: &HType) -> HExpr {
         if type_eq(&e.ty, target) { return e; }
 
+        // Pack a concrete homogeneous `Vec<T>` into a dense existential column
+        // `Vec<some X>` when `T` implements `X` (implicit).  Attaches the `X`-vtable
+        // for `T` and `sizeof(T)`; the buffer is reinterpreted, not copied.
+        if let (HType::Vec { elem: se }, HType::Vec { elem: te }) = (&e.ty, target) {
+            if let HType::Dyn { traits, locked: true } = te.as_ref() {
+                if let HType::Struct(sid) = se.as_ref() {
+                    let sid = *sid;
+                    if traits.iter().all(|tn| self.struct_satisfies_trait(sid, tn)) {
+                        let sp = e.span;
+                        return HExpr {
+                            kind: HExprKind::Cast {
+                                expr: Box::new(e),
+                                kind: CastKind::PackSomeVec { trait_name: traits[0].clone(), struct_id: sid },
+                                to: target.clone(),
+                            },
+                            ty: target.clone(),
+                            span: sp,
+                        };
+                    }
+                }
+            }
+        }
+
         // Implicit reborrow: `&mut &mut T` → `&mut T` (and `&&T` → `&T`).  This
         // is what makes `func(&mut g)` work when `g` is already `&mut T` inside
         // a helper - users write the borrow naturally and the compiler peels
@@ -6004,7 +6064,7 @@ pub fn type_eq(a: &HType, b: &HType) -> bool {
         (Array { len: an, elem: ai }, Array { len: bn, elem: bi }) => an == bn && type_eq(ai, bi),
         (Slice { mutable: am, elem: ai }, Slice { mutable: bm, elem: bi }) => am == bm && type_eq(ai, bi),
         (Vec { elem: ai }, Vec { elem: bi }) => type_eq(ai, bi),
-        (Dyn { traits: a }, Dyn { traits: b }) => a == b,
+        (Dyn { traits: a, locked: la }, Dyn { traits: b, locked: lb }) => a == b && la == lb,
         (FnPtr { ret: ar, params: ap }, FnPtr { ret: br, params: bp }) => {
             type_eq(ar, br) && ap.len() == bp.len() && ap.iter().zip(bp.iter()).all(|(a, b)| type_eq(a, b))
         }
@@ -6042,7 +6102,7 @@ pub fn type_str(t: &HType) -> String {
         HType::Array { len, elem } => format!("[{}]{}", len, type_str(elem)),
         HType::Slice { mutable, elem } => format!("[]{}{}", if *mutable {"mut "} else {""}, type_str(elem)),
         HType::Vec { elem } => format!("[*]{}", type_str(elem)),
-        HType::Dyn { traits } => format!("dyn {}", traits.join("+")),
+        HType::Dyn { traits, locked } => format!("{} {}", if *locked { "some" } else { "dyn" }, traits.join("+")),
         HType::FnPtr { ret, params } => {
             let parts: Vec<String> = params.iter().map(type_str).collect();
             format!("{}({})", type_str(ret), parts.join(", "))
@@ -6060,7 +6120,7 @@ pub fn type_str(t: &HType) -> String {
 /// If `t` is a `dyn Trait` (possibly behind &/&mut/*/heap), return the traits list.
 pub fn strip_to_dyn(t: &HType) -> Option<Vec<String>> {
     match t {
-        HType::Dyn { traits } => Some(traits.clone()),
+        HType::Dyn { traits, .. } => Some(traits.clone()),
         HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::Heap { inner } => strip_to_dyn(inner),
         _ => None,
     }

@@ -41,8 +41,11 @@ pub enum Type {
     Vec { elem: Box<Type>, span: Span },
     /// `()` — the unit type literal in source.
     Unit(Span),
-    /// `dyn Trait` or `dyn (T1 + T2)`. We carry trait names; type args ignored for v1.
-    Dyn { traits: Vec<String>, span: Span },
+    /// `dyn Trait` or `dyn (T1 + T2)`, and its locked sibling `some Trait`.
+    /// `dyn` (`locked: false`) is a per-value existential (elements can differ);
+    /// `some` (`locked: true`) is a per-collection existential locked to ONE hidden
+    /// concrete type.  Both carry only trait names; type args ignored for v1.
+    Dyn { traits: Vec<String>, locked: bool, span: Span },
     /// Generic type instantiation `Name<T, U>`.
     Generic { name: String, args: Vec<Type>, span: Span },
     /// Function pointer type: `RetType(P1, P2, ...)`.
@@ -86,7 +89,7 @@ impl Type {
             Type::Vec { elem, span } => Type::Vec {
                 elem: Box::new(elem.subst_placeholder(concrete)), span: *span,
             },
-            Type::Dyn { traits, span } => Type::Dyn { traits: traits.clone(), span: *span },
+            Type::Dyn { traits, locked, span } => Type::Dyn { traits: traits.clone(), locked: *locked, span: *span },
             Type::Generic { name, args, span } => Type::Generic {
                 name: name.clone(),
                 args: args.iter().map(|a| a.subst_placeholder(concrete)).collect(),
@@ -137,7 +140,7 @@ impl Type {
             Type::Vec { elem, span } => Type::Vec {
                 elem: Box::new(elem.subst_placeholder_ty(recv)), span: *span,
             },
-            Type::Dyn { traits, span } => Type::Dyn { traits: traits.clone(), span: *span },
+            Type::Dyn { traits, locked, span } => Type::Dyn { traits: traits.clone(), locked: *locked, span: *span },
             Type::Generic { name, args, span } => Type::Generic {
                 name: name.clone(),
                 args: args.iter().map(|a| a.subst_placeholder_ty(recv)).collect(),

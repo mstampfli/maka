@@ -5339,7 +5339,9 @@ impl<'a> Cx<'a> {
             HExprKind::Index { base, idx } => { self.scan_expr(base); self.scan_expr(idx); }
             HExprKind::Call { args, .. } => for a in args { self.scan_expr(a); },
             HExprKind::Cast { expr, kind, .. } => {
-                if let CastKind::ToDyn { trait_name, struct_id } = kind {
+                if let CastKind::ToDyn { trait_name, struct_id }
+                     | CastKind::PackSomeVec { trait_name, struct_id }
+                     | CastKind::DowncastSomeVec { trait_name, struct_id } = kind {
                     self.dyn_traits.insert(trait_name.clone());
                     self.dyn_insts.insert((trait_name.clone(), struct_id.0));
                 }
@@ -5387,7 +5389,7 @@ impl<'a> Cx<'a> {
             HType::Heap { inner } => self.note_type(inner),
             HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::RawPtr { inner, .. } | HType::OwnPtr { inner, .. } => self.note_type(inner),
             HType::Array { elem, .. } => self.note_type(elem),
-            HType::Dyn { traits } => for t in traits { self.dyn_traits.insert(t.clone()); },
+            HType::Dyn { traits, .. } => for t in traits { self.dyn_traits.insert(t.clone()); },
             HType::FnPtr { ret, params } => {
                 let key = fn_sig_key(ret, params);
                 self.callable_sigs.insert(key, ((**ret).clone(), params.clone()));
@@ -5455,8 +5457,14 @@ impl<'a> Cx<'a> {
             self.close();
             self.wl(&format!("}} {0}_vtbl;", c_ident(tn)));
 
-            // Dyn struct.
+            // Dyn struct (per-value existential: {data, vtbl}).
             self.wl(&format!("typedef struct {{ void* data; const {0}_vtbl* vtbl; }} Dyn_{0};", c_ident(tn)));
+            // SomeVec struct (`Vec<some X>`): a DENSE homogeneous column - a Vec
+            // header over raw `T` values, plus ONE hoisted witness (the trait vtbl
+            // for the hidden `T` and its element size, for striding).  Iterating
+            // hands out `Dyn_X` fat pointers `{data + j*esz, vtbl}`, so dispatch
+            // reuses the ordinary dyn path.
+            self.wl(&format!("typedef struct {{ void* data; maka_int len; maka_int cap; const {0}_vtbl* __vtbl; maka_int __esz; }} SomeVec_{0};", c_ident(tn)));
         }
     }
 
@@ -5670,10 +5678,15 @@ impl<'a> Cx<'a> {
             HType::Heap { inner } => format!("h_{}", self.type_key(inner)),
             HType::Array { len, elem } => format!("a{}_{}", len, self.type_key(elem)),
             HType::Slice { elem, .. } => format!("Slice_{}", self.type_key(elem)),
-            HType::Vec { elem } => format!("Vec_{}", self.type_key(elem)),
+            // `Vec<some X>` is a DENSE existential column (one hoisted witness),
+            // distinct from `Vec<dyn X>` (per-element fat pointers).
+            HType::Vec { elem } => match elem.as_ref() {
+                HType::Dyn { traits, locked: true } => format!("SomeVec_{}", traits.join("_")),
+                _ => format!("Vec_{}", self.type_key(elem)),
+            },
             HType::Str => "str".into(),
             HType::NullT => "nullptr_t".into(),
-            HType::Dyn { traits } => format!("Dyn_{}", traits.join("_")),
+            HType::Dyn { traits, .. } => format!("Dyn_{}", traits.join("_")),
             // Key a closure/fn-pointer by its fat-callable type name, so a
             // container element (`Vec<int(int)>`) resolves via c_type_from_key to
             // the `Callable_*` struct, not a bogus raw-fn-ptr name.
@@ -5782,8 +5795,11 @@ impl<'a> Cx<'a> {
                 format!("{}[{}]", self.c_type(elem), len)
             }
             HType::Slice { elem, .. } => format!("Slice_{}", self.type_key(elem)),
-            HType::Vec { elem } => format!("Vec_{}", self.type_key(elem)),
-            HType::Dyn { traits } => format!("Dyn_{}", c_ident(&traits[0])),
+            HType::Vec { elem } => match elem.as_ref() {
+                HType::Dyn { traits, locked: true } => format!("SomeVec_{}", traits.join("_")),
+                _ => format!("Vec_{}", self.type_key(elem)),
+            },
+            HType::Dyn { traits, .. } => format!("Dyn_{}", c_ident(&traits[0])),
             HType::FnPtr { ret, params } => {
                 format!("Callable_{}", fn_sig_key(ret, params))
             }
@@ -7827,6 +7843,30 @@ impl<'a> Cx<'a> {
                 let var_name = local_name(*var, &li.name);
                 let var_ty = self.c_type(&li.ty);
                 let src_c = self.emit_expr(f, src);
+                // Iterating a dense existential column `Vec<some X>`: the buffer is
+                // raw `T` strided by `__esz`, and the binding is a `some X` (= a
+                // `Dyn_X` fat pointer) built per element from the column's hoisted
+                // witness - so trait-method dispatch on it reuses the ordinary dyn
+                // path.  (Distinct from a normal Vec, whose elements are read directly.)
+                if let HType::Vec { elem } = &src.ty {
+                    if let HType::Dyn { traits, locked: true } = elem.as_ref() {
+                        let dyn_c = format!("Dyn_{}", traits.join("_"));
+                        self.wl("{");
+                        self.open();
+                        self.wl(&format!("{} __sc = {};", self.c_type(&src.ty), src_c));
+                        self.wl("for (maka_int __i = 0; __i < __sc.len; __i += 1) {");
+                        self.open();
+                        self.wl(&format!(
+                            "{dc} {vn} = {{ .data = (void*)((char*)__sc.data + __i * __sc.__esz), .vtbl = __sc.__vtbl }};",
+                            dc = dyn_c, vn = var_name));
+                        self.emit_block(f, body, true);
+                        self.close();
+                        self.wl("}");
+                        self.close();
+                        self.wl("}");
+                        return;
+                    }
+                }
                 self.wl("{");
                 self.open();
                 // Layout based on src type:
@@ -10951,6 +10991,25 @@ impl<'a> Cx<'a> {
             // The `(uintptr_t)` round-trip silences GCC's "incompatible pointer types"
             // warnings on direct *T↔*U casts.
             CastKind::Reinterpret => format!("(({})(uintptr_t)({}))", to_c, s),
+            // Pack `Vec<T>` -> `Vec<some X>`: copy the buffer into a column that owns
+            // its own storage (so the source `Vec<T>` and the column don't both free
+            // one buffer), and attach the hoisted witness (the `X`-vtable for `T` and
+            // `sizeof(T)`).  The column's buffer is freed by the SomeVec drop glue.
+            CastKind::PackSomeVec { trait_name, struct_id } => {
+                let sname = self.sym.struct_info(struct_id).name.clone();
+                let ec = c_ident(&sname);
+                format!("(__extension__ ({{ {vt} __sv = ({src}); size_t __bytes = (size_t)__sv.len * sizeof({ec}); void* __b = malloc(__bytes); if (__bytes) memcpy(__b, __sv.data, __bytes); ({sty}){{ .data = __b, .len = __sv.len, .cap = __sv.len, .__vtbl = &{tr}_vtbl_for_{st}, .__esz = (maka_int)sizeof({ec}) }}; }}))",
+                    vt = self.c_type(from), src = s, sty = to_c,
+                    tr = c_ident(&trait_name), st = c_ident(&sname), ec = ec)
+            }
+            // Witness-checked downcast: alias the column's Vec header (data/len/cap
+            // share layout) as `*Vec<T>` iff the hoisted vtable is `T`'s, else null.
+            // `s` must be an lvalue (a stored column); it is read twice, both pure.
+            CastKind::DowncastSomeVec { trait_name, struct_id } => {
+                let sname = self.sym.struct_info(struct_id).name.clone();
+                format!("((({src}).__vtbl == &{tr}_vtbl_for_{st}) ? ({tc})&({src}) : ({tc})0)",
+                    src = s, tr = c_ident(&trait_name), st = c_ident(&sname), tc = to_c)
+            }
             _ => format!("(({}){})", to_c, s),
         }
     }

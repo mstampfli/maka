@@ -1,0 +1,38 @@
+// `some X` - a per-collection existential: `Vec<Vec<some X>>` is a heterogeneous
+// vec of HOMOGENEOUS columns, each locked to one hidden concrete type implementing
+// X, with ZERO per-element erasure (dense `Vec<T>` storage + one hoisted witness).
+// You may call only X's methods on a hidden element (no field access - the type is
+// unknown); a witness-checked `as *Vec<T>` downcast recovers the concrete column
+// (nullable - fallibility rides in the `*`).
+import std.{Vec, push};
+
+data Gram { int g; }
+data Kilo { int k; }
+logic Weigh {
+    int weight(&Gram g) { return g.g; }
+    int weight(&Kilo k) { return k.k * 1000; }
+}
+
+unit main() {
+    Vec<Gram> grams = [];
+    push(grams, Gram { g = 2 }); push(grams, Gram { g = 3 });
+    Vec<Kilo> kilos = [];
+    push(kilos, Kilo { k = 1 });
+
+    Vec<Vec<some Weigh>> columns = [];
+    push(columns, grams);   // packs Vec<Gram> -> Vec<some Weigh>
+    push(columns, kilos);   // packs Vec<Kilo> -> Vec<some Weigh>, a DIFFERENT hidden type
+
+    mut int total = 0;
+    for (Vec<some Weigh> col in columns) {          // heterogeneous outer
+        for (some Weigh item in col) {              // homogeneous-locked inner, hidden T
+            total = total + Weigh.weight(&item);    // trait method only, via the witness
+        }
+    }
+    log(total);   // 2+3=5 grams, 1*1000 kilos -> 1005
+
+    *Vec<Gram> gs = columns[0] as *Vec<Gram>;       // witness matches -> non-null alias
+    if (gs != null) { log(gs![0].g + gs![1].g); }   // 5 (concrete fields now visible)
+    *Vec<Gram> bad = columns[1] as *Vec<Gram>;      // Kilo column is not Gram -> null
+    if (bad == null) { log(-1); }                   // -1
+}

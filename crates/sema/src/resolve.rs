@@ -512,8 +512,8 @@ pub fn resolve_type_in(
             reject_array_container_elem(&elem, "Vec", *span, errors);
             HType::Vec { elem: Box::new(elem) }
         }
-        ast::Type::Dyn { traits, .. } => {
-            HType::Dyn { traits: traits.clone() }
+        ast::Type::Dyn { traits, locked, .. } => {
+            HType::Dyn { traits: traits.clone(), locked: *locked }
         }
         ast::Type::FnPtr { ret, params, .. } => {
             let r = resolve_type_in(sym, ret, type_params, errors);
