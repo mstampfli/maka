@@ -1672,6 +1672,12 @@ impl<'a> Analyzer<'a> {
     /// own no heap here, so a borrowed receiver (`s.len()` -> `&s`) is not a
     /// move.  Call AFTER walking `a`, so the move itself is not flagged.
     fn mark_owning_move(&mut self, a: &HExpr) {
+        // Packing `Vec<T> -> Vec<some X>` moves the underlying Vec into the column,
+        // so peel the coercion and mark the source Vec moved (use-after-pack errors).
+        let a = match &a.kind {
+            HExprKind::Cast { expr, kind, .. } if matches!(kind, CastKind::PackSomeVec { .. }) => expr.as_ref(),
+            _ => a,
+        };
         if ty_owns_heap(self.sym, &a.ty) {
             if let HExprKind::Local(id) = a.kind {
                 // mark_moved poisons the owner's aliases (single move choke point).
@@ -2747,7 +2753,15 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
             HExprKind::AddrOfRef { place, .. } => moved_locals_in_expr(sym, place, out),
             HExprKind::Field { base, .. } => moved_locals_in_expr(sym, base, out),
             HExprKind::Index { base, idx } => { moved_locals_in_expr(sym, base, out); moved_locals_in_expr(sym, idx, out); }
-            HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) => moved_locals_in_expr(sym, expr, out),
+            HExprKind::Cast { expr, kind, .. } => {
+                // Packing `Vec<T> -> Vec<some X>` MOVES the buffer into the column,
+                // so the source Vec must not also be dropped (double free).
+                if matches!(kind, CastKind::PackSomeVec { .. }) {
+                    if let HExprKind::Local(id) = expr.kind { out.insert(id); }
+                }
+                moved_locals_in_expr(sym, expr, out);
+            }
+            HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) => moved_locals_in_expr(sym, expr, out),
             HExprKind::ArrayToSlice { base, .. } => moved_locals_in_expr(sym, base, out),
             HExprKind::DerefRef(inner) => moved_locals_in_expr(sym, inner, out),
             HExprKind::HeapAlloc(inner) => moved_locals_in_expr(sym, inner, out),

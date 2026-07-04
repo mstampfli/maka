@@ -5074,6 +5074,13 @@ impl<'a> Cx<'a> {
                 self.close();
                 self.wl("}");
             }
+            // A dense existential column `Vec<some X>`: the element type is hidden,
+            // so drop each element through the per-column witness drop-fn (NULL for
+            // POD elements) striding by `__esz`, then free the buffer.
+            HType::Vec { elem } if matches!(elem.as_ref(), HType::Dyn { locked: true, .. }) => {
+                self.wl(&format!("if (({0}).__drop) {{ for (maka_int __v{1} = 0; __v{1} < ({0}).len; __v{1}++) {{ ({0}).__drop((char*)({0}).data + __v{1} * ({0}).__esz); }} }}", lv, depth));
+                self.wl(&format!("free(({}).data);", lv));
+            }
             // A by-value `Vec<T>`: drop owning elements, then free the buffer.
             HType::Vec { elem } => {
                 if self.drop_ty_owns(elem) {
@@ -5464,7 +5471,7 @@ impl<'a> Cx<'a> {
             // for the hidden `T` and its element size, for striding).  Iterating
             // hands out `Dyn_X` fat pointers `{data + j*esz, vtbl}`, so dispatch
             // reuses the ordinary dyn path.
-            self.wl(&format!("typedef struct {{ void* data; maka_int len; maka_int cap; const {0}_vtbl* __vtbl; maka_int __esz; }} SomeVec_{0};", c_ident(tn)));
+            self.wl(&format!("typedef struct {{ void* data; maka_int len; maka_int cap; const {0}_vtbl* __vtbl; maka_int __esz; void (*__drop)(void*); }} SomeVec_{0};", c_ident(tn)));
         }
     }
 
@@ -10998,9 +11005,17 @@ impl<'a> Cx<'a> {
             CastKind::PackSomeVec { trait_name, struct_id } => {
                 let sname = self.sym.struct_info(struct_id).name.clone();
                 let ec = c_ident(&sname);
-                format!("(__extension__ ({{ {vt} __sv = ({src}); size_t __bytes = (size_t)__sv.len * sizeof({ec}); void* __b = malloc(__bytes); if (__bytes) memcpy(__b, __sv.data, __bytes); ({sty}){{ .data = __b, .len = __sv.len, .cap = __sv.len, .__vtbl = &{tr}_vtbl_for_{st}, .__esz = (maka_int)sizeof({ec}) }}; }}))",
+                // Per-element drop-fn: the struct's recursive drop glue if it owns
+                // heap, else NULL (POD elements need only the buffer freed).
+                let drop_fn = if self.drop_ty_owns(&HType::Struct(struct_id)) {
+                    format!("(void(*)(void*))&__maka_drop_{}", ec)
+                } else { "((void(*)(void*))0)".to_string() };
+                // MOVE the buffer (transfer ownership - the source `Vec<T>` is marked
+                // moved by the lifetime pass, so only the column frees it).  A copy
+                // would be a SHALLOW copy that double-frees owning elements' inner heap.
+                format!("(__extension__ ({{ {vt} __sv = ({src}); ({sty}){{ .data = __sv.data, .len = __sv.len, .cap = __sv.cap, .__vtbl = &{tr}_vtbl_for_{st}, .__esz = (maka_int)sizeof({ec}), .__drop = {df} }}; }}))",
                     vt = self.c_type(from), src = s, sty = to_c,
-                    tr = c_ident(&trait_name), st = c_ident(&sname), ec = ec)
+                    tr = c_ident(&trait_name), st = c_ident(&sname), ec = ec, df = drop_fn)
             }
             // Witness-checked downcast: alias the column's Vec header (data/len/cap
             // share layout) as `*Vec<T>` iff the hoisted vtable is `T`'s, else null.

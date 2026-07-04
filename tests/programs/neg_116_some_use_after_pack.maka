@@ -1,0 +1,11 @@
+// Packing a `Vec<T>` into a `Vec<some X>` MOVES it; using the source afterwards
+// must be rejected (use-after-move), else it would alias the column's buffer.
+import std.{Vec, push};
+data Gram { int g; }
+logic Weigh { int weight(&Gram g) { return g.g; } }
+unit main() {
+    Vec<Gram> grams = []; push(grams, Gram { g = 2 });
+    Vec<Vec<some Weigh>> cols = [];
+    push(cols, grams);
+    log(grams.len as int);   // use-after-move -> rejected
+}

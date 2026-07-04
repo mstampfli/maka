@@ -1,0 +1,26 @@
+// `some X` columns whose concrete element type itself OWNS heap (`own *int` fields):
+// packing MOVES the source Vec into the column (no shallow copy that would double
+// free), and the column's drop runs a per-element witness drop-fn (striding the raw
+// buffer) before freeing it - so an owning-element column is fully leak-free and
+// double-free-free.  Verified out of band with ASan + LeakSanitizer.
+import std.{Vec, push};
+data Boxed { own *int p; }
+data Pair  { own *int a; own *int b; }
+logic Val {
+    int val(&Boxed x) { *int p = x.p; if (p != null) { return p!; } return 0; }
+    int val(&Pair x)  { *int a = x.a; *int b = x.b; mut int s = 0; if (a != null) { s = s + a!; } if (b != null) { s = s + b!; } return s; }
+}
+unit main() {
+    Vec<Boxed> bs = [];
+    push(bs, Boxed { p = alloc 10 }); push(bs, Boxed { p = alloc 20 });
+    Vec<Pair> ps = [];
+    push(ps, Pair { a = alloc 3, b = alloc 4 });
+    Vec<Vec<some Val>> cols = [];
+    push(cols, bs);
+    push(cols, ps);
+    mut int total = 0;
+    for (Vec<some Val> col in cols) {
+        for (some Val item in col) { total = total + Val.val(&item); }
+    }
+    log(total);   // 10+20 + 3+4 = 37
+}
