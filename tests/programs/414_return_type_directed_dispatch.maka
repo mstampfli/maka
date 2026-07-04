@@ -1,0 +1,44 @@
+// Return-type-directed dispatch: a trait (`attr`) method whose type parameter
+// appears only in the RETURN position could not be resolved - argument-based
+// overload resolution has nothing to key on, so `column(&w)` reported "ambiguous
+// call: 2 candidates".  Resolution now consults the call's expected type as a
+// final tie-breaker (conservative: only when exactly ONE candidate's return type
+// matches), which unblocks the statically-known heterogeneous-of-homogeneous
+// pattern (an ECS-style column store) with zero erasure and zero `dyn`.
+//
+// Each `Vec<T>` column is a concrete homogeneous type; the World is heterogeneous
+// across columns; a generic system bounds ONLY on `W has HasColumn<T>`.
+
+import std.{Vec, push};
+
+data Position { int x; }
+data Velocity { int v; }
+
+attr HasColumn<T> { &Vec<T> column(&_ self); }
+
+data World { Vec<Position> positions; Vec<Velocity> velocities; }
+World has HasColumn<Position> { &Vec<Position> column(&World self) { return &self.positions; } }
+World has HasColumn<Velocity> { &Vec<Velocity> column(&World self) { return &self.velocities; } }
+
+// A generic system: requires ONLY that the outer type W provides the Position
+// column ("only require the outer type be a certain type"), no concrete World named.
+int sum_x<W>(&W w) where W has HasColumn<Position> {
+    &Vec<Position> ps = column(w);          // resolved by the expected `&Vec<Position>`
+    mut int s = 0;
+    mut int i = 0;
+    while (i < ps.len as int) { s = s + ps[i].x; i = i + 1; }
+    return s;
+}
+
+unit main() {
+    mut World w = { positions = [], velocities = [] };
+    push(w.positions, Position { x = 10 });
+    push(w.positions, Position { x = 20 });
+    push(w.velocities, Velocity { v = 3 });
+
+    &Vec<Position> ps = column(&w);          // picks HasColumn<Position>
+    log(ps.len as int);                       // 2
+    &Vec<Velocity> vs = column(&w);          // picks HasColumn<Velocity>
+    log(vs.len as int);                       // 1
+    log(sum_x(&w));                           // 10 + 20 = 30
+}

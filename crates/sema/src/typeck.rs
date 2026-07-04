@@ -3984,6 +3984,23 @@ impl<'a> TypeChecker<'a> {
                 if !filtered.is_empty() && filtered.len() < tied.len() { tied = filtered; }
             }
         }
+        // Return-type-directed narrowing: when still tied and the call site has a
+        // known expected type (e.g. `&Vec<Position> ps = column(&w)`), keep only
+        // candidates whose RETURN type matches it.  This is the one case argument
+        // -based resolution cannot handle - a trait method whose type parameter
+        // appears only in the return position (`column() -> &Vec<T>`, `parse() ->
+        // T`, `default() -> T`).  Conservative: it narrows ONLY when exactly one
+        // candidate matches the expected type, so it can never mis-resolve; and it
+        // runs solely on calls that are otherwise already a hard "ambiguous" error,
+        // so it cannot change the meaning of any program that compiles today.
+        if tied.len() > 1 {
+            if let Some(exp) = &ret_expected {
+                let matches: Vec<(FuncId, FuncSig)> = tied.iter()
+                    .filter(|(_, sig)| type_eq(&sig.ret, exp))
+                    .cloned().collect();
+                if matches.len() == 1 { tied = matches; }
+            }
+        }
         if tied.len() > 1 {
             self.err(format!("ambiguous call to `{}`: {} candidates", name, tied.len()), sp);
         }
