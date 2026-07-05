@@ -115,10 +115,39 @@ unit main() { log(run_with_cb(on_tick, 21)); }   // Rust calls on_tick(21) -> 43
 The Maka side emits the parameter as a bare C callback `R (*cb)(P...)` (not the
 fat env-carrying `Callable` a closure value is), and a named function lowers to
 its direct C address, which matches that type exactly.  Only a statically bare
-function can cross a C callback slot: a named function or a NON-capturing closure
-literal.  A capturing closure — or any fn-pointer-typed variable, both of which
-are fat `Callable`s (code + env) at runtime — has no C representation and is
-rejected at sema (a C callback carries no environment).
+function can cross a *bare* C callback slot: a named function or a NON-capturing
+closure literal.  A capturing closure — or any fn-pointer-typed variable, both of
+which are fat `Callable`s (code + env) at runtime — has no representation as a bare
+`R (*)(P...)` and is rejected at sema (a bare C callback carries no environment).
+
+*Forward — a STATEFUL closure via a `(cb, void* ctx)` pair.*  The universal C
+escape for stateful callbacks is a callback that takes a `void* ctx` plus a
+separate context pointer.  A Maka closure is already `{ code: R(*)(void* env,
+A...), env }`, which maps onto that idiom exactly, so two builtins project the two
+halves: `fn_code(f)` yields the env-first callback pointer (for an `extern "C"
+fn(*mut u8, A...)` param) and `fn_env(f)` yields the env as the paired `*mut u8`
+context.  This lets a CAPTURING closure keep its state across native-driven calls:
+
+```maka
+data Counter { mut int n; }
+rblock "
+    pub fn on_each(cb: extern \"C\" fn(*mut u8, i64), ctx: *mut u8) {
+        for i in 0i64..3 { unsafe { cb(ctx, i) } }
+    }
+";
+unit main() {
+    own &Counter c = alloc Counter { n = 0 };
+    unit(int) f = unit(int x) [c] { c.n = c.n + x; };
+    on_each(fn_code(f), fn_env(f));   // Rust calls f(0), f(1), f(2)
+    log(c.n);                          // 3
+}
+```
+
+`fn_code`/`fn_env` need a real `Callable` value — a closure literal or a
+fn-pointer variable.  A bare function name has no environment, so bind it to a
+fn-pointer variable first (`unit(int) g = name;`), which materialises a
+`{ code, env: NULL }` Callable.  (Raw pointers surface as `*mut u8` at the rblock
+boundary; C treats `*mut u8` and `void*` identically.)
 
 *Reverse — Rust holds the address (`export`).*  Because an `export` is a real C
 symbol, Rust can also take its address as an `unsafe extern "C" fn` pointer and

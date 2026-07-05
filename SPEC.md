@@ -425,10 +425,18 @@ callback.  See `RUST_INTEROP.md` §1.5 and test `417_export_reverse_call.maka`.
 The forward direction is also first-class: an rblock `pub fn` may declare a
 parameter of type `extern "C" fn(A, B) -> R`, which mirrors to a Maka fn-pointer
 type, and a Maka function is passed for it directly - `run_with_cb(on_tick, 21)`.
-Only a statically bare function crosses a C callback slot (a named function or a
-non-capturing closure literal); a capturing closure or any fn-pointer variable is
-a fat closure value (code + env) with no C representation and is rejected at sema.
-See test `419_fn_ptr_callback.maka`.
+Only a statically bare function crosses a *bare* C callback slot (a named function
+or a non-capturing closure literal); a capturing closure or any fn-pointer variable
+is a fat closure value (code + env) with no bare-pointer representation and is
+rejected at sema. See test `419_fn_ptr_callback.maka`.
+
+For a STATEFUL closure, the C `(cb, void* ctx)` idiom carries the environment: a
+closure is `{ code: R(*)(void* env, A...), env }`, so `fn_code(f)` projects the
+env-first callback pointer (for an `extern "C" fn(*mut u8, A...)` param) and
+`fn_env(f)` projects the env as the paired `*mut u8` context - passing both lets a
+capturing closure keep its state across native-driven calls. Both need a real
+`Callable` value (a closure or fn-pointer variable), not a bare function name. See
+test `422_closure_ctx_callback.maka`.
 
 ### Compile-time functions (`constexpr fn`)
 

@@ -2462,6 +2462,53 @@ impl<'a> TypeChecker<'a> {
                 span: sp,
             };
         }
+        // Built-in `fn_code(f)` / `fn_env(f)` — project a closure value into the
+        // two halves a C `(cb, void* ctx)` callback API expects.  A Maka closure
+        // is `{ code: R(*)(void* env, A...), env }`, which maps exactly onto that
+        // idiom, so `fn_code(f)` yields the env-first callback pointer (for a
+        // `extern "C" fn(*mut c_void, A...)` param) and `fn_env(f)` yields the env
+        // as `*mut unit` (for the paired ctx pointer).  This lets a STATEFUL
+        // closure cross a C callback boundary (the env travels as ctx), which the
+        // bare fn-pointer path (a plain `extern "C" fn(A...)` param) cannot do.
+        if (name == "fn_code" || name == "fn_env") && qualifier.is_none() {
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            if hargs.len() != 1 {
+                self.err(format!("{} expects exactly one closure argument", name), sp);
+                return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
+            }
+            let (ret, params) = match &hargs[0].ty {
+                HType::FnPtr { ret, params } => ((**ret).clone(), params.clone()),
+                other => {
+                    self.err(format!("{} expects a closure (fn-pointer) value, got `{}`", name, type_str(other)), sp);
+                    (HType::Unit, Vec::new())
+                }
+            };
+            // A bare function name is not a Callable at runtime (it has no env
+            // slot), so it cannot be projected - bind it to a fn-pointer variable
+            // first, which materialises a `{ code, env: NULL }` Callable.
+            if matches!(hargs[0].kind, HExprKind::FnRef(_)) {
+                self.err(format!(
+                    "{}: a bare function name has no closure environment; bind it to a fn-pointer variable first (e.g. `{} g = name;` then `{}(g)`)",
+                    name, type_str(&hargs[0].ty), name), sp);
+            }
+            let ptr_void = HType::Ptr { mutable: true, inner: Box::new(HType::Unit) };
+            if name == "fn_code" {
+                // Env-first bare C callback: R(*)(void*, A...).
+                let mut p2 = vec![ptr_void];
+                p2.extend(params);
+                return HExpr {
+                    kind: HExprKind::Call { callee: FuncId(u32::MAX - 63), args: hargs },
+                    ty: HType::FnPtr { ret: Box::new(ret), params: p2 },
+                    span: sp,
+                };
+            } else {
+                return HExpr {
+                    kind: HExprKind::Call { callee: FuncId(u32::MAX - 64), args: hargs },
+                    ty: ptr_void,
+                    span: sp,
+                };
+            }
+        }
         // Built-in `free` — manual deallocation for non-owning `*T`.  Owning types
         // (`own *T`, `own &T`) are auto-freed at scope exit; calling free() on them
         // would double-free.
@@ -4182,11 +4229,15 @@ impl<'a> TypeChecker<'a> {
                 let bare = match &h.kind {
                     HExprKind::FnRef(_) => true,
                     HExprKind::Closure { capture_lids, .. } => capture_lids.is_empty(),
+                    // `fn_code(f)` is the env-first projection of a closure: it IS
+                    // a bare callback pointer (the paired ctx carries the env via
+                    // `fn_env(f)`), so it's valid here even for a capturing closure.
+                    HExprKind::Call { callee, .. } if callee.0 == u32::MAX - 63 => true,
                     _ => false,
                 };
                 if !bare {
                     self.err(format!(
-                        "argument {} to extern function `{}` is a capturing closure or a fn-pointer value, which cannot cross the C ABI - a C callback parameter carries no environment. Pass a top-level function or a non-capturing closure literal.",
+                        "argument {} to extern function `{}` is a capturing closure or a fn-pointer value, which cannot cross the C ABI - a C callback parameter carries no environment. Pass a top-level function, a non-capturing closure literal, or `fn_code(f)` paired with `fn_env(f)` for a stateful closure.",
                         i + 1, name), h.span);
                 }
             }

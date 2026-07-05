@@ -9393,6 +9393,22 @@ impl<'a> Cx<'a> {
     /// (which sets `self.inline_tag` so `emit_sub` renders inline-tagged local
     /// names) - so a new builtin can never work in one path yet crash the other.
     fn emit_builtin_sentinel(&mut self, f: &HFunc, callee: FuncId, args: &[HExpr], e: &HExpr) -> String {
+        // Built-in `fn_code(f)` / `fn_env(f)` — project a Callable value into its
+        // env-first code pointer / env pointer for a C `(cb, void* ctx)` API.  The
+        // closure lowers to `Callable_KEY { code, env }`, so this is a field read.
+        if callee.0 == u32::MAX - 63 || callee.0 == u32::MAX - 64 {
+            if let Some(a) = args.first() {
+                let s = self.emit_sub(f, a);
+                let key = match &a.ty {
+                    HType::FnPtr { ret, params } => fn_sig_key(ret, params),
+                    _ => "unit_".to_string(),
+                };
+                let field = if callee.0 == u32::MAX - 63 { "__cb.code" } else { "(maka_unit*)__cb.env" };
+                return format!("(__extension__ ({{ Callable_{k} __cb = ({s}); {fld}; }}))",
+                    k = key, s = s, fld = field);
+            }
+            return "NULL".into();
+        }
         // Built-in `panic(msg)`.
         if callee.0 == u32::MAX - 2 {
             if let Some(a) = args.first() {
@@ -10202,12 +10218,21 @@ impl<'a> Cx<'a> {
                     // fat env-first `Callable` a Maka closure value is - the direct
                     // function `R f(P...)` already matches the C `R (*)(P...)`.
                     if sig.is_extern {
-                        if let Some(HType::FnPtr { .. }) = sig.param_tys.get(i) {
+                        if let Some(pt @ HType::FnPtr { .. }) = sig.param_tys.get(i) {
                             if let HExprKind::FnRef(fid) = &a.kind {
                                 let fs = self.sym.func_sig(*fid);
                                 return if fs.is_extern { fs.c_name.clone() }
                                     else if fs.name == "main" && fs.logic.is_none() { "maka_main".to_string() }
                                     else { c_ident(&fs.c_name) };
+                            }
+                            // `fn_code(f)` yields a bare env-first code pointer; cast
+                            // it to the param's exact callback type so a `void*` vs
+                            // `maka_unit*` env-slot naming difference can't clash.
+                            if let HExprKind::Call { callee: cc, .. } = &a.kind {
+                                if cc.0 == u32::MAX - 63 {
+                                    let cast = self.c_extern_param_decl(pt, "");
+                                    return format!("({}){}", cast, self.emit_sub(f, a));
+                                }
                             }
                         }
                     }

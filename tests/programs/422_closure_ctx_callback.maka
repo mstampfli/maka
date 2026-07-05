@@ -1,0 +1,21 @@
+// A STATEFUL Maka closure crossing a C `(cb, void* ctx)` callback boundary.
+// A closure is `{ code: R(*)(void* env, A...), env }`, which maps exactly onto
+// the universal C callback-with-context idiom: `fn_code(f)` yields the env-first
+// callback pointer and `fn_env(f)` yields the env as the paired `void* ctx`.
+// So a capturing closure keeps its state across native-driven calls - something
+// the bare fn-pointer path (a plain `extern "C" fn(A...)`, no ctx) cannot do.
+// (Raw pointers surface as `*mut u8` at the rblock boundary.)
+data Counter { mut int n; }
+
+rblock "
+    pub fn on_each(cb: extern \"C\" fn(*mut u8, i64), ctx: *mut u8) {
+        for i in 0i64..3 { unsafe { cb(ctx, i) } }
+    }
+";
+
+unit main() {
+    own &Counter c = alloc Counter { n = 0 };
+    unit(int) f = unit(int x) [c] { c.n = c.n + x; };
+    on_each(fn_code(f), fn_env(f));   // Rust calls f(0), f(1), f(2)
+    log(c.n);                          // 0 + 1 + 2 = 3
+}

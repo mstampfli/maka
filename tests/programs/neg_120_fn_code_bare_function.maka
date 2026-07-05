@@ -1,0 +1,5 @@
+// `fn_code`/`fn_env` need a Callable value (a closure or fn-pointer variable);
+// a bare function name has no environment and is rejected.
+rblock "pub fn go(cb: extern \"C\" fn(*mut u8, i64), ctx: *mut u8) { unsafe { cb(ctx, 1) } }";
+unit named(int x) { }
+unit main() { go(fn_code(named), fn_env(named)); }
