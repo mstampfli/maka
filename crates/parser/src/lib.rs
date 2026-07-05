@@ -570,6 +570,7 @@ impl Parser {
             TokKind::Extern => Ok(Item::Extern(self.parse_extern()?)),
             TokKind::Cinclude => self.parse_cinclude(),
             TokKind::Cblock => self.parse_cblock(),
+            TokKind::Clink => self.parse_clink(),
             TokKind::Rblock => self.parse_rblock(),
             TokKind::Rdep => self.parse_rdep(),
             TokKind::Logic => Ok(Item::Logic(self.parse_logic()?)),
@@ -899,6 +900,17 @@ impl Parser {
         };
         self.expect(&TokKind::Semicolon, "`;`")?;
         Ok(Item::CInclude(header, kw.span))
+    }
+
+    fn parse_clink(&mut self) -> Result<Item, ParseError> {
+        let kw = self.expect(&TokKind::Clink, "`clink`")?;
+        let flag = if let TokKind::StrLit(_) = self.peek() {
+            if let TokKind::StrLit(s) = self.bump().kind { s } else { unreachable!() }
+        } else {
+            return Err(ParseError { msg: "expected string literal after `clink` (a `-lname`/`-L/path` flag or a `.a`/`.o`/`.c` file)".into(), span: self.peek_span() });
+        };
+        self.expect(&TokKind::Semicolon, "`;`")?;
+        Ok(Item::CLink(flag, kw.span))
     }
 
     fn parse_cblock(&mut self) -> Result<Item, ParseError> {

@@ -1,0 +1,3 @@
+// `clink` requires a string literal (a link flag or a file path).
+clink 42;
+unit main() { log(1); }

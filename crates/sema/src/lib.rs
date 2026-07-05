@@ -599,14 +599,16 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
     // they're just pasted into the generated C in source order.
     let mut cincludes: Vec<String> = Vec::new();
     let mut cblocks: Vec<String> = Vec::new();
+    let mut clinks: Vec<String> = Vec::new();
     for it in &m.items {
         match it {
             maka_ast::Item::CInclude(h, _) => cincludes.push(h.clone()),
             maka_ast::Item::CBlock(b, _)   => cblocks.push(b.clone()),
+            maka_ast::Item::CLink(f, _)    => clinks.push(f.clone()),
             _ => {}
         }
     }
-    Ok(HirModule { sym, warnings, cincludes, cblocks })
+    Ok(HirModule { sym, warnings, cincludes, cblocks, clinks })
 }
 
 /// Walks each non-inline function and, at every InlineCall, scans the inline body for

@@ -173,6 +173,14 @@ fn run() {
         }
     };
 
+    // In-source `clink "...";` directives feed the final link line, same split as
+    // the `--link` CLI arg: `-l`/`-L` are linker flags, anything else is a source/
+    // object/archive to compile and link alongside the generated C.
+    for f in &hir.clinks {
+        if f.starts_with("-l") || f.starts_with("-L") { link_flags.push(f.clone()); }
+        else { link_c.push(f.clone()); }
+    }
+
     // Phase 2: now that sema has surfaced per-call-site Send/Sync probes,
     // build the sidecar crates and add their staticlibs to the C link line.
     match rust_bridge::finish(prep, &hir.sym.send_probes, &hir.sym.sync_probes, &bridge_opts) {

@@ -575,6 +575,12 @@ pub enum Item {
     CInclude(String, Span),
     /// `cblock { ...raw C... }` — paste verbatim into the generated C at module scope.
     CBlock(String, Span),
+    /// `clink "flag-or-file";` — a link input for the final C link step.  A value
+    /// starting with `-l`/`-L` is a linker flag (library / search path); anything
+    /// else is a `.a`/`.o`/`.c` file compiled/linked alongside the generated C.
+    /// The in-source counterpart of the CLI `-l`/`-L`/`--link` args, and the C-side
+    /// mirror of `rdep`, so a program that uses a C library is self-describing.
+    CLink(String, Span),
     /// `pub? constexpr T NAME = expr;` — a named compile-time integer constant.
     /// Always available in the defining file via the parser's pre-scan fold map;
     /// also registered as a symbol so it can be imported and used by name in

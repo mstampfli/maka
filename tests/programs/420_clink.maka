@@ -1,0 +1,11 @@
+// `clink` is an in-source link directive: it adds a `.c`/`.o`/`.a` file (or a
+// `-l`/`-L` flag) to the final C link line - the C-side mirror of `rdep`, so a
+// program that depends on an external C symbol is self-describing and needs no
+// CLI `--link`.  Paths resolve relative to the invocation directory, like `--link`.
+clink "tests/programs/420_clink_helper.c";
+
+extern int clink_answer();   // defined in the clinked C file
+
+unit main() {
+    log(clink_answer());     // 42 - only links because `clink` fed the .c file
+}

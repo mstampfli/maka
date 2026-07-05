@@ -41,7 +41,7 @@ A `.maka` source file consists of:
 
 ```
 mut const constexpr unsafe inline propagate
-extern cinclude cblock rblock rdep raw own alloc free
+extern cinclude cblock clink rblock rdep raw own alloc free
 data enum logic attr has where dyn some type
 if else while for in break continue match yield return
 gate transfer share thread_local module import use pub
@@ -546,12 +546,14 @@ primitives, `&str`, `String`, and `#[repr(C)]` structs; everything else
 flows through as an opaque heap handle (`own *mut unit` on the Maka
 side, `Box::into_raw` ↔ `Box::from_raw` on the Rust side, auto-dropped).
 
-### 5.2 `cinclude` and `cblock`
+### 5.2 `cinclude`, `cblock`, and `clink`
 
 ```maka
 cinclude "math.h";
 cinclude "stdio.h";
 cblock "static double sq(double x) { return x*x; }";
+clink "-lcurl";                 // a linker flag
+clink "vendor/thing.c";         // or a .c/.o/.a to compile and link in
 ```
 
 `cinclude "name.h";` emits `#include <name.h>` in the generated C prologue.
@@ -559,7 +561,14 @@ cblock "static double sq(double x) { return x*x; }";
 and before any extern function prototypes. The string is treated raw - embedded
 braces, semicolons, etc. are fine.
 
-### 5.2 `extern` and variadic FFI
+`clink "...";` adds one input to the final C link line - the C-side mirror of
+`rdep`, so a program that uses an external C library is self-describing without
+CLI flags. A value starting with `-l`/`-L` is a linker flag; anything else is a
+`.a`/`.o`/`.c` file compiled and linked alongside the generated C. Paths resolve
+relative to the invocation directory, matching the CLI `--link` arg (which is
+still accepted and additive). `-lm` is always linked, so it needs no `clink`.
+
+### 5.3 `extern` and variadic FFI
 
 ```maka
 extern float sqrt(float x);                    // libm

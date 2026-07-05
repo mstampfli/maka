@@ -950,6 +950,9 @@ pub struct HirModule {
     /// Raw C source pasted verbatim into the generated C at module scope,
     /// in source order, from `cblock "...";` directives.
     pub cblocks: Vec<String>,
+    /// Link inputs from `clink "...";` directives — `-l`/`-L` flags and
+    /// `.a`/`.o`/`.c` files the driver adds to the final C link line.
+    pub clinks: Vec<String>,
 }
 
 impl SymTab {
