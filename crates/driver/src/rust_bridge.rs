@@ -408,9 +408,10 @@ fn build_sidecar_with_probes(
     // On Windows the sidecar must match the mingw gcc the driver links with, so
     // build it for the gnu ABI rather than the default MSVC ABI (whose `.lib`
     // the mingw linker can neither find by name nor consume).
-    if let Some(t) = sidecar_target_triple() {
+    let target = sidecar_target_triple();
+    if let Some(t) = &target {
         cargo_args.push("--target");
-        cargo_args.push(t);
+        cargo_args.push(t.as_str());
     }
     let mut cmd = Command::new("cargo");
     cmd.current_dir(dir)
@@ -1253,10 +1254,16 @@ fn enum_c_name(name: &str) -> String { format!("__MakaEnum_{}", sanitise(name)) 
 /// (`libNAME.a`) rather than the default MSVC `NAME.lib` (which the mingw linker
 /// can neither locate by name nor consume across the CRT boundary).  On every
 /// other host the default target is correct.  Requires a one-time
-/// `rustup target add x86_64-pc-windows-gnu` on Windows.
-fn sidecar_target_triple() -> Option<&'static str> {
-    #[cfg(windows)] { Some("x86_64-pc-windows-gnu") }
-    #[cfg(not(windows))] { None }
+/// `rustup target add x86_64-pc-windows-gnu`.
+///
+/// `MAKA_SIDECAR_TARGET=<triple>` overrides this, which also enables
+/// cross-compiling a Maka+rblock program for Windows from a non-Windows host
+/// (pair it with `CC=x86_64-w64-mingw32-gcc`).
+pub fn sidecar_target_triple() -> Option<String> {
+    if let Ok(t) = std::env::var("MAKA_SIDECAR_TARGET") {
+        if !t.is_empty() { return Some(t); }
+    }
+    if cfg!(windows) { Some("x86_64-pc-windows-gnu".to_string()) } else { None }
 }
 
 /// The Rust ABI type a mirrored enum crosses as: a bare `i64` discriminant for a

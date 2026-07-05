@@ -244,18 +244,27 @@ fn run() {
     // real libm call rather than an inlined builtin.  Harmless when unused.
     cc_args.push("-lm".into());
     // On Windows the runtime pulls in Winsock (socket/htonl/WSAPoll), the
-    // multimedia timer (timeBeginPeriod), and the WaitOnAddress futex API, so
-    // link ws2_32 / winmm / synchronization by default - the same role `-lm`
-    // plays elsewhere.  `--link -l<name>` remains additive.
-    #[cfg(windows)]
-    {
+    // multimedia timer (timeBeginPeriod), the WaitOnAddress futex API, and
+    // pthreads (winpthread also supplies clock_gettime/nanosleep), so link them
+    // by default - the same role `-lm` plays elsewhere.  `--link -l<name>` stays
+    // additive.  Gated on TARGETING Windows (host, or a MAKA_SIDECAR_TARGET
+    // override), so `CC=x86_64-w64-mingw32-gcc MAKA_SIDECAR_TARGET=...gnu` can
+    // cross-build a Windows binary from another host.
+    let targeting_windows = cfg!(windows)
+        || rust_bridge::sidecar_target_triple().map(|t| t.contains("windows")).unwrap_or(false);
+    if targeting_windows {
         cc_args.push("-lws2_32".into());
         cc_args.push("-lwinmm".into());
         cc_args.push("-lsynchronization".into());
-        // winpthread provides pthreads + clock_gettime/nanosleep; the win32-threads
-        // mingw variant does not link it by default (posix-threads mingw does, where
-        // this is a harmless no-op).
         cc_args.push("-lpthread".into());
+        // Rust std (pulled in by any rblock sidecar staticlib) needs these Win32
+        // system libs; a staticlib doesn't carry its own native-lib deps, so the
+        // final link must supply them.  Harmless for pure-C programs.  Placed
+        // after the staticlibs so the linker resolves std's references in order.
+        for lib in ["-ladvapi32", "-luserenv", "-lbcrypt", "-lntdll", "-lkernel32",
+                    "-lole32", "-loleaut32", "-lshell32"] {
+            cc_args.push(lib.into());
+        }
     }
     cc_args.push("-o".into());
     ensure_parent_dir(&out_bin);
