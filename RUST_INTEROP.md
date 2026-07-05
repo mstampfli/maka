@@ -238,7 +238,7 @@ the call boundary:
 | `String`            | `String`          | `libc::malloc` copy + NUL terminator; Maka auto-frees |
 | `Option<T>`         | `__MakaOpt_T`     | `#[repr(C)] { tag: i64, value: T }` mirrored as a Maka data decl |
 | `Result<T, E>`      | `__MakaRes_T_E`   | `#[repr(C)] { tag: i64, ok: T, err: E }`             |
-| `Vec<T>`            | `__MakaVec_T`     | `#[repr(C)] { ptr: *mut T, len: usize, cap: usize }`, copied to `libc::malloc`'d buffer |
+| `Vec<T>`            | native `Vec<T>`   | `#[repr(C)] { ptr, len, cap }` (libc-malloc'd), layout-compatible with Maka's native Vec, so `v[i]`/`for x in v`/`.len` work directly |
 | `(A, B, ...)`       | `__MakaTup_A_B`   | `#[repr(C)] { f0: A, f1: B, ... }`; crosses by value both ways |
 | `pub enum E {...}`  | `enum E`          | matchable Maka enum; `{ i64 tag; union<payloads> }` (or bare `i64` if all-unit) |
 
@@ -252,7 +252,14 @@ unit, tuple (`V(A, B)` -> fields `f0`, `f1`), and struct (`V { a: A }`) variants
 Each variant payload field must be a scalar / `bool` / `#[repr(C)]` struct (same
 C-identity rule as struct fields); an owned/opaque payload is rejected.
 
-For `Option<T>`, `Result<T,E>`, `Vec<T>`, and tuples, the bridge generates one
+A `Vec<T>` surfaces as a NATIVE Maka `Vec<T>`: its `#[repr(C)] { ptr, len, cap }`
+shim struct is layout-compatible with Maka's own `Vec` (`{ data, len, cap }`), so
+the value is used directly - `v[i]` (bounds-checked), `for x in v`, `.len` - with
+no `__MakaVec` wrapper or raw-pointer cast.  `i64`/`u64`/`f64` elements read as
+`int`/`float`; narrower scalars keep their exact width so the buffer matches.
+Passing a `Vec` back into Rust moves it (the shim frees the libc buffer).
+
+For `Option<T>`, `Result<T,E>`, and tuples, the bridge generates one
 `#[repr(C)]` Rust struct per unique element-type list **and** one
 matching Maka `data` decl with the same field layout.  The user reads
 the tagged-union / tuple fields directly (`.tag`, `.value`, `.ok`, `.err`,

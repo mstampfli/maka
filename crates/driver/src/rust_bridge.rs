@@ -818,6 +818,19 @@ fn rust_to_maka_field_ty(ty: &RustType, sp: Span) -> Type {
     }
 }
 
+/// Element type for a native `Vec<T>` mirror.  8-byte scalars (`i64`/`u64`/
+/// `isize`/`usize`/`f64`) use the ergonomic `int`/`float` (same width), so
+/// `Vec<i64>` reads as `Vec<int>`; narrower scalars, `bool`, and `#[repr(C)]`
+/// structs keep their exact-width mirror so the buffer element size matches Rust.
+fn vec_elem_maka_ty(ty: &RustType, sp: Span) -> Type {
+    match ty {
+        RustType::Prim(s) if matches!(s.as_str(), "i64" | "u64" | "isize" | "usize") =>
+            Type::Named("int".to_string(), sp),
+        RustType::Prim(s) if s == "f64" => Type::Named("float".to_string(), sp),
+        _ => rust_to_maka_field_ty(ty, sp),
+    }
+}
+
 fn rust_to_maka_ty(ty: &RustType, sp: Span, is_return: bool) -> Type {
     match ty {
         RustType::Prim(s) => Type::Named(rust_prim_to_maka(s).to_string(), sp),
@@ -910,10 +923,15 @@ fn rust_to_maka_ty(ty: &RustType, sp: Span, is_return: bool) -> Type {
             ),
             sp,
         ),
-        RustType::VecOf(inner) => Type::Named(
-            format!("__MakaVec_{}", sanitise(&rust_name_of(inner))),
-            sp,
-        ),
+        // A `Vec<T>` surfaces as a NATIVE Maka `Vec<T>` (its `{ptr,len,cap}` ABI
+        // struct is layout-compatible), so the user gets `v[i]` / `for x in v` /
+        // `.len` with bounds checks - no raw-pointer cast.  The element uses the
+        // ergonomic `int`/`float` for 8-byte scalars, the exact-width mirror
+        // otherwise, so the buffer width always matches.
+        RustType::VecOf(inner) => Type::Vec {
+            elem: Box::new(vec_elem_maka_ty(inner, sp)),
+            span: sp,
+        },
         RustType::Tuple(elems) => Type::Named(
             format!("__MakaTup_{}", tuple_label(&elems.iter().map(rust_name_of).collect::<Vec<_>>())),
             sp,
@@ -1915,6 +1933,10 @@ fn build_container_data_decls(insts: &[ContainerInst]) -> Vec<DataDecl> {
     let sp = Span { start: 0, end: 0, line: 0, col: 0 };
     let mut out = Vec::new();
     for c in insts {
+        // `Vec<T>` surfaces as a NATIVE Maka `Vec<T>` (codegen emits the `Vec_*`
+        // typedef, which is layout-compatible with the shim's `{ptr,len,cap}`), so
+        // no `__MakaVec` data decl is injected.
+        if matches!(c, ContainerInst::Vec(_)) { continue; }
         let (name, fields) = match c {
             ContainerInst::Option(t) => {
                 let elem_ty = rust_name_to_maka_ty(t, sp);
@@ -1938,31 +1960,7 @@ fn build_container_data_decls(insts: &[ContainerInst]) -> Vec<DataDecl> {
                     ],
                 )
             }
-            ContainerInst::Vec(t) => {
-                let elem_ty = rust_name_to_maka_ty(t, sp);
-                (
-                    format!("__MakaVec_{}", sanitise(t)),
-                    vec![
-                        (
-                            // OWNING pointer: makes __MakaVec a move-tracked owning
-                            // value.  The shim libc::mallocs the buffer (return) and
-                            // libc::frees it when the Vec is passed by value into Rust
-                            // (param).  So a by-value Vec is a MOVE - reuse/aliasing is
-                            // rejected (was a use-after-free + double-free), and an
-                            // un-consumed returned Vec is auto-freed at scope exit
-                            // (was a leak).  free() matches libc::malloc.
-                            "ptr".to_string(),
-                            Type::OwnPtr {
-                                mutness: Mutness::Mut,
-                                inner: Box::new(elem_ty),
-                                span: sp,
-                            },
-                        ),
-                        ("len".to_string(), Type::Named("usize".to_string(), sp)),
-                        ("cap".to_string(), Type::Named("usize".to_string(), sp)),
-                    ],
-                )
-            }
+            ContainerInst::Vec(_) => unreachable!("Vec surfaces as a native Vec, skipped above"),
             ContainerInst::Tuple(elems) => (
                 format!("__MakaTup_{}", tuple_label(elems)),
                 elems.iter().enumerate()
