@@ -506,6 +506,8 @@ fn rust_marshal_in_ty(ty: &RustType) -> String {
             sanitise(&rust_name_of(err)),
         ),
         RustType::VecOf(inner) => format!("__MakaVec_{}", sanitise(&rust_name_of(inner))),
+        RustType::CFnPtr { params, ret } => format!("extern \"C\" fn({}) -> {}",
+            params.iter().map(rust_marshal_in_ty).collect::<Vec<_>>().join(", "), rust_marshal_out_ty(ret)),
     }
 }
 
@@ -532,6 +534,8 @@ fn rust_marshal_out_ty(ty: &RustType) -> String {
             sanitise(&rust_name_of(err)),
         ),
         RustType::VecOf(inner) => format!("__MakaVec_{}", sanitise(&rust_name_of(inner))),
+        RustType::CFnPtr { params, ret } => format!("extern \"C\" fn({}) -> {}",
+            params.iter().map(rust_marshal_in_ty).collect::<Vec<_>>().join(", "), rust_marshal_out_ty(ret)),
     }
 }
 
@@ -633,6 +637,8 @@ fn unmarshal_in(name: &str, ty: &RustType) -> (String, String) {
                 name.to_string(),
             )
         }
+        // A C callback (bare fn pointer) crosses the ABI unchanged.
+        RustType::CFnPtr { .. } => ("".into(), name.to_string()),
     }
 }
 
@@ -662,6 +668,8 @@ fn marshal_out(value: &str, ty: &RustType) -> String {
             format!("({} as *const _) as *mut u8", value)
         }
         RustType::ReprC(_) => format!("{}", value),
+        // A bare C fn pointer crosses the ABI unchanged.
+        RustType::CFnPtr { .. } => format!("{}", value),
         RustType::RefReprC(name) => format!("({} as *const {})", value, name),
         RustType::RefMutReprC(name) => format!("({} as *const {} as *mut {})", value, name, name),
         RustType::OptionOf(inner) => {
@@ -817,6 +825,13 @@ fn rust_to_maka_ty(ty: &RustType, sp: Span, is_return: bool) -> Type {
             inner: Box::new(Type::Named("unit".to_string(), sp)),
             span: sp,
         },
+        // A C callback `R (*)(A, B)` maps to a Maka fn-pointer type; a named Maka
+        // function is passed for it (its direct C address matches the C signature).
+        RustType::CFnPtr { params, ret } => Type::FnPtr {
+            ret: Box::new(rust_to_maka_ty(ret, sp, true)),
+            params: params.iter().map(|p| rust_to_maka_ty(p, sp, false)).collect(),
+            span: sp,
+        },
         RustType::ReprC(name) => Type::Named(name.clone(), sp),
         RustType::RefReprC(name) => Type::Ref {
             mutness: Mutness::Const,
@@ -949,6 +964,9 @@ enum RustType {
     VecOf(Box<RustType>),
     RawConstPtr,          // *const T
     RawMutPtr,            // *mut T
+    /// `extern "C" fn(A, B) -> R` — a bare C function pointer (callback).
+    /// Mirrors to a Maka fn-pointer type; a named Maka function is passed for it.
+    CFnPtr { params: Vec<RustType>, ret: Box<RustType> },
 }
 
 /// A field type whose Maka mirror has the SAME layout as the Rust type, so it is
@@ -1231,6 +1249,17 @@ fn map_syn_type(
 ) -> Result<RustType, String> {
     match t {
         syn::Type::Tuple(tt) if tt.elems.is_empty() => Ok(RustType::Unit),
+        // `extern "C" fn(A, B) -> R` — a bare C callback the Maka side supplies a
+        // function for.  Recursively map the argument and return types.
+        syn::Type::BareFn(bf) => {
+            let mut params = Vec::new();
+            for inp in &bf.inputs { params.push(map_syn_type(&inp.ty, known_repr_c)?); }
+            let ret = match &bf.output {
+                syn::ReturnType::Default => RustType::Unit,
+                syn::ReturnType::Type(_, rt) => map_syn_type(rt, known_repr_c)?,
+            };
+            Ok(RustType::CFnPtr { params, ret: Box::new(ret) })
+        }
         syn::Type::Path(tp) => {
             let last = tp
                 .path

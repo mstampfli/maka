@@ -1,0 +1,10 @@
+// A capturing closure cannot be passed to an `extern` C fn-pointer parameter:
+// a C callback carries no environment, so the fat `Callable` (code + env) has no
+// C representation.  Rejected at sema, not as a cryptic C type error.
+rblock "
+    pub fn run_with_cb(cb: extern \"C\" fn(i64) -> i64, x: i64) -> i64 { unsafe { cb(x) } }
+";
+unit main() {
+    int k = 100;
+    log(run_with_cb(int(int x) [k] x + k, 21));
+}

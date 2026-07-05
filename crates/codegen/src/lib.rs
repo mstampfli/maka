@@ -202,7 +202,8 @@ impl<'a> Cx<'a> {
             if s.param_tys.is_empty() && !s.is_variadic { params.push_str("void"); }
             else {
                 let parts: Vec<String> = s.param_tys.iter().enumerate().map(|(i, t)| {
-                    format!("{} {}", self.c_type(t), s.param_names.get(i).cloned().unwrap_or_else(|| format!("p{}", i)))
+                    let pn = s.param_names.get(i).cloned().unwrap_or_else(|| format!("p{}", i));
+                    self.c_extern_param_decl(t, &pn)
                 }).collect();
                 params.push_str(&parts.join(", "));
                 if s.is_variadic {
@@ -10195,7 +10196,23 @@ impl<'a> Cx<'a> {
                 // Owning field/element args are moved by value: emit_move_consuming
                 // captures the value and nulls the caller's slot so the caller's
                 // later container drop does not double-free it.
-                let arg_s: Vec<String> = args.iter().map(|a| self.emit_move_consuming(f, a)).collect();
+                let arg_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
+                    // Passing a Maka function to an `extern` fn-pointer parameter (a
+                    // bare C callback): emit the function's DIRECT C address, not the
+                    // fat env-first `Callable` a Maka closure value is - the direct
+                    // function `R f(P...)` already matches the C `R (*)(P...)`.
+                    if sig.is_extern {
+                        if let Some(HType::FnPtr { .. }) = sig.param_tys.get(i) {
+                            if let HExprKind::FnRef(fid) = &a.kind {
+                                let fs = self.sym.func_sig(*fid);
+                                return if fs.is_extern { fs.c_name.clone() }
+                                    else if fs.name == "main" && fs.logic.is_none() { "maka_main".to_string() }
+                                    else { c_ident(&fs.c_name) };
+                            }
+                        }
+                    }
+                    self.emit_move_consuming(f, a)
+                }).collect();
                 // A capturing closure LITERAL passed to a consume-only FnPtr param
                 // is a one-shot temp the callee only calls (never stores), so its
                 // malloc'd env can be freed right after the call returns.
@@ -10935,6 +10952,21 @@ impl<'a> Cx<'a> {
             let (hi, mx) = sat_unsigned_lits(bits);
             format!("maka_f2u({}, {}, {}, {})", s, to_c, hi, mx)
         }
+    }
+
+    /// A parameter declaration for an `extern` (C-ABI) function.  A Maka
+    /// fn-pointer parameter on an extern is a BARE C callback `R (*name)(P...)`,
+    /// NOT the fat env-carrying `Callable_KEY` a Maka closure uses - a C function
+    /// can only receive a plain function pointer.  (Reverse of a Maka fn-pointer
+    /// value; the call site passes a named function's direct C address for it.)
+    fn c_extern_param_decl(&self, t: &HType, name: &str) -> String {
+        if let HType::FnPtr { ret, params } = t {
+            let ret_c = self.c_ret_type(ret);
+            let ps: Vec<String> = if params.is_empty() { vec!["void".to_string()] }
+                else { params.iter().map(|p| self.c_type(p)).collect() };
+            return format!("{} (*{})({})", ret_c, name, ps.join(", "));
+        }
+        format!("{} {}", self.c_type(t), name)
     }
 
     fn emit_cast(&self, s: String, kind: CastKind, to: &HType, from: &HType) -> String {

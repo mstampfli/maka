@@ -4,7 +4,7 @@
 //! Lifetime/deps/move passes happen later in `lifetime.rs`.
 
 use crate::hir::*;
-use crate::resolve::{resolve_type, resolve_type_in, check_type_visibility};
+use crate::resolve::{resolve_type_in, check_type_visibility};
 use crate::SemaError;
 use maka_ast::{self as ast, Mutness};
 use maka_lexer::Span;
@@ -2474,7 +2474,7 @@ impl<'a> TypeChecker<'a> {
         // The closure must be a `unit()` callable; captures need `alloc` so the
         // env lives on the heap (the lambda-escape rule applies to all three).
         if (name == "spawn" || name == "thread" || name == "job" || name == "spawn_pool") && qualifier.is_none() {
-            let mut hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
             if hargs.len() != 1 {
                 self.err(format!("{} expects exactly one closure argument", name), sp);
             } else {
@@ -2527,7 +2527,7 @@ impl<'a> TypeChecker<'a> {
         // `select(&[]*Thread)` is the race variant — first handle to finish
         // wins; the rest are cancelled.
         if (name == "join" || name == "select") && qualifier.is_none() {
-            let mut hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
             if hargs.len() != 1 {
                 self.err(format!("{} expects exactly one argument", name), sp);
                 return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
@@ -4168,6 +4168,27 @@ impl<'a> TypeChecker<'a> {
                 // Variadic trailing arg: type-check without coercion, accept whatever the
                 // user gave us. C's varargs ABI handles default promotions itself.
                 hargs.push(self.check_expr(a, None));
+            }
+        }
+        // An `extern` (C-ABI) function's fn-pointer parameter is a BARE C callback
+        // with no environment slot, so only a statically-known bare function can
+        // cross it: a named function (`FnRef`) or a NON-capturing closure literal.
+        // A capturing closure or any fn-pointer-typed value is a fat `Callable`
+        // (code + env) with no C representation - reject it here with a clear
+        // message instead of emitting C that fails to compile.
+        if self.sym.sigs.get(fid.0 as usize).map(|s| s.is_extern).unwrap_or(false) {
+            for (i, h) in hargs.iter().enumerate() {
+                if !matches!(final_param_tys.get(i), Some(HType::FnPtr { .. })) { continue; }
+                let bare = match &h.kind {
+                    HExprKind::FnRef(_) => true,
+                    HExprKind::Closure { capture_lids, .. } => capture_lids.is_empty(),
+                    _ => false,
+                };
+                if !bare {
+                    self.err(format!(
+                        "argument {} to extern function `{}` is a capturing closure or a fn-pointer value, which cannot cross the C ABI - a C callback parameter carries no environment. Pass a top-level function or a non-capturing closure literal.",
+                        i + 1, name), h.span);
+                }
             }
         }
         // Inline function: emit an InlineCall so codegen splices the body at this call site.

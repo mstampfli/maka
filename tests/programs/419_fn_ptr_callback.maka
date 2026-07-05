@@ -1,0 +1,22 @@
+// Forward FFI with a callback PARAMETER: a Maka function is passed directly as a
+// C fn pointer into a Rust rblock function that declares the param
+// `extern "C" fn(i64) -> i64`. The shim marshals the fn-pointer through the ABI
+// unchanged, and a named Maka fn lowers to a bare C symbol whose type matches the
+// callback exactly - so Rust can invoke Maka code without any `export`/reverse-call
+// indirection. This is real function-pointer marshalling, not a workaround.
+
+int on_tick(int x) { return x * 2 + 1; }   // matches extern "C" fn(i64) -> i64
+
+rblock "
+    pub fn run_with_cb(cb: extern \"C\" fn(i64) -> i64, x: i64) -> i64 {
+        unsafe { cb(x) }
+    }
+    pub fn run_twice(cb: extern \"C\" fn(i64) -> i64, x: i64) -> i64 {
+        unsafe { cb(cb(x)) }
+    }
+";
+
+unit main() {
+    log(run_with_cb(on_tick, 21));   // Rust calls on_tick(21) -> 43
+    log(run_twice(on_tick, 3));      // on_tick(on_tick(3)) = on_tick(7) = 15
+}
