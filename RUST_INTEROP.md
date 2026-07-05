@@ -63,6 +63,62 @@ becomes a Maka `data` type; everything else is reachable as an opaque
 
 ---
 
+## 1.5 Reverse FFI: `export` (C/Rust calls back into Maka)
+
+Interop is bidirectional.  A Maka function marked `export` emits a stable,
+UNMANGLED C symbol with external linkage (the exact declared name — no module
+prefix, no stdlib-clash rename), so rblock code can declare it `extern "C"` and
+call back into Maka.  The Maka-emitted C and the rblock sidecar staticlib link
+into one binary, so the symbol resolves at final link.  This is what lets Maka
+own an inversion-of-control app's control plane (event handlers, IPC handlers,
+device callbacks) instead of only ever calling out.
+
+```maka
+export int mk_add(int a, int b) { return a + b; }        // scalar signature
+export int slen(string s) { return str_len(s) as int; }  // string -> char*
+
+rblock "
+    extern \"C\" {
+        fn mk_add(a: i64, b: i64) -> i64;
+        fn slen(s: *const std::os::raw::c_char) -> i64;
+    }
+    pub fn via_rust(x: i64) -> i64 { unsafe { mk_add(x, 100) } }
+";
+// via_rust(5)  ->  Rust  ->  Maka mk_add  ->  105
+```
+
+**C-ABI signature rule.**  An `export` signature must cross the C ABI: scalars
+(`int`/`float`/sized ints/`bool`/`char`), `unit` (→ `void`), `string` (→
+`char*`), and any `*T` / `raw *T` / `&T` pointer are allowed; a by-value `Vec` /
+`String` / struct / array / enum / closure / existential, and `own *T` (ownership
+can't transfer across the ABI — the other side won't run Maka's `free`), are
+rejected — pass those behind a `*T` pointer.  An `export` fn may not be generic
+(monomorphization yields many mangled symbols) or `inline` (no standalone symbol).
+
+**Callbacks (Maka function as a C function pointer).**  Because an `export` is a
+real C symbol, Rust takes its address as an `unsafe extern "C" fn` pointer and
+hands it to any callback-taking API (an audio device callback, a window event
+handler, an async completion):
+
+```maka
+export int on_tick(int frame) { return frame * 2; }
+rblock "
+    extern \"C\" { fn on_tick(frame: i64) -> i64; }
+    fn run_with_cb(cb: unsafe extern \"C\" fn(i64) -> i64, x: i64) -> i64 { unsafe { cb(x) } }
+    pub fn drive(y: i64) -> i64 { run_with_cb(on_tick, y) }   // stores + invokes the Maka fn ptr
+";
+```
+
+A thread-crossing export (invoked from a device/decoder thread) should follow the
+same discipline as `gate` (§7 of SPEC.md): don't touch a non-atomic `mut` global
+from it (the cross-thread global-race check catches Maka-internal cases, but a
+callback fired by a foreign thread is on you).  The reverse direction — a Maka
+function *receiving* a Rust `extern "C" fn` pointer as a typed parameter — is not
+yet a first-class marshalled type; take it as a `raw *unit` and call it through a
+tiny rblock shim.
+
+---
+
 ## 2. Architecture
 
 `makac` gains a Rust sidecar pipeline that runs after parse and before

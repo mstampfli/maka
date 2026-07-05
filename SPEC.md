@@ -382,7 +382,7 @@ only - even when it appears inside a user-written loop in that inline body.
 ## 5. Items (top level)
 
 ```
-func_decl    := [pub]? [inline]? [gate]? RetType name [<TyParams>] (params) [where ...] block
+func_decl    := [pub]? [inline]? [gate]? [export]? RetType name [<TyParams>] (params) [where ...] block
 extern_decl  := extern [gate]? ["c_link_name"]? RetType name (params [, ...]?);
 data_decl    := [pub]? data Name [<TyParams>] [where ...] { field_decl* }
 enum_decl    := [pub]? enum Name [<TyParams>] { variant_decl* }
@@ -402,6 +402,25 @@ constexpr    := [pub]? constexpr Type NAME = constant_int_expr;   // named const
             |  [pub]? constexpr RetType NAME(params) { body }     // compile-time function
 global       := [pub]? [mut]? Type NAME = expr;
 ```
+
+### Exported functions (`export fn`) - reverse FFI
+
+`export` on a function emits a stable, **unmangled** C symbol with external
+linkage - the exact declared name, with no module prefix and dodging the
+stdlib-clash rename an ordinary function gets - so C/Rust code (an rblock's
+`extern "C" { fn name(...); }`) can call **back into** Maka.  The Maka-emitted C
+and the rblock sidecar staticlib link into one binary, so the symbol resolves at
+final link.  This is the reverse of the normal Maka->C direction and is what lets
+Maka own an inversion-of-control app's control plane (event handlers, callbacks).
+
+An `export` signature must cross the C ABI: scalars, `char`, `unit` (-> `void`),
+`string` (-> `char*`), and any `*T` / `raw *T` / `&T` pointer.  A by-value `Vec` /
+`String` / struct / array / enum / closure / existential, and `own *T` (ownership
+cannot transfer across the ABI), are rejected - pass those behind a `*T` pointer.
+`export` may not combine with generics (monomorphization yields many symbols) or
+`inline` (no standalone symbol).  Because the symbol is a real C function, Rust
+can take its address as an `unsafe extern "C" fn` pointer and register it as a
+callback.  See `RUST_INTEROP.md` §1.5 and test `417_export_reverse_call.maka`.
 
 ### Compile-time functions (`constexpr fn`)
 
