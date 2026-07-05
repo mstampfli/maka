@@ -1,0 +1,14 @@
+// `import` and `use` apply module-wide regardless of position, so they may be
+// interleaved among items - not confined to a strict prelude. (Previously an
+// import-after-item died with "expected type, got Import".)
+import std.{String, string_new, as_str};
+data Foo { int x; }
+import std.StringOps;                 // import after an item
+use std.String.StringOps;             // use after an item
+unit main() {
+    mut String s = string_new();
+    s.push_str("hi");
+    log(s.as_str());                  // hi
+    Foo f = Foo { x = 9 };
+    log(f.x);                         // 9
+}

@@ -47,6 +47,70 @@ impl Parser {
         }
     }
 
+    /// Parse one `import path.name [as alias];` / `import a.{x,y};` / `import a.*;`.
+    /// `import`/`use` apply module-wide regardless of position, so this is called
+    /// both in the prelude and interleaved among items.
+    fn parse_one_import(&mut self) -> Result<ImportDecl, ParseError> {
+        self.bump(); // import
+        let path0 = self.parse_dotted_path()?;
+        let mut path = path0.clone();
+        let mut names: Vec<String> = Vec::new();
+        // `.{x, y}` selective list — consume the dot first, then the brace.
+        if self.at(&TokKind::Dot) && matches!(self.peek_at(1), TokKind::LBrace) {
+            self.bump(); // .
+        }
+        // `.*` wildcard — bring every `pub` item from the named module into scope.
+        if self.at(&TokKind::Dot) && matches!(self.peek_at(1), TokKind::Star) {
+            self.bump(); // .
+            self.bump(); // *
+            names.push("*".to_string());
+            self.expect(&TokKind::Semicolon, "`;`")?;
+            return Ok(ImportDecl { path, names });
+        }
+        if self.eat(&TokKind::LBrace) {
+            if !self.at(&TokKind::RBrace) {
+                loop {
+                    let (n, _) = self.expect_ident("imported name")?;
+                    names.push(n);
+                    if !self.eat(&TokKind::Comma) { break; }
+                    if self.at(&TokKind::RBrace) { break; }
+                }
+            }
+            self.expect(&TokKind::RBrace, "`}`")?;
+        } else {
+            // path's last segment is the imported name.  Optional `as alias`.
+            let last = path.pop().unwrap_or_default();
+            let mut bound = last;
+            if let TokKind::Ident(i) = self.peek() {
+                if i == "as" {
+                    self.bump();
+                    let (alias, _) = self.expect_ident("import alias")?;
+                    bound = alias;
+                }
+            }
+            names.push(bound);
+        }
+        self.expect(&TokKind::Semicolon, "`;`")?;
+        Ok(ImportDecl { path, names })
+    }
+
+    /// Parse one `use Module.Type.Attr;` (explicit propagation of a `pub has` impl).
+    fn parse_one_use(&mut self) -> Result<HasImport, ParseError> {
+        let kw = self.bump(); // use
+        let path = self.parse_dotted_path()?;
+        if path.len() < 3 {
+            return Err(ParseError {
+                msg: "`use` requires at least `Module.Type.Attr` (one module segment + Type + Attr)".into(),
+                span: kw.span,
+            });
+        }
+        let attr_name = path[path.len() - 1].clone();
+        let type_name = path[path.len() - 2].clone();
+        let module_path: Vec<String> = path[..path.len() - 2].to_vec();
+        self.expect(&TokKind::Semicolon, "`;`")?;
+        Ok(HasImport { module_path, type_name, attr_name, span: kw.span })
+    }
+
     pub fn parse_module(mut self) -> Result<Module, ParseError> {
         // Optional `module path.name;`
         let mut module_path: Option<Vec<String>> = None;
@@ -58,74 +122,13 @@ impl Parser {
         // module's import list so the visibility checker can use them.
         let mut imports: Vec<ImportDecl> = Vec::new();
         while self.at(&TokKind::Import) {
-            self.bump();
-            // Parse a dotted path; the last segment may be a single name or a `{ ... }`
-            // selective list.  Examples:
-            //   import a.b.c;                  → path=[a,b], names=[c]   (single)
-            //   import a.b.c as x;             → path=[a,b], names=[x]   (aliased; we keep alias as the bound name)
-            //   import a.b.{x, y};             → path=[a,b], names=[x,y] (selective list)
-            //   import a;                      → path=[],    names=[a]   (whole module by name)
-            let path0 = self.parse_dotted_path()?;
-            let mut path = path0.clone();
-            let mut names: Vec<String> = Vec::new();
-            // `.{x, y}` selective list — consume the dot first, then the brace.
-            if self.at(&TokKind::Dot) && matches!(self.peek_at(1), TokKind::LBrace) {
-                self.bump(); // .
-            }
-            // `.*` wildcard — bring every `pub` item from the named module into
-            // scope.  The resolver expands the `*` into the concrete names at
-            // visibility-check time.
-            if self.at(&TokKind::Dot) && matches!(self.peek_at(1), TokKind::Star) {
-                self.bump(); // .
-                self.bump(); // *
-                names.push("*".to_string());
-                self.expect(&TokKind::Semicolon, "`;`")?;
-                imports.push(ImportDecl { path, names });
-                continue;
-            }
-            if self.eat(&TokKind::LBrace) {
-                if !self.at(&TokKind::RBrace) {
-                    loop {
-                        let (n, _) = self.expect_ident("imported name")?;
-                        names.push(n);
-                        if !self.eat(&TokKind::Comma) { break; }
-                        if self.at(&TokKind::RBrace) { break; }
-                    }
-                }
-                self.expect(&TokKind::RBrace, "`}`")?;
-            } else {
-                // path's last segment is the imported name.  Optional `as alias`.
-                let last = path.pop().unwrap_or_default();
-                let mut bound = last;
-                if let TokKind::Ident(i) = self.peek() {
-                    if i == "as" {
-                        self.bump();
-                        let (alias, _) = self.expect_ident("import alias")?;
-                        bound = alias;
-                    }
-                }
-                names.push(bound);
-            }
-            self.expect(&TokKind::Semicolon, "`;`")?;
-            imports.push(ImportDecl { path, names });
+            imports.push(self.parse_one_import()?);
         }
         // `use ModPath.Type.Attr;` declarations — explicit propagation of `pub has` impls
         // from another module. Allowed in the same prelude region as `import`.
         let mut has_imports: Vec<HasImport> = Vec::new();
         while self.at(&TokKind::Use) {
-            let kw = self.bump();
-            let path = self.parse_dotted_path()?;
-            if path.len() < 3 {
-                return Err(ParseError {
-                    msg: "`use` requires at least `Module.Type.Attr` (one module segment + Type + Attr)".into(),
-                    span: kw.span,
-                });
-            }
-            let attr_name = path[path.len() - 1].clone();
-            let type_name = path[path.len() - 2].clone();
-            let module_path: Vec<String> = path[..path.len() - 2].to_vec();
-            self.expect(&TokKind::Semicolon, "`;`")?;
-            has_imports.push(HasImport { module_path, type_name, attr_name, span: kw.span });
+            has_imports.push(self.parse_one_use()?);
         }
         // Pre-pass: capture `constexpr` function definitions first (so constant
         // folds below can call them), then scan `constexpr T NAME = expr;` decls.
@@ -134,6 +137,12 @@ impl Parser {
         self.prescan_constexprs();
         let mut items = Vec::new();
         while !self.at(&TokKind::Eof) {
+            // `import`/`use` apply module-wide regardless of position, so accept
+            // them interleaved among items (not only in the prelude) - a stray
+            // one used to hit the item parser and die with "expected type, got
+            // Import/Use".
+            if self.at(&TokKind::Import) { imports.push(self.parse_one_import()?); continue; }
+            if self.at(&TokKind::Use) { has_imports.push(self.parse_one_use()?); continue; }
             // Optional `pub` modifier on top-level items.
             let is_pub = self.eat(&TokKind::Pub);
             // Module-scope constexpr decls.  The pre-scan already captured the
