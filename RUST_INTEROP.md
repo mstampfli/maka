@@ -240,6 +240,17 @@ the call boundary:
 | `Result<T, E>`      | `__MakaRes_T_E`   | `#[repr(C)] { tag: i64, ok: T, err: E }`             |
 | `Vec<T>`            | `__MakaVec_T`     | `#[repr(C)] { ptr: *mut T, len: usize, cap: usize }`, copied to `libc::malloc`'d buffer |
 | `(A, B, ...)`       | `__MakaTup_A_B`   | `#[repr(C)] { f0: A, f1: B, ... }`; crosses by value both ways |
+| `pub enum E {...}`  | `enum E`          | matchable Maka enum; `{ i64 tag; union<payloads> }` (or bare `i64` if all-unit) |
+
+A `pub enum` in an rblock is mirrored as a real, matchable Maka `enum` with the
+same variants and tags (0, 1, 2, ... in declaration order).  A payload-carrying
+enum crosses as a `#[repr(C)]` `{ i64 tag; union { <variant payloads> } }` laid
+out to match Maka's native enum lowering; an all-unit (C-style) enum crosses as a
+bare `i64` discriminant.  It works in both directions - a Rust-returned value is
+`match`ed on the Maka side, and a Maka-built variant is passed into Rust - for
+unit, tuple (`V(A, B)` -> fields `f0`, `f1`), and struct (`V { a: A }`) variants.
+Each variant payload field must be a scalar / `bool` / `#[repr(C)]` struct (same
+C-identity rule as struct fields); an owned/opaque payload is rejected.
 
 For `Option<T>`, `Result<T,E>`, `Vec<T>`, and tuples, the bridge generates one
 `#[repr(C)]` Rust struct per unique element-type list **and** one
@@ -636,6 +647,34 @@ The `extern "C" fn(i64) -> i64` parameter mirrors to a Maka fn-pointer type;
 `on_tick` lowers to its direct C address, which matches the callback exactly.
 Passing a capturing closure (or any fn-pointer variable) is rejected at sema —
 a C callback slot carries no environment (§1.5).
+
+### 10.8 Enum mirror
+
+```maka
+rblock "
+    pub enum Shape { Circle(f64), Rect(f64, f64), Point }
+    pub fn make(k: i64) -> Shape {
+        match k { 0 => Shape::Circle(2.0), 1 => Shape::Rect(3.0, 4.0), _ => Shape::Point }
+    }
+    pub fn area(s: Shape) -> f64 {
+        match s { Shape::Circle(r) => 3.14159*r*r, Shape::Rect(w,h) => w*h, Shape::Point => 0.0 }
+    }
+";
+
+unit main() {
+    match (make(0)) {                 // Rust-returned enum, matched in Maka
+        Circle { f0 } { log(f0 as int); }   // 2
+        Rect { f0, f1 } { log((f0 + f1) as int); }
+        Point { log(-1); }
+    }
+    log(area(Shape.Rect { f0 = 3.0, f1 = 4.0 }) as int);   // Maka-built variant -> Rust -> 12
+}
+```
+
+`Shape` becomes a real Maka `enum`; tuple-variant fields are named `f0`, `f1`.
+The value crosses by value as `{ i64 tag; union<payloads> }`, matching Maka's
+native enum layout, so both `match`ing a returned value and passing a Maka-built
+variant into Rust work.
 
 ---
 

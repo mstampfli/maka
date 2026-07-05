@@ -559,9 +559,11 @@ in [`RUST_INTEROP.md`](RUST_INTEROP.md): the driver compiles each rblock as
 a sidecar Cargo crate, emits `#[no_mangle] extern "C"` shims per `pub fn`,
 and injects matching Maka `extern` declarations into the AST so calls
 look like ordinary Maka function calls.  Type marshalling auto-handles
-primitives, `&str`, `String`, and `#[repr(C)]` structs; everything else
-flows through as an opaque heap handle (`own *mut unit` on the Maka
-side, `Box::into_raw` ↔ `Box::from_raw` on the Rust side, auto-dropped).
+primitives, `&str`, `String`, `#[repr(C)]` structs, `Option`/`Result`/`Vec`,
+tuples, `extern "C" fn` callbacks, and `pub enum`s (mirrored as a matchable
+Maka `enum`); everything else flows through as an opaque heap handle
+(`own *mut unit` on the Maka side, `Box::into_raw` ↔ `Box::from_raw` on the
+Rust side, auto-dropped).
 
 ### 5.2 `cinclude`, `cblock`, and `clink`
 

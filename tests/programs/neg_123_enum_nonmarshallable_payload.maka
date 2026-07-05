@@ -1,0 +1,7 @@
+// An enum variant payload must be a C-identity type; an owned `String` payload
+// has a different Maka-mirror layout and is rejected.
+rblock "
+    pub enum Msg { Text(String), Num(i64) }
+    pub fn mk() -> Msg { Msg::Num(1) }
+";
+unit main() { log(1); }

@@ -106,6 +106,9 @@ pub fn prepare(module: &Module, project_root: &Path, opts: &BridgeOptions) -> Re
             }
             injected.push((module_path.clone(), Item::Data(build_data_decl(s))));
         }
+        for e in &surface.enums {
+            injected.push((module_path.clone(), Item::Enum(build_enum_decl(e))));
+        }
         let containers = collect_container_insts(&surface);
         for d in build_container_data_decls(&containers) {
             injected.push((module_path.clone(), Item::Data(d)));
@@ -326,6 +329,13 @@ fn build_sidecar_with_probes(
         }
         lib_rs.push('\n');
     }
+    if !surface.enums.is_empty() {
+        lib_rs.push_str("// auto-generated enum ABI mirrors (tag + payload union)\n");
+        for e in &surface.enums {
+            lib_rs.push_str(&emit_enum_mirror(e));
+        }
+        lib_rs.push('\n');
+    }
     for f in &surface.fns {
         lib_rs.push_str(&emit_shim(f));
         lib_rs.push('\n');
@@ -511,6 +521,7 @@ fn rust_marshal_in_ty(ty: &RustType) -> String {
             params.iter().map(rust_marshal_in_ty).collect::<Vec<_>>().join(", "), rust_marshal_out_ty(ret)),
         RustType::Tuple(elems) => format!("__MakaTup_{}",
             tuple_label(&elems.iter().map(rust_name_of).collect::<Vec<_>>())),
+        RustType::Enum { name, variants } => enum_marshal_ty(name, variants),
     }
 }
 
@@ -541,6 +552,7 @@ fn rust_marshal_out_ty(ty: &RustType) -> String {
             params.iter().map(rust_marshal_in_ty).collect::<Vec<_>>().join(", "), rust_marshal_out_ty(ret)),
         RustType::Tuple(elems) => format!("__MakaTup_{}",
             tuple_label(&elems.iter().map(rust_name_of).collect::<Vec<_>>())),
+        RustType::Enum { name, variants } => enum_marshal_ty(name, variants),
     }
 }
 
@@ -644,6 +656,8 @@ fn unmarshal_in(name: &str, ty: &RustType) -> (String, String) {
         }
         // A C callback (bare fn pointer) crosses the ABI unchanged.
         RustType::CFnPtr { .. } => ("".into(), name.to_string()),
+        // Inbound enum: reconstruct the Rust enum from the tagged ABI value.
+        RustType::Enum { name: enum_name, variants } => enum_unmarshal_in(name, enum_name, variants),
         // Inbound tuple: rebuild the Rust tuple from the struct's `fN` fields.
         RustType::Tuple(elems) => {
             let vals: Vec<String> = elems.iter().enumerate()
@@ -735,6 +749,7 @@ fn marshal_out(value: &str, ty: &RustType) -> String {
             format!("{{ let __t = {v}; __MakaTup_{lbl} {{ {inits}}} }}",
                 v = value, lbl = tuple_label(&names), inits = inits)
         }
+        RustType::Enum { name, variants } => enum_marshal_out(value, name, variants),
     }
 }
 
@@ -883,6 +898,8 @@ fn rust_to_maka_ty(ty: &RustType, sp: Span, is_return: bool) -> Type {
             format!("__MakaTup_{}", tuple_label(&elems.iter().map(rust_name_of).collect::<Vec<_>>())),
             sp,
         ),
+        // A mirrored enum surfaces on the Maka side as the injected `enum` itself.
+        RustType::Enum { name, .. } => Type::Named(name.clone(), sp),
     }
 }
 
@@ -924,6 +941,25 @@ fn rust_prim_to_maka(s: &str) -> &'static str {
 struct RustSurface {
     fns: Vec<RustFn>,
     structs: Vec<RustStruct>,
+    enums: Vec<RustEnum>,
+}
+
+#[derive(Debug, Clone)]
+struct RustEnum {
+    name: String,
+    variants: Vec<RustVariant>,
+}
+
+#[derive(Debug, Clone)]
+struct RustVariant {
+    name: String,
+    /// `V { a, b }` (named) vs `V(a, b)` (tuple) - drives how the Rust `match`
+    /// binds and constructs the variant.  A unit variant has no fields either way.
+    is_struct: bool,
+    /// Field (name, type) pairs.  Tuple fields are named `f0`, `f1`, ...; named
+    /// fields keep their identifiers.  Both sides use the same names so the
+    /// generated payload structs line up.
+    fields: Vec<(String, RustType)>,
 }
 
 #[derive(Debug, Clone)]
@@ -995,6 +1031,11 @@ enum RustType {
     /// fields `f0`, `f1`, ... and a matching Maka `data`, like `Option`/`Result`.
     /// Elements must be scalars / `bool` / `#[repr(C)]` structs.
     Tuple(Vec<RustType>),
+    /// A `pub enum` declared in the rblock — mirrored as a matchable Maka `enum`
+    /// with the same variants/tags.  Crosses the ABI as `__MakaEnum_<name>`
+    /// (`{ i64 tag; union<payloads> }`, or a bare `i64` when all variants are unit).
+    /// Carries the full variant list so the marshalling code can pack/unpack it.
+    Enum { name: String, variants: Vec<RustVariant> },
 }
 
 /// A field type whose Maka mirror has the SAME layout as the Rust type, so it is
@@ -1073,6 +1114,52 @@ fn parse_rust_surface(src: &str) -> Result<RustSurface, String> {
         }
     }
 
+    // Pass 1b: gather pub enums and their variants (payload field types
+    // classified against the known repr(C) structs), and register their names.
+    let mut enums: Vec<RustEnum> = Vec::new();
+    for item in &file.items {
+        if let syn::Item::Enum(e) = item {
+            if !is_pub(&e.vis) { continue; }
+            let mut variants = Vec::new();
+            for v in &e.variants {
+                let (is_struct, fields) = match &v.fields {
+                    syn::Fields::Unit => (false, Vec::new()),
+                    syn::Fields::Unnamed(u) => {
+                        let mut fs = Vec::new();
+                        for (i, f) in u.unnamed.iter().enumerate() {
+                            fs.push((format!("f{}", i), reclassify(&map_syn_type(&f.ty, &known_repr_c)?, &known_repr_c)));
+                        }
+                        (false, fs)
+                    }
+                    syn::Fields::Named(n) => {
+                        let mut fs = Vec::new();
+                        for f in &n.named {
+                            let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_else(|| "_".into());
+                            fs.push((fname, reclassify(&map_syn_type(&f.ty, &known_repr_c)?, &known_repr_c)));
+                        }
+                        (true, fs)
+                    }
+                };
+                variants.push(RustVariant { name: v.ident.to_string(), is_struct, fields });
+            }
+            enums.push(RustEnum { name: e.ident.to_string(), variants });
+        }
+    }
+    // Every variant payload field must be a C-identity type (scalar/bool/repr-C
+    // struct); owned/opaque fields have a different Maka-mirror layout and would
+    // corrupt the tagged-union ABI - same rule as #[repr(C)] struct fields.
+    for e in &enums {
+        for v in &e.variants {
+            for (fname, fty) in &v.fields {
+                if !is_repr_c_identity(fty) {
+                    return Err(format!(
+                        "enum `{}` variant `{}` field `{}` has type `{}`, which is not a C-identity type. Enum payloads cross the ABI by value; use primitive, bool, or #[repr(C)]-struct fields (return owned data separately or behind an opaque handle).",
+                        e.name, v.name, fname, rust_name_of(fty)));
+                }
+            }
+        }
+    }
+
     // Pass 2: free fns and impl-block methods.
     let mut fns: Vec<RustFn> = Vec::new();
     for item in &file.items {
@@ -1110,7 +1197,158 @@ fn parse_rust_surface(src: &str) -> Result<RustSurface, String> {
         }
     }
 
-    Ok(RustSurface { fns, structs })
+    // Lift enum-named opaque types in fn signatures to RustType::Enum so the
+    // shim marshals them as a tagged value rather than an opaque handle.
+    for f in &mut fns {
+        for p in &mut f.params { p.ty = reclassify_enum(&p.ty, &enums); }
+        f.ret = reclassify_enum(&f.ret, &enums);
+    }
+
+    Ok(RustSurface { fns, structs, enums })
+}
+
+/// Lift an enum-named opaque type to `RustType::Enum`, embedding the enum's
+/// variants (by value only; a borrowed `&E` stays an opaque handle for now).
+fn reclassify_enum(ty: &RustType, enums: &[RustEnum]) -> RustType {
+    match ty {
+        RustType::Opaque(n) => match enums.iter().find(|e| &e.name == n) {
+            Some(e) => RustType::Enum { name: e.name.clone(), variants: e.variants.clone() },
+            None => ty.clone(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// True when every variant of an enum is a unit (no payload): it mirrors as a
+/// bare `i64` discriminant rather than a `{ tag; union }` struct (matching Maka's
+/// C-style-enum lowering).
+fn enum_is_c_style(variants: &[RustVariant]) -> bool {
+    variants.iter().all(|v| v.fields.is_empty())
+}
+
+/// The mangled name used for the enum's `#[repr(C)]` ABI mirror and payload types.
+fn enum_c_name(name: &str) -> String { format!("__MakaEnum_{}", sanitise(name)) }
+
+/// The Rust ABI type a mirrored enum crosses as: a bare `i64` discriminant for a
+/// C-style (all-unit) enum, else the `{ tag; union }` `#[repr(C)]` struct.
+fn enum_marshal_ty(name: &str, variants: &[RustVariant]) -> String {
+    if enum_is_c_style(variants) { "i64".to_string() } else { enum_c_name(name) }
+}
+
+/// Rust match pattern that binds a variant's fields to locals named by the field
+/// (`(f0, f1)` for tuple variants, `{ a, b }` for struct variants, empty for unit).
+fn enum_variant_pattern(v: &RustVariant) -> String {
+    if v.fields.is_empty() { return String::new(); }
+    let names: Vec<&str> = v.fields.iter().map(|(n, _)| n.as_str()).collect();
+    if v.is_struct { format!(" {{ {} }}", names.join(", ")) } else { format!("({})", names.join(", ")) }
+}
+
+/// Payload-struct field initialisers from the bound locals (`f0: f0 as i32, ...`).
+fn enum_variant_inits(v: &RustVariant) -> String {
+    v.fields.iter()
+        .map(|(n, t)| format!("{n}: {n} as {ty}", n = n, ty = rust_name_of(t)))
+        .collect::<Vec<_>>().join(", ")
+}
+
+/// Rust expression reconstructing variant `i` of `enum_name` by reading the ABI
+/// value's `payload.v{i}` union member (unsafe: reading a union field).
+fn enum_variant_construct(enum_name: &str, i: usize, v: &RustVariant, abi: &str) -> String {
+    if v.fields.is_empty() { return format!("{}::{}", enum_name, v.name); }
+    let reads: Vec<String> = v.fields.iter().map(|(fname, t)| {
+        let r = format!("unsafe {{ {abi}.payload.v{i}.{fname} }}", abi = abi, i = i, fname = fname);
+        if v.is_struct { format!("{}: {} as {}", fname, r, rust_name_of(t)) }
+        else { format!("{} as {}", r, rust_name_of(t)) }
+    }).collect();
+    if v.is_struct { format!("{}::{} {{ {} }}", enum_name, v.name, reads.join(", ")) }
+    else { format!("{}::{}({})", enum_name, v.name, reads.join(", ")) }
+}
+
+/// Outbound: pack a Rust enum `value` into its ABI mirror.
+fn enum_marshal_out(value: &str, name: &str, variants: &[RustVariant]) -> String {
+    if enum_is_c_style(variants) {
+        return format!("({} as i64)", value);
+    }
+    let ecn = enum_c_name(name);
+    let arms: Vec<String> = variants.iter().enumerate().map(|(i, v)| {
+        if v.fields.is_empty() {
+            format!("{n}::{vn} => {ecn} {{ tag: {i}i64, payload: unsafe {{ std::mem::zeroed() }} }}",
+                n = name, vn = v.name, ecn = ecn, i = i)
+        } else {
+            let pay = format!("{}_{}_Pay", ecn, sanitise(&v.name));
+            format!("{n}::{vn}{pat} => {ecn} {{ tag: {i}i64, payload: {ecn}_U {{ v{i}: {pay} {{ {inits} }} }} }}",
+                n = name, vn = v.name, pat = enum_variant_pattern(v), ecn = ecn, i = i,
+                pay = pay, inits = enum_variant_inits(v))
+        }
+    }).collect();
+    format!("match {} {{ {} }}", value, arms.join(", "))
+}
+
+/// Inbound: reconstruct a Rust enum from its ABI mirror bound to `name`.  The
+/// last variant is the `_` arm so the match over `i64` is exhaustive (Maka only
+/// ever supplies a valid tag).
+fn enum_unmarshal_in(name: &str, enum_name: &str, variants: &[RustVariant]) -> (String, String) {
+    let n = variants.len();
+    let c_style = enum_is_c_style(variants);
+    let discr = if c_style { name.to_string() } else { format!("{}.tag", name) };
+    let mut arms: Vec<String> = Vec::new();
+    for (i, v) in variants.iter().enumerate() {
+        let ctor = if c_style { format!("{}::{}", enum_name, v.name) }
+                   else { enum_variant_construct(enum_name, i, v, name) };
+        if i + 1 == n {
+            arms.push(format!("_ => {}", ctor));
+        } else {
+            arms.push(format!("{}i64 => {}", i, ctor));
+        }
+    }
+    (format!("let {n} = match {d} {{ {arms} }};", n = name, d = discr, arms = arms.join(", ")),
+     name.to_string())
+}
+
+/// Emit the enum's `#[repr(C)]` ABI mirror into the sidecar: per-variant payload
+/// structs, the union, and the tagged struct - laid out to match Maka's native
+/// enum lowering (`{ maka_int tag; union { payloads } }`).  A C-style (all-unit)
+/// enum crosses as a bare `i64`, so it needs no mirror struct.
+fn emit_enum_mirror(e: &RustEnum) -> String {
+    if enum_is_c_style(&e.variants) { return String::new(); }
+    let ecn = enum_c_name(&e.name);
+    let mut out = String::new();
+    // Per-variant payload structs (non-unit variants only).
+    for v in &e.variants {
+        if v.fields.is_empty() { continue; }
+        let fields: String = v.fields.iter()
+            .map(|(fname, t)| format!("pub {}: {}, ", fname, rust_name_of(t))).collect();
+        out.push_str(&format!("#[repr(C)] #[derive(Clone, Copy)] pub struct {ecn}_{vs}_Pay {{ {fields}}}\n",
+            ecn = ecn, vs = sanitise(&v.name), fields = fields));
+    }
+    // The union of payloads, keyed by variant index (matches Maka's union order).
+    let members: String = e.variants.iter().enumerate()
+        .filter(|(_, v)| !v.fields.is_empty())
+        .map(|(i, v)| format!("pub v{}: {}_{}_Pay, ", i, ecn, sanitise(&v.name)))
+        .collect();
+    out.push_str(&format!("#[repr(C)] #[derive(Clone, Copy)] pub union {ecn}_U {{ {members}}}\n",
+        ecn = ecn, members = members));
+    // The tagged struct.
+    out.push_str(&format!("#[repr(C)] pub struct {ecn} {{ pub tag: i64, pub payload: {ecn}_U }}\n",
+        ecn = ecn));
+    out
+}
+
+/// Build the Maka `enum` decl mirroring a Rust enum: same variant order (so tags
+/// line up 0,1,2,...) with sized payload fields matching the Rust widths.
+fn build_enum_decl(e: &RustEnum) -> maka_ast::EnumDecl {
+    let sp = Span { start: 0, end: 0, line: 0, col: 0 };
+    let variants = e.variants.iter().map(|v| {
+        let fields = v.fields.iter().map(|(fname, t)| FieldDecl {
+            mutness: Mutness::Mut,
+            ty: rust_to_maka_field_ty(t, sp),
+            name: fname.clone(),
+            default: None,
+            is_embed: false,
+            span: sp,
+        }).collect();
+        maka_ast::VariantDecl { name: v.name.clone(), fields, explicit_value: None, span: sp }
+    }).collect();
+    maka_ast::EnumDecl { name: e.name.clone(), type_params: Vec::new(), variants, is_pub: true, span: sp }
 }
 
 fn lower_free_fn(
@@ -1579,6 +1817,7 @@ fn rust_name_of(ty: &RustType) -> String {
         RustType::ReprC(n) => n.clone(),
         RustType::Tuple(elems) => format!("({})",
             elems.iter().map(rust_name_of).collect::<Vec<_>>().join(", ")),
+        RustType::Enum { name, .. } => name.clone(),
         _ => "u64".to_string(),
     }
 }

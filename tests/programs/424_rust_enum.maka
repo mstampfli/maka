@@ -1,0 +1,52 @@
+// Rust enum mirror: a `pub enum` in an rblock becomes a matchable Maka `enum`
+// with the same variants/tags. Payload-carrying enums cross as a `{ i64 tag;
+// union<payloads> }` struct laid out to match Maka's native enum; all-unit
+// (C-style) enums cross as a bare i64. Works both directions - a Rust-returned
+// value is matched in Maka, and a Maka-built variant is passed into Rust - for
+// tuple, struct, and unit variants with scalar payloads (exact widths).
+rblock "
+    pub enum Shape { Circle(f64), Rect(f64, f64), Point }
+    pub enum Dir { North, East, South, West }
+    pub enum Event { Key { code: i32 }, Resize(i32, i32), Quit }
+
+    pub fn make(kind: i64) -> Shape {
+        match kind { 0 => Shape::Circle(2.0), 1 => Shape::Rect(3.0, 4.0), _ => Shape::Point }
+    }
+    pub fn area(s: Shape) -> f64 {
+        match s { Shape::Circle(r) => 3.14159 * r * r, Shape::Rect(w, h) => w * h, Shape::Point => 0.0 }
+    }
+    pub fn opposite(d: Dir) -> Dir {
+        match d { Dir::North => Dir::South, Dir::South => Dir::North,
+                  Dir::East => Dir::West, Dir::West => Dir::East }
+    }
+    pub fn ev_val(e: Event) -> i64 {
+        match e { Event::Key { code } => code as i64,
+                  Event::Resize(w, h) => (w * h) as i64, Event::Quit => -1 }
+    }
+";
+
+unit main() {
+    // return direction: match a Rust-produced enum in Maka
+    Shape c = make(0);
+    match (c) {
+        Circle { f0 } { log(f0 as int); }        // 2
+        Rect { f0, f1 } { log((f0 + f1) as int); }
+        Point { log(-9); }
+    }
+    log(area(make(1)) as int);   // Rect(3,4)  -> 12
+    log(area(make(2)) as int);   // Point      -> 0
+
+    // C-style (all-unit) enum, i64 mirror
+    match (opposite(Dir.North)) { North { log(10); } East { log(11); } South { log(12); } West { log(13); } }  // 12
+
+    // param direction: build variants in Maka, pass them to Rust
+    log(ev_val(mk_key()));                            // 65   (Rust-built struct variant)
+    log(ev_val(Event.Resize { f0 = 6, f1 = 7 }));     // 42   (Maka-built tuple variant)
+    log(ev_val(Event.Quit));                          // -1   (Maka-built unit variant)
+}
+
+// (helper kept in Maka to show a Rust-built struct variant crossing back)
+Event mk_key() { return ev_key(65); }
+rblock "
+    pub fn ev_key(c: i32) -> Event { Event::Key { code: c } }
+";
