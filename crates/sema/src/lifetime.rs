@@ -1128,6 +1128,20 @@ impl<'a> Analyzer<'a> {
                 } else {
                     let sp = expr.span;
                     let hint = match &expr.kind {
+                        // A `mut` global can be reassigned by any other call between the
+                        // guard and the deref, so a `if (G == null)` guard on the global
+                        // itself can never be proven to hold across the deref.  Suggest
+                        // the local-rebind pattern rather than the (already-written) guard.
+                        HExprKind::GlobalRef(gid) if self.sym.globals[gid.0 as usize].is_mut => {
+                            let name = self.sym.globals[gid.0 as usize].name.clone();
+                            format!(
+                                "cannot prove the `mut` global `{n}` is non-null here: another call \
+                                 could reassign it between the guard and the deref. Copy it to a local \
+                                 first, then guard and deref the local: \
+                                 `<type> p = {n}; if (p == null) {{ return ...; }} unsafe {{ p!... }}`",
+                                n = name
+                            )
+                        }
                         HExprKind::Local(id) => {
                             let name = self.f().locals[id.0 as usize].name.clone();
                             format!(

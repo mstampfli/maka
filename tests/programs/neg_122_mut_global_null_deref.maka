@@ -1,0 +1,10 @@
+// Deref of a `mut` global pointer can't be proven non-null even behind a guard
+// on the global itself - another call could reassign it between check and deref.
+// The diagnostic must point at the local-rebind pattern, not the guard already here.
+data Sim { int frame; }
+mut raw *Sim G = null;
+unit tick() {
+    if (G == null) { return; }
+    unsafe { log(G!.frame); }
+}
+unit main() { tick(); }
