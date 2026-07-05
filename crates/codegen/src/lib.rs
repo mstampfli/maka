@@ -374,6 +374,17 @@ impl<'a> Cx<'a> {
             self.emit_freestanding_prologue();
             return;
         }
+        // The hosted runtime below uses POSIX threads (pthread_*) and the
+        // GCC/clang atomic builtins (__atomic_*, <stdatomic.h>), neither of which
+        // MSVC's cl.exe provides - a cl build otherwise fails with a cryptic
+        // C1189 ("C atomics require C11") + C2085 cascade.  Fail early with an
+        // actionable message instead.  This fires only for genuine MSVC cl:
+        // mingw gcc does not define _MSC_VER, and clang-cl defines __clang__ and
+        // does have the atomic builtins.  (Full cl support needs a pthread->Win32
+        // + atomics->Interlocked runtime port; see GAPS.md #6.)
+        self.w("#if defined(_MSC_VER) && !defined(__clang__)\n");
+        self.w("#error \"The Maka runtime uses POSIX threads and GCC/clang atomics; compile the emitted C with mingw gcc or clang (clang-cl), not MSVC cl. Full cl support is unimplemented - see GAPS.md #6.\"\n");
+        self.w("#endif\n");
         // Feature-test macros must be defined BEFORE any libc include — once
         // <stdio.h> is parsed, redefining them is a no-op.  On Darwin we need
         // both _DARWIN_C_SOURCE (for non-POSIX extensions like ucontext) and
