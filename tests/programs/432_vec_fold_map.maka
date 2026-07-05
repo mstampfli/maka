@@ -1,0 +1,9 @@
+// stdlib Vec iterator helpers: `fold` (general accumulator) and `map`.
+import std.{Vec, push, fold, map};
+unit main() {
+    Vec<int> v = []; push(v, 1); push(v, 2); push(v, 3); push(v, 4);
+    log(fold(&v, 0, int(int a, int x) a + x));   // sum   = 10
+    log(fold(&v, 1, int(int a, int x) a * x));   // prod  = 24
+    Vec<int> d = map(&v, int(int x) x * x);      // squares
+    for (int x in d) { log(x); }                 // 1 4 9 16
+}

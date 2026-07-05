@@ -706,6 +706,26 @@ pub String has Eq {
 }
 
 // =====================================================================
+// Vec<T> iterator helpers.  `fold` is the general accumulator (sum is
+// `fold(&v, 0, int(int a, int x) a + x)`, product uses `1` and `*`, etc.);
+// `map` builds a new Vec by applying `f` to each element.
+// =====================================================================
+
+// Left fold: `acc = f(acc, x)` over each element, starting from `init`.
+pub A fold<T, A>(&Vec<T> v, A init, A(A, T) f) {
+    mut A acc = init;
+    for (T x in v) { acc = f(acc, x); }
+    return acc;
+}
+
+// Map: a new Vec with `f` applied to every element (order preserved).
+pub Vec<U> map<T, U>(&Vec<T> v, U(T) f) {
+    Vec<U> out = [];
+    for (T x in v) { push(out, f(x)); }
+    return out;
+}
+
+// =====================================================================
 // HashMap<V> - generic, string-keyed hash map (open addressing, linear
 // probing, power-of-2 capacity, grows at 75% load).  Pure Maka on top of
 // Vec + str_hash + str_eq; the only C primitives are the hash and an owned
