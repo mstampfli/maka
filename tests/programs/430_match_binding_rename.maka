@@ -1,0 +1,17 @@
+// A match destructure can rename a field binding with `field: newname`, so a
+// scrutinee field whose name collides with an outer local doesn't force renaming
+// the local (or the field). Plain `{ field }` binding still binds by field name.
+enum E { War { int a, int b }, Peace }
+unit main() {
+    int a = 100;                          // outer local `a`
+    E e = E.War { a = 1, b = 2 };
+    match (e) {
+        War { a: civA, b: civB } {        // rename fields -> civA, civB
+            log(civA + civB);             // 3
+            log(a);                       // 100  (outer `a` still reachable)
+        },
+        Peace { log(-1); },
+    }
+    E f = E.War { a = 4, b = 5 };
+    match (f) { War { a, b } { log(a + b); }, Peace { }, }   // 9 (plain binding)
+}

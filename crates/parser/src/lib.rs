@@ -2210,7 +2210,13 @@ impl Parser {
                             let (fname, _) = self.expect_ident("field name")?;
                             let mut binding = None;
                             let mut literal = None;
-                            if self.eat(&TokKind::Eq) {
+                            if self.eat(&TokKind::Colon) {
+                                // `field: newname` — bind the field to a renamed
+                                // local, so it can't shadow an outer local of the
+                                // field's name (unambiguous, unlike `=`).
+                                let (rename, _) = self.expect_ident("binding name")?;
+                                binding = Some(rename);
+                            } else if self.eat(&TokKind::Eq) {
                                 match self.peek() {
                                     TokKind::Int(n) => { let n = *n; self.bump(); literal = Some(Lit::Int(n)); }
                                     TokKind::True => { self.bump(); literal = Some(Lit::Bool(true)); }
