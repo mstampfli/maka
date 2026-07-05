@@ -1,0 +1,47 @@
+// Indexing a runtime-length `raw *T` as a buffer: `p![i]` is C pointer indexing
+// `*(p + i)`, so a Maka function can read and WRITE a caller-provided FFI buffer
+// (the core encoder shape). Works for scalar and struct elements, and requires
+// `unsafe` + a mutable pointee (`raw *mut T`) for writes. `raw *[N]T` keeps its
+// bounds-checked array path; only runtime-length scalar/struct pointers land here.
+data Point { mut int x; mut int y; }
+
+cblock "
+static unsigned char* rb_alloc(long n){ extern void* malloc(unsigned long); return (unsigned char*)malloc((unsigned long)n); }
+static void rb_free(unsigned char* p){ extern void free(void*); free(p); }
+";
+extern raw *mut u8 rb_alloc(int n);
+extern unit rb_free(raw *mut u8 p);
+
+// Fill a byte buffer through a raw pointer parameter.
+unit fill(raw *mut u8 dst, int n) {
+    mut int i = 0;
+    while (i < n) {
+        unsafe { dst![i] = (i + 65) as u8; }   // 'A', 'B', 'C', 'D'
+        i = i + 1;
+    }
+}
+
+unit main() {
+    raw *mut u8 buf = rb_alloc(4);
+    unsafe {
+        if (buf != null) {
+            fill(buf, 4);
+            log(buf![0] as int);   // 65
+            log(buf![1] as int);   // 66
+            log(buf![3] as int);   // 68
+            rb_free(buf);
+        }
+    }
+
+    // struct-element buffer, via a `raw *mut u8 -> raw *mut Point` cast
+    raw *mut u8 raw8 = rb_alloc(64);
+    unsafe {
+        if (raw8 != null) {
+            raw *mut Point p = raw8 as raw *mut Point;
+            p![0] = Point { x = 3, y = 4 };
+            p![1] = Point { x = 5, y = 6 };
+            log(p![0].x + p![1].y);   // 9
+            rb_free(raw8);
+        }
+    }
+}

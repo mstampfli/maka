@@ -1,0 +1,4 @@
+// Writing through a read-only raw pointer (`raw *const T`) is rejected; the
+// pointee is immutable - use `raw *mut T` for a writable FFI buffer.
+unit fill(raw *const u8 d) { unsafe { d![0] = 1 as u8; } }
+unit main() { log(1); }

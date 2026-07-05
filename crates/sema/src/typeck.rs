@@ -800,6 +800,14 @@ impl<'a> TypeChecker<'a> {
                     ))
                 }
             }
+            // Indexing a raw pointer (`p![i] = v`) writes through it; require the
+            // pointee be mutable (`raw *mut T`), like `*p = v`.
+            HExprKind::Index { base, .. } if matches!(&base.ty, HType::RawPtr { .. }) => {
+                match &base.ty {
+                    HType::RawPtr { mutable: true, .. } => Ok(()),
+                    _ => Err("cannot write through a `raw *const T` - use `raw *mut T`".to_string()),
+                }
+            }
             HExprKind::Index { base, .. } => self.diagnose_place_target(base),
             HExprKind::Unwrap { expr, .. } => match &expr.ty {
                 HType::Ptr { mutable: true, .. }
@@ -887,7 +895,10 @@ impl<'a> TypeChecker<'a> {
                 if let HType::Ptr { .. } = &f.ty { return base_mut; }
                 base_mut && f.mut_payload
             }
-            HExprKind::Index { base, .. } => self.deref_target_mut(base),
+            HExprKind::Index { base, .. } => match &base.ty {
+                HType::RawPtr { mutable, .. } => *mutable,
+                _ => self.deref_target_mut(base),
+            },
             HExprKind::Unwrap { expr, .. } => match &expr.ty {
                 HType::Ptr { mutable, .. } => *mutable,
                 HType::RawPtr { mutable, .. } => *mutable,
@@ -1856,7 +1867,10 @@ impl<'a> TypeChecker<'a> {
                 let f = &self.sym.struct_info(sid).fields[*field];
                 base_mut && f.mut_payload
             }
-            HExprKind::Index { base, .. } => self.is_place_addr_mut(base),
+            HExprKind::Index { base, .. } => match &base.ty {
+                HType::RawPtr { mutable, .. } => *mutable,
+                _ => self.is_place_addr_mut(base),
+            },
             _ => false,
         }
     }
@@ -2084,6 +2098,31 @@ impl<'a> TypeChecker<'a> {
         let bh = self.check_expr(base, None);
         // Don't pre-coerce the index — it might be a different type for an overloaded Index.
         let ih_probe = self.check_expr(idx, None);
+        // A raw pointer used as a BUFFER: `p![i]` on `raw *T` (T not an aggregate)
+        // is C pointer indexing `p[i]` = `*(p + i)`.  `p!` already required
+        // `unsafe` (checked when `base` was type-checked) and the user vouches for
+        // provenance/bounds; here we index at an offset rather than dereference the
+        // single pointee.  A `raw *[N]T` instead unwraps to the array and takes the
+        // bounds-checked array path below, so only scalar/struct pointees land here.
+        if let HExprKind::Unwrap { expr, .. } = &bh.kind {
+            if let HType::RawPtr { inner, .. } = &expr.ty {
+                if !matches!(inner.as_ref(), HType::Array { .. } | HType::Vec { .. } | HType::Slice { .. }) {
+                    let elem_ty = (**inner).clone();
+                    let ih = if matches!(&ih_probe.ty, HType::SizedInt { signed: false, .. }) {
+                        ih_probe
+                    } else {
+                        self.coerce(ih_probe, &HType::Int)
+                    };
+                    // Base is the RAW POINTER itself (not the `!` deref), so codegen
+                    // emits `p[i]`; the mutability gate lives in the place checks.
+                    return HExpr {
+                        kind: HExprKind::Index { base: expr.clone(), idx: Box::new(ih) },
+                        ty: elem_ty,
+                        span: sp,
+                    };
+                }
+            }
+        }
         let elem_ty = match &bh.ty {
             HType::Array { elem, .. } => (**elem).clone(),
             HType::Slice { elem, .. } => (**elem).clone(),
@@ -2109,6 +2148,12 @@ impl<'a> TypeChecker<'a> {
                 }
                 _ => return self.try_index_overload_or_err(bh, ih_probe, sp),
             },
+            // A bare `raw *T` (no `!`): indexing it is a buffer access, but it needs
+            // the explicit non-null/unsafe vouch first, same as a `*T`.
+            HType::RawPtr { inner, .. } => {
+                self.err("dereference a `raw *T` with `!` before indexing (`p![i]`), inside `unsafe`", sp);
+                (**inner).clone()
+            }
             // A borrow of an array/vector/slice (`&[N]T`, `&[*]T`, `&[]T`) indexes
             // through to the element - e.g. a non-owning pointer to a stack array.
             HType::Ref { inner, .. } => match inner.as_ref() {

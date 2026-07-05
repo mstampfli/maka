@@ -122,6 +122,15 @@ memory.
 inside an `unsafe { }` block. It is what extern C functions are typically
 declared with when the C side controls the pointer's lifetime.
 
+**Indexing as a buffer.** A runtime-length `raw *T` (T a scalar or `#[repr(C)]`
+struct, not an aggregate) may be indexed with `p![i]`, which is C pointer indexing
+`*(p + i)` - so a Maka function can read and WRITE a caller-provided FFI buffer,
+the core encoder shape. The `!` marks the unsafe deref (index has no bounds check;
+the user vouches for length and provenance); a bare `p[i]` is rejected with a hint
+to write `p![i]`. Writing (`p![i] = v`) needs a mutable pointee, `raw *mut T`;
+`raw *const T` is read-only. A `raw *[N]T` instead keeps its bounds-checked array
+path (`p!` yields the `[N]T` array).
+
 #### Coercions
 
 | from | to | allowed? |
