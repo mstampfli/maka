@@ -252,6 +252,10 @@ fn run() {
         cc_args.push("-lws2_32".into());
         cc_args.push("-lwinmm".into());
         cc_args.push("-lsynchronization".into());
+        // winpthread provides pthreads + clock_gettime/nanosleep; the win32-threads
+        // mingw variant does not link it by default (posix-threads mingw does, where
+        // this is a harmless no-op).
+        cc_args.push("-lpthread".into());
     }
     cc_args.push("-o".into());
     ensure_parent_dir(&out_bin);

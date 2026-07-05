@@ -432,8 +432,15 @@ impl<'a> Cx<'a> {
         self.w("#include <winsock2.h>\n");
         self.w("#include <ws2tcpip.h>\n");
         self.w("#include <windows.h>\n");
+        // WIN32_LEAN_AND_MEAN drops the multimedia timer; pull it in explicitly
+        // for timeBeginPeriod (the runtime raises the timer resolution to 1 ms).
+        self.w("#include <timeapi.h>\n");
         self.w("#include <io.h>\n");
         self.w("#include <fcntl.h>\n");
+        // stat/fstat/struct stat used by the file helpers below (mingw provides
+        // these through <sys/stat.h>; MSVC maps them to _stat/_fstat).
+        self.w("#include <sys/types.h>\n");
+        self.w("#include <sys/stat.h>\n");
         self.w("#ifdef max\n#undef max\n#endif\n");
         self.w("#ifdef min\n#undef min\n#endif\n");
         self.w("typedef SSIZE_T ssize_t;\n");
@@ -5992,7 +5999,7 @@ impl<'a> Cx<'a> {
         self.w("    int s = socket(__MAKA_AF_INET, __MAKA_SOCK_STREAM, 0);\n");
         self.w("    if (s < 0) return -1;\n");
         self.w("    int one = 1;\n");
-        self.w("    setsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_REUSEADDR, &one, sizeof(one));\n");
+        self.w("    setsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_REUSEADDR, (char*)&one, sizeof(one));\n");
         self.w("    struct sockaddr_in sa; memset(&sa, 0, sizeof(sa)); __MAKA_SA_LEN_INIT(sa);\n");
         self.w("    sa.sin_family = __MAKA_AF_INET;\n");
         self.w("    sa.sin_addr.s_addr = htonl(__MAKA_INADDR_ANY);   /* 0.0.0.0 */\n");
@@ -6010,7 +6017,7 @@ impl<'a> Cx<'a> {
         self.w("    int s = socket(__MAKA_AF_INET, __MAKA_SOCK_STREAM, 0);\n");
         self.w("    if (s < 0) return -1;\n");
         self.w("    int one = 1;\n");
-        self.w("    setsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_REUSEADDR, &one, sizeof(one));\n");
+        self.w("    setsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_REUSEADDR, (char*)&one, sizeof(one));\n");
         self.w("    struct sockaddr_in sa; memset(&sa, 0, sizeof(sa)); __MAKA_SA_LEN_INIT(sa);\n");
         self.w("    sa.sin_family = __MAKA_AF_INET;\n");
         self.w("    sa.sin_addr.s_addr = htonl(__MAKA_INADDR_ANY);\n");
@@ -6065,7 +6072,7 @@ impl<'a> Cx<'a> {
         self.w("    if (errno == EINPROGRESS) {\n");
         self.w("        __maka_wait_fd(s, MAKA_EV_WRITE);\n");
         self.w("        int err = 0; __maka_socklen_t elen = sizeof(err);\n");
-        self.w("        getsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_ERROR, &err, &elen);\n");
+        self.w("        getsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_ERROR, (char*)&err, &elen);\n");
         self.w("        if (err == 0) return s;\n");
         self.w("        close(s); return -1;\n");
         self.w("    }\n");
@@ -6412,7 +6419,7 @@ impl<'a> Cx<'a> {
         self.w("    if (errno == EINPROGRESS) {\n");
         self.w("        __maka_wait_fd(s, MAKA_EV_WRITE);\n");
         self.w("        int err = 0; __maka_socklen_t elen = sizeof(err);\n");
-        self.w("        getsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_ERROR, &err, &elen);\n");
+        self.w("        getsockopt(s, __MAKA_SOL_SOCKET, __MAKA_SO_ERROR, (char*)&err, &elen);\n");
         self.w("        if (err == 0) return s;\n");
         self.w("    }\n");
         self.w("    close(s); return -1;\n");
