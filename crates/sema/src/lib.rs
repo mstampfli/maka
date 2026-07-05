@@ -417,9 +417,17 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                                 && hir::receiver_unify_with_sym(&h.receiver_pattern, &recv_concrete, &h.receiver_tyvars, &sym).is_none() {
                                 return false;
                             }
-                            if h.attr_args.len() != attr_args_concrete.len() { return false; }
-                            if !h.attr_args.iter().zip(attr_args_concrete.iter())
-                                .all(|(a, b)| typeck::type_eq(a, b)) { return false; }
+                            // A bound may omit trait type params that default to
+                            // `_` (Self) - e.g. `T has Add` against `int has Add`,
+                            // where the impl carries the defaulted `R = int`.  The
+                            // impl must have at least as many attr args as the
+                            // bound; each supplied one must match, and any extra
+                            // (defaulted) one must equal the receiver (Self).
+                            if h.attr_args.len() < attr_args_concrete.len() { return false; }
+                            if !h.attr_args.iter().enumerate().all(|(i, ha)| {
+                                let want = attr_args_concrete.get(i).unwrap_or(&recv_concrete);
+                                typeck::type_eq(ha, want)
+                            }) { return false; }
                             // The bound is part of the generic's contract: satisfy
                             // it if the impl is visible from the generic's DEFINING
                             // module (it knows its own impls - e.g. std's
@@ -1380,11 +1388,23 @@ fn rewrite_placeholders(f: &mut HFunc, mapping: &[u32]) {
 /// Decide whether a `has` impl is visible to a caller in module `from_module` with
 /// `caller_has_imports` declared.  Same-module impls are always visible; cross-module
 /// requires both `is_pub` AND an explicit `use Mod.Type.Attr;` in the caller's file.
+/// Type keys that name a primitive.  A `has` impl on one of these is inherent
+/// and universally visible - you can't meaningfully `use` (or fail to `use`) the
+/// `Add` impl for `int` the way you would for a user-defined type, and overlap
+/// rules keep it unique, so it is always in scope.
+fn is_primitive_type_key(k: &str) -> bool {
+    matches!(k,
+        "int" | "bool" | "char" | "string" | "float" | "unit"
+        | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
+        | "isize" | "usize" | "f32" | "f64")
+}
+
 fn has_impl_visible(
     h: &hir::HasImpl,
     from_module: &[String],
     caller_has_imports: &[maka_ast::HasImport],
 ) -> bool {
+    if h.is_pub && is_primitive_type_key(&h.type_key) { return true; }
     if h.module_path == from_module { return true; }
     if !h.is_pub { return false; }
     caller_has_imports.iter().any(|imp|

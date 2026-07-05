@@ -700,6 +700,22 @@ pub String has Add<string> {
     }
 }
 
+// Numeric primitives satisfy `Add` too, so generic code bounded by `where T has
+// Add` (e.g. `sum<T>`) works for `int`/`float`/sized ints & floats - not only for
+// user types.  Each body's `a + b` is the built-in numeric op (both operands are
+// numeric, even through the `&`, since is_numeric peels references), so it does
+// NOT dispatch back into this impl - no recursion.
+pub int   has Add { int   add(&int a,   &int b)   { return a + b; } }
+pub float has Add { float add(&float a, &float b) { return a + b; } }
+pub i8    has Add { i8    add(&i8 a,    &i8 b)    { return a + b; } }
+pub i16   has Add { i16   add(&i16 a,   &i16 b)   { return a + b; } }
+pub i32   has Add { i32   add(&i32 a,   &i32 b)   { return a + b; } }
+pub i64   has Add { i64   add(&i64 a,   &i64 b)   { return a + b; } }
+pub u8    has Add { u8    add(&u8 a,    &u8 b)    { return a + b; } }
+pub u16   has Add { u16   add(&u16 a,   &u16 b)   { return a + b; } }
+pub u32   has Add { u32   add(&u32 a,   &u32 b)   { return a + b; } }
+pub u64   has Add { u64   add(&u64 a,   &u64 b)   { return a + b; } }
+
 // `a == b` (and `a.eq(&b)`) -> true if the two Strings hold the same bytes.
 pub String has Eq {
     bool eq(&String a, &String b) { return str_eq(a.as_str(), b.as_str()); }

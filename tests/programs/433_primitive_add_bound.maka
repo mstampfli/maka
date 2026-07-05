@@ -1,0 +1,15 @@
+// Numeric primitives satisfy the `Add` attr, so a generic bounded by
+// `where T has Add` works for `int`/`float`/sized ints too (not only user types),
+// with no `use` ceremony - the primitive impls are inherent and universally visible.
+import std.{Vec, push, Add};
+pub T sum<T>(&Vec<T> v, T zero) where T has Add {
+    mut T acc = zero;
+    for (T x in v) { acc = acc + x; }
+    return acc;
+}
+unit main() {
+    Vec<int> a = []; push(a, 3); push(a, 4); push(a, 5);
+    log(sum(&a, 0));             // 12
+    Vec<i32> b = []; push(b, 1 as i32); push(b, 2 as i32);
+    log(sum(&b, 0 as i32) as int);   // 3  (sized int satisfies Add too)
+}
