@@ -1,0 +1,10 @@
+// A payload-less enum variant is a valid field default (`= Order.Idle`), so a
+// struct literal may omit the field - previously only literal defaults registered.
+enum Order { Idle, Move, Attack }
+data Army { mut Order order = Order.Attack; int size; }
+unit main() {
+    Army a = Army { size = 10 };                       // omit order -> Attack (2)
+    log(a.order as int); log(a.size);                  // 2, 10
+    Army b = Army { order = Order.Move, size = 3 };    // explicit override
+    log(b.order as int); log(b.size);                  // 1, 3
+}

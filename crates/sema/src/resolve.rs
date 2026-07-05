@@ -42,7 +42,7 @@ fn rust_type_string(t: &ast::Type) -> String {
 /// spliced in when a struct literal omits the field.  Supports literal defaults
 /// (and a negated numeric literal); anything more complex is left as `None`
 /// (the field then has no usable default and must be supplied explicitly).
-fn lower_field_default(d: Option<&ast::Expr>, ty: &HType) -> Option<HExpr> {
+fn lower_field_default(d: Option<&ast::Expr>, ty: &HType, sym: &SymTab) -> Option<HExpr> {
     fn lit_kind(l: &ast::Lit) -> Option<HExprKind> {
         Some(match l {
             ast::Lit::Int(n) => HExprKind::LitInt(*n),
@@ -61,6 +61,25 @@ fn lower_field_default(d: Option<&ast::Expr>, ty: &HType) -> Option<HExpr> {
             ast::Expr::Lit(ast::Lit::Float(x), _) => (HExprKind::LitFloat(-*x), *span),
             _ => return None,
         },
+        // A payload-less enum variant `Enum.Variant` (e.g. `Order.Idle`) is a valid
+        // constant default - resolve it to the EnumVariant so a struct literal may
+        // omit the field, same as a literal default.
+        ast::Expr::Field { base, name, span } => {
+            if let ast::Expr::Ident(enum_name, _) = base.as_ref() {
+                if let Some((eid, info)) = sym.enum_by_name(enum_name) {
+                    if let Some(vi) = info.variant_index(name) {
+                        if info.variants[vi].fields.is_empty() {
+                            return Some(HExpr {
+                                kind: HExprKind::EnumVariant(eid, vi),
+                                ty: ty.clone(),
+                                span: *span,
+                            });
+                        }
+                    }
+                }
+            }
+            return None;
+        }
         _ => return None,
     };
     Some(HExpr { kind, ty: ty.clone(), span })
@@ -760,8 +779,9 @@ impl SymTab {
                     // Slices must be initialized at construction.
                     // Embed fields pass mutability through to their inner struct.
                     let mut_payload = if f.is_embed { true } else { matches!(f.mutness, Mutness::Mut) };
-                    // Lower a literal default so struct literals may omit the field.
-                    let default = lower_field_default(f.default.as_ref(), &ty);
+                    // Lower a literal / payload-less-enum-variant default so struct
+                    // literals may omit the field.
+                    let default = lower_field_default(f.default.as_ref(), &ty, &sym);
                     fields.push(FieldInfo {
                         name: f.name.clone(),
                         ty,
