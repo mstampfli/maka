@@ -305,10 +305,12 @@ Standard infix and unary operators with conventional precedence. Maka-specific:
   - **Numeric / primitive** (`int → float`, `MyEnum → int`, `int → char`,
     sized ↔ unsized): plain conversion, no runtime check.  `int → char`
     truncates to the low 8 bits (C semantics — same as `(unsigned char)x`).
-  - **`int → Enum`**: runtime bounds-checked against the variant count.
-    Same shape as `arr[i]` — panics on out-of-range with
-    `\`int as <Enum>\`: tag out of range`.  Result is the `Enum` value
-    itself (no `*`, no nullable wrapper).
+  - **`int → Enum`** (value cast, C-style enum only): runtime bounds-checked
+    against the variant count.  Same shape as `arr[i]` — panics on
+    out-of-range with `\`int as <Enum>\`: tag out of range`.  Result is the
+    `Enum` value itself (no `*`, no nullable wrapper).  A payload-carrying
+    enum (a `{ tag; union }` struct) has no integer representation, so this
+    cast is rejected — build a variant with an `Enum_from(int)` `match` mapper.
   - **`*T → *U`** (between `data` structs): allowed in safe code iff `U`'s
     field list is a structural prefix of `T`'s — same names, same types,
     same order, identical offsets.  See §6.6.  Otherwise must be inside
@@ -319,6 +321,11 @@ Standard infix and unary operators with conventional precedence. Maka-specific:
     The "pointer is the nullable carrier" convention.
   - **`*Enum → *int`**: unconditional reinterpret.  Every enum variant
     has a valid `int` representation, so no check is required.
+  - **`int → *Enum`** (and `int → *T` generally): synthesizes an arbitrary
+    pointer from the integer as an address — UNSAFE, unchecked, no tag peek;
+    requires an `unsafe { ... }` block (§6.5).  Fallibility is NOT available
+    here — that is the `*int → *Enum` form above.  So: `int → *Enum` builds a
+    pointer (unsafe); `*int → *Enum` tag-checks an existing pointer (nullable).
   - **`Vec<some X> → *Vec<T>`**: witness-checked existential downcast (§2.5).
     Yields a `*Vec<T>` aliasing the column iff its hidden type is `T`, else
     `null` — fallibility rides in the `*`, no panic.
