@@ -191,7 +191,11 @@ pub fn finish(
             .join("rust")
             .join("_shared_target");
         let profile_dir = if opts.profile == "dev" { "debug" } else { "release" };
-        let staticlib_path = shared_target_root
+        // With an explicit --target (Windows, see sidecar_target_triple), cargo
+        // nests artifacts under `<target>/<profile>/`; match that here.
+        let mut staticlib_path = shared_target_root.clone();
+        if let Some(t) = sidecar_target_triple() { staticlib_path = staticlib_path.join(t); }
+        let staticlib_path = staticlib_path
             .join(profile_dir)
             .join(format!("lib{}.a", crate_name));
         let built_marker = sidecar_dir.join(".built");
@@ -401,6 +405,13 @@ fn build_sidecar_with_probes(
     if !verbose {
         cargo_args.push("--quiet");
     }
+    // On Windows the sidecar must match the mingw gcc the driver links with, so
+    // build it for the gnu ABI rather than the default MSVC ABI (whose `.lib`
+    // the mingw linker can neither find by name nor consume).
+    if let Some(t) = sidecar_target_triple() {
+        cargo_args.push("--target");
+        cargo_args.push(t);
+    }
     let mut cmd = Command::new("cargo");
     cmd.current_dir(dir)
         .env("CARGO_TARGET_DIR", &shared_target)
@@ -413,9 +424,17 @@ fn build_sidecar_with_probes(
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
+        let hint = if sidecar_target_triple().is_some()
+            && (stderr.contains("windows-gnu") || stderr.contains("target may not be installed"))
+        {
+            "\nhint: rblock sidecars build for the gnu ABI on Windows; run `rustup target add x86_64-pc-windows-gnu` once."
+        } else {
+            ""
+        };
         return Err(format!(
-            "cargo build failed for rblock sidecar at {}\n--- stderr ---\n{}\n--- stdout ---\n{}",
+            "cargo build failed for rblock sidecar at {}{}\n--- stderr ---\n{}\n--- stdout ---\n{}",
             dir.display(),
+            hint,
             stderr,
             stdout
         ));
@@ -1228,6 +1247,17 @@ fn enum_is_c_style(variants: &[RustVariant]) -> bool {
 
 /// The mangled name used for the enum's `#[repr(C)]` ABI mirror and payload types.
 fn enum_c_name(name: &str) -> String { format!("__MakaEnum_{}", sanitise(name)) }
+
+/// The Rust target triple the sidecar staticlib must be built for.  On Windows
+/// the driver's final link uses mingw gcc, so the sidecar must be gnu-ABI
+/// (`libNAME.a`) rather than the default MSVC `NAME.lib` (which the mingw linker
+/// can neither locate by name nor consume across the CRT boundary).  On every
+/// other host the default target is correct.  Requires a one-time
+/// `rustup target add x86_64-pc-windows-gnu` on Windows.
+fn sidecar_target_triple() -> Option<&'static str> {
+    #[cfg(windows)] { Some("x86_64-pc-windows-gnu") }
+    #[cfg(not(windows))] { None }
+}
 
 /// The Rust ABI type a mirrored enum crosses as: a bare `i64` discriminant for a
 /// C-style (all-unit) enum, else the `{ tag; union }` `#[repr(C)]` struct.
