@@ -1,0 +1,8 @@
+// Calling a trait method without the trait in scope is rejected - and the
+// diagnostic must point at the TRAIT (`import std.StringOps;`), not suggest
+// importing the method name as a free function.
+import std.{String, string_new};
+unit main() {
+    mut String s = string_new();
+    s.push_str("hi");   // StringOps not in scope
+}

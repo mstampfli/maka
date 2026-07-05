@@ -4190,17 +4190,23 @@ impl<'a> TypeChecker<'a> {
                         )
                     );
                     if !imported && !authorized_by_use && !authorized_by_attr_import {
-                        self.err(
+                        let modpath = if callee_sig.module_path.is_empty() { "<root>".to_string() } else { callee_sig.module_path.join(".") };
+                        let curmod = if self.cur_module.is_empty() { "<root>".to_string() } else { self.cur_module.join(".") };
+                        // A trait method resolves once its TRAIT is in scope - you
+                        // don't import each method by name.  Point at that instead of
+                        // the (misleading) free-function import form.
+                        let msg = if let Some(attr) = &callee_sig.logic {
+                            format!(
+                                "`{}` is a method of trait `{}` in module `{}`; bring the trait into scope to call it from `{}` - `import {}.{};` (or `use {}.<Type>.{};`)",
+                                callee_sig.name, attr, modpath, curmod, modpath, attr, modpath, attr,
+                            )
+                        } else {
                             format!(
                                 "`{}` is in module `{}` and must be imported (`import {}.{};`) to call from `{}`",
-                                callee_sig.name,
-                                if callee_sig.module_path.is_empty() { "<root>".to_string() } else { callee_sig.module_path.join(".") },
-                                if callee_sig.module_path.is_empty() { "<root>".to_string() } else { callee_sig.module_path.join(".") },
-                                callee_sig.name,
-                                if self.cur_module.is_empty() { "<root>".to_string() } else { self.cur_module.join(".") },
-                            ),
-                            sp,
-                        );
+                                callee_sig.name, modpath, modpath, callee_sig.name, curmod,
+                            )
+                        };
+                        self.err(msg, sp);
                     }
                 }
             }
