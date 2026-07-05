@@ -279,8 +279,26 @@ fn run() {
     }
 
     if run {
-        let exec = if out_bin.starts_with('/') || out_bin.starts_with("./") { out_bin.clone() } else { format!("./{}", out_bin) };
-        let st = Command::new(&exec).status().expect("run failed");
+        // A bare filename (no directory component, not absolute) must be launched
+        // as `./name` so it resolves in the cwd rather than via a PATH lookup.  An
+        // absolute path (`/x`, `C:\x`, `\\?\x`) or one that already has a directory
+        // component is used as-is: prefixing `./` there produces a malformed path
+        // (e.g. `./C:\...`), which Windows rejects with ERROR_INVALID_NAME (123).
+        let p = std::path::Path::new(&out_bin);
+        let exec: PathBuf = if p.is_absolute()
+            || p.parent().map_or(false, |par| !par.as_os_str().is_empty())
+        {
+            p.to_path_buf()
+        } else {
+            std::path::Path::new(".").join(p)
+        };
+        let st = match Command::new(&exec).status() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("cannot run `{}`: {}", exec.display(), e);
+                std::process::exit(1);
+            }
+        };
         // A child killed by a signal (e.g. a Rust panic aborting across the C ABI)
         // has code()==None; report it as 128+signal like a shell, not a masked 0.
         #[cfg(unix)]
