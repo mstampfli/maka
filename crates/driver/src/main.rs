@@ -211,7 +211,11 @@ fn run() {
     let out_bin = output.clone().unwrap_or_else(|| stem.clone());
 
     if emit_c {
-        std::fs::write(&out_c, &c_code).expect("write C");
+        ensure_parent_dir(&out_c);
+        if let Err(e) = std::fs::write(&out_c, &c_code) {
+            eprintln!("cannot write `{}`: {}", out_c, e);
+            std::process::exit(1);
+        }
         if !run {
             return;
         }
@@ -240,6 +244,7 @@ fn run() {
     // real libm call rather than an inlined builtin.  Harmless when unused.
     cc_args.push("-lm".into());
     cc_args.push("-o".into());
+    ensure_parent_dir(&out_bin);
     cc_args.push(out_bin.clone());
     let status = Command::new(&cc)
         .args(&cc_args)
@@ -263,5 +268,19 @@ fn run() {
         #[cfg(not(unix))]
         let code = st.code().unwrap_or(1);
         std::process::exit(code);
+    }
+}
+
+/// Create the parent directory of an output path if it does not exist, so
+/// `-o build/out.c` / `-o dist/app` works without a manual `mkdir` (and fails
+/// with a clear message instead of a raw `Os { code: 2/3 }` panic).
+fn ensure_parent_dir(path: &str) {
+    if let Some(parent) = PathBuf::from(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("cannot create output directory `{}`: {}", parent.display(), e);
+                std::process::exit(1);
+            }
+        }
     }
 }
