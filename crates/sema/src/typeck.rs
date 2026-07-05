@@ -2563,6 +2563,28 @@ impl<'a> TypeChecker<'a> {
                 };
             }
         }
+        // Built-in float bit-reinterpret casts for exact (bit-for-bit) float
+        // serialization: `f32_bits(f32)->int` (the IEEE-754 bits, zero-extended),
+        // `bits_f32(int)->f32`, `f64_bits(float)->int`, `bits_f64(int)->float`.
+        // These are value-preserving bit copies (memcpy), NOT numeric conversions.
+        if matches!(name.as_str(), "f32_bits" | "bits_f32" | "f64_bits" | "bits_f64") && qualifier.is_none() {
+            if args.len() != 1 {
+                self.err(format!("{} expects exactly one argument", name), sp);
+                return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
+            }
+            let (callee, in_ty, ret) = match name.as_str() {
+                "f32_bits" => (u32::MAX - 65, HType::SizedFloat { bits: 32 }, HType::Int),
+                "bits_f32" => (u32::MAX - 66, HType::Int, HType::SizedFloat { bits: 32 }),
+                "f64_bits" => (u32::MAX - 67, HType::Float, HType::Int),
+                _          => (u32::MAX - 68, HType::Int, HType::Float), // bits_f64
+            };
+            let arg = self.check_expr_coerce(&args[0], &in_ty);
+            return HExpr {
+                kind: HExprKind::Call { callee: FuncId(callee), args: vec![arg] },
+                ty: ret,
+                span: sp,
+            };
+        }
         // Built-in `free` — manual deallocation for non-owning `*T`.  Owning types
         // (`own *T`, `own &T`) are auto-freed at scope exit; calling free() on them
         // would double-free.

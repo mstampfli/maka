@@ -1,0 +1,14 @@
+// Float bit-reinterpret builtins for exact (bit-for-bit) serialization:
+// f32_bits(f32)->int, bits_f32(int)->f32, f64_bits(float)->int, bits_f64(int)->float.
+// Value-preserving bit copies (not numeric conversions), so round-trips are exact.
+unit main() {
+    f32 x = 1.5 as f32;
+    int b = f32_bits(x);
+    log(b);                          // 1069547520  (0x3FC00000)
+    log((bits_f32(b) as float) as int);   // 1
+    log(f32_bits(bits_f32(b)));      // 1069547520  (exact round-trip)
+
+    float d = 2.0;
+    log(f64_bits(d));                // 4611686018427387904 (0x4000000000000000)
+    log(bits_f64(f64_bits(d)) as int);    // 2  (exact round-trip)
+}

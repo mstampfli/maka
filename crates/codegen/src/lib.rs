@@ -9427,6 +9427,22 @@ impl<'a> Cx<'a> {
             }
             return "NULL".into();
         }
+        // Built-in float bit-reinterprets (memcpy, no strict-aliasing UB): exact
+        // IEEE-754 bits in/out for serialization.
+        if (u32::MAX - 68..=u32::MAX - 65).contains(&callee.0) {
+            let s = args.first().map(|a| self.emit_sub(f, a)).unwrap_or_else(|| "0".into());
+            let body = match callee.0 {
+                x if x == u32::MAX - 65 => // f32_bits(f32) -> int
+                    format!("float __f = (float)({s}); uint32_t __u; memcpy(&__u, &__f, 4); (maka_int)__u;", s = s),
+                x if x == u32::MAX - 66 => // bits_f32(int) -> f32
+                    format!("uint32_t __u = (uint32_t)({s}); float __f; memcpy(&__f, &__u, 4); __f;", s = s),
+                x if x == u32::MAX - 67 => // f64_bits(float) -> int
+                    format!("double __d = ({s}); int64_t __i; memcpy(&__i, &__d, 8); (maka_int)__i;", s = s),
+                _ => // bits_f64(int) -> float
+                    format!("int64_t __i = ({s}); double __d; memcpy(&__d, &__i, 8); __d;", s = s),
+            };
+            return format!("(__extension__ ({{ {} }}))", body);
+        }
         // Built-in `panic(msg)`.
         if callee.0 == u32::MAX - 2 {
             if let Some(a) = args.first() {

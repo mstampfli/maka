@@ -91,6 +91,11 @@ associated-type paths like `T::Slot` — see §10.5).
 `int` and the sized integers (`i32`, `u8`, etc.) are **distinct types**.
 Implicit conversion between them is forbidden; use `as` to convert.
 
+For exact (bit-for-bit) float serialization, the builtins `f32_bits(f32) -> int`,
+`bits_f32(int) -> f32`, `f64_bits(float) -> int`, and `bits_f64(int) -> float`
+reinterpret the IEEE-754 bits (a value-preserving `memcpy`, NOT a numeric `as`
+conversion) - `f32_bits` zero-extends the 32 bits into an `int`.
+
 `char` and `u8` are the same byte type - they alias.
 
 ### 2.2 Pointers and references
