@@ -4479,7 +4479,21 @@ impl<'a> TypeChecker<'a> {
                 // variant count, panics on out-of-range (same shape as
                 // array indexing).  Result is the Enum value itself, NOT
                 // a nullable pointer.
-                (Int, Enum(_)) | (SizedInt { .. }, Enum(_)) => CastKind::IntToEnumChecked,
+                (Int, Enum(eid)) | (SizedInt { .. }, Enum(eid)) => {
+                    // Only a C-style (all-unit) enum has an integer representation.
+                    // A payload-carrying enum is a `{ tag; union }` struct, so an
+                    // `int as Enum` there emits an invalid non-scalar conversion in
+                    // C - reject it cleanly and point at the mapper idiom.
+                    if self.sym.enum_info(*eid).is_simple() {
+                        CastKind::IntToEnumChecked
+                    } else {
+                        let name = self.sym.enum_info(*eid).name.clone();
+                        self.err(format!(
+                            "cannot cast `int` to `{n}`: it is a payload-carrying enum, not a C-style tag enum - only all-unit enums have an integer tag. Build a variant from a tag with a `match` mapper (e.g. `{n}_from(int)`).",
+                            n = name), sp);
+                        CastKind::IntToEnumChecked
+                    }
+                }
                 (Char, Int) | (Int, Char) => CastKind::CharIntInt,
                 (Char, SizedInt { .. }) | (SizedInt { .. }, Char) => CastKind::CharIntInt,
                 // Reinterpret cast.  Three flavors:

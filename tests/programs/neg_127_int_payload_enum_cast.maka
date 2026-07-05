@@ -1,0 +1,5 @@
+// `int as Enum` is only valid for a C-style (all-unit) enum; a payload-carrying
+// enum is a `{ tag; union }` struct with no integer representation, so the cast
+// is rejected (previously a cryptic C "non-scalar conversion").
+enum Biome { Forest, Desert { int level }, Ocean }
+unit main() { int bt = 1; unsafe { Biome b = bt as Biome; log(b.tag); } }

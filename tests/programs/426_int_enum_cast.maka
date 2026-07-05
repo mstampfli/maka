@@ -1,0 +1,14 @@
+// A C-style (all-unit) enum has an integer tag: `enum as int` is direct, and
+// `int as Enum` is a runtime bounds-CHECKED tag cast (panics on out-of-range,
+// never synthesizes a pointer). The idiom for deserializing tags safely.
+enum Biome { Forest, Desert, Ocean }
+unit main() {
+    Biome b = Biome.Desert;
+    int t = b as int;              // 1
+    log(t);
+    unsafe {
+        Biome r = t as Biome;      // checked: 1 is in [0,3) -> Desert
+        log(r as int);             // 1
+    }
+    log((2 as Biome) as int);      // 2 (Ocean), round-trips
+}
