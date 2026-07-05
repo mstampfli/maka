@@ -210,16 +210,18 @@ the call boundary:
 | `Option<T>`         | `__MakaOpt_T`     | `#[repr(C)] { tag: i64, value: T }` mirrored as a Maka data decl |
 | `Result<T, E>`      | `__MakaRes_T_E`   | `#[repr(C)] { tag: i64, ok: T, err: E }`             |
 | `Vec<T>`            | `__MakaVec_T`     | `#[repr(C)] { ptr: *mut T, len: usize, cap: usize }`, copied to `libc::malloc`'d buffer |
+| `(A, B, ...)`       | `__MakaTup_A_B`   | `#[repr(C)] { f0: A, f1: B, ... }`; crosses by value both ways |
 
-For `Option<T>`, `Result<T,E>`, and `Vec<T>`, the bridge generates one
-`#[repr(C)]` Rust struct per unique element-type tuple **and** one
+For `Option<T>`, `Result<T,E>`, `Vec<T>`, and tuples, the bridge generates one
+`#[repr(C)]` Rust struct per unique element-type list **and** one
 matching Maka `data` decl with the same field layout.  The user reads
-the tagged-union fields directly (`.tag`, `.value`, `.ok`, `.err`,
-`.ptr`, `.len`).
+the tagged-union / tuple fields directly (`.tag`, `.value`, `.ok`, `.err`,
+`.ptr`, `.len`, `.f0`, `.f1`).  A tuple crosses in both directions: as a
+return, read `.fN`; as a parameter, build the `__MakaTup_...` struct literal.
 
-The inner `T`/`E` must be a primitive or a `#[repr(C)]` struct for the
-typed shim to kick in.  If it isn't, the container falls back to an
-opaque `Rust<T>` handle (§3.3).
+The inner `T`/`E` (and every tuple element) must be a primitive or a
+`#[repr(C)]` struct for the typed shim to kick in.  If it isn't, the container
+falls back to an opaque `Rust<T>` handle (§3.3).
 
 ### 3.3 Opaque handles
 

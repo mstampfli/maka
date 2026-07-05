@@ -1,0 +1,21 @@
+// Rust tuple marshalling: a non-empty `(A, B, ...)` in an rblock signature is
+// mirrored as a `#[repr(C)]` struct with fields `f0`, `f1`, ... and a matching
+// Maka `data __MakaTup_...`, so tuples cross by value in BOTH directions - as a
+// return (read `.fN`) and as a parameter (build the struct literal). Elements
+// must be scalars / bool / #[repr(C)] structs, like Option/Result/Vec inners.
+rblock "
+    pub fn divmod(a: i64, b: i64) -> (i64, i64) { (a / b, a % b) }
+    pub fn scale(p: (i64, f64)) -> f64 { p.0 as f64 * p.1 }
+    pub fn triple() -> (i64, i64, i64) { (10, 20, 30) }
+";
+
+unit main() {
+    __MakaTup_i64_i64 q = divmod(17, 5);
+    log(q.f0);   // 3
+    log(q.f1);   // 2
+    // tuple as a PARAMETER: the f64 element survives (not truncated to int)
+    log(scale(__MakaTup_i64_f64 { f0 = 3, f1 = 2.5 }));   // 7.5
+    // a 3-tuple return
+    __MakaTup_i64_i64_i64 t = triple();
+    log(t.f0 + t.f1 + t.f2);   // 60
+}

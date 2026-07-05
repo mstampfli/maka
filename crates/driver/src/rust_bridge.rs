@@ -222,6 +222,7 @@ fn collect_opaque_names(ty: &RustType, out: &mut Vec<String>) {
             collect_opaque_names(ok, out);
             collect_opaque_names(err, out);
         }
+        RustType::Tuple(elems) => for e in elems { collect_opaque_names(e, out); },
         _ => {}
     }
 }
@@ -508,6 +509,8 @@ fn rust_marshal_in_ty(ty: &RustType) -> String {
         RustType::VecOf(inner) => format!("__MakaVec_{}", sanitise(&rust_name_of(inner))),
         RustType::CFnPtr { params, ret } => format!("extern \"C\" fn({}) -> {}",
             params.iter().map(rust_marshal_in_ty).collect::<Vec<_>>().join(", "), rust_marshal_out_ty(ret)),
+        RustType::Tuple(elems) => format!("__MakaTup_{}",
+            tuple_label(&elems.iter().map(rust_name_of).collect::<Vec<_>>())),
     }
 }
 
@@ -536,6 +539,8 @@ fn rust_marshal_out_ty(ty: &RustType) -> String {
         RustType::VecOf(inner) => format!("__MakaVec_{}", sanitise(&rust_name_of(inner))),
         RustType::CFnPtr { params, ret } => format!("extern \"C\" fn({}) -> {}",
             params.iter().map(rust_marshal_in_ty).collect::<Vec<_>>().join(", "), rust_marshal_out_ty(ret)),
+        RustType::Tuple(elems) => format!("__MakaTup_{}",
+            tuple_label(&elems.iter().map(rust_name_of).collect::<Vec<_>>())),
     }
 }
 
@@ -639,6 +644,13 @@ fn unmarshal_in(name: &str, ty: &RustType) -> (String, String) {
         }
         // A C callback (bare fn pointer) crosses the ABI unchanged.
         RustType::CFnPtr { .. } => ("".into(), name.to_string()),
+        // Inbound tuple: rebuild the Rust tuple from the struct's `fN` fields.
+        RustType::Tuple(elems) => {
+            let vals: Vec<String> = elems.iter().enumerate()
+                .map(|(i, e)| format!("{}.f{} as {}", name, i, rust_name_of(e)))
+                .collect();
+            (format!("let {n} = ({vals});", n = name, vals = vals.join(", ")), name.to_string())
+        }
     }
 }
 
@@ -714,6 +726,14 @@ fn marshal_out(value: &str, ty: &RustType) -> String {
                 lbl = lbl,
                 ty = inner_ty
             )
+        }
+        RustType::Tuple(elems) => {
+            let names: Vec<String> = elems.iter().map(rust_name_of).collect();
+            let inits: String = elems.iter().enumerate()
+                .map(|(i, e)| format!("f{}: __t.{} as {}, ", i, i, rust_name_of(e)))
+                .collect();
+            format!("{{ let __t = {v}; __MakaTup_{lbl} {{ {inits}}} }}",
+                v = value, lbl = tuple_label(&names), inits = inits)
         }
     }
 }
@@ -859,6 +879,10 @@ fn rust_to_maka_ty(ty: &RustType, sp: Span, is_return: bool) -> Type {
             format!("__MakaVec_{}", sanitise(&rust_name_of(inner))),
             sp,
         ),
+        RustType::Tuple(elems) => Type::Named(
+            format!("__MakaTup_{}", tuple_label(&elems.iter().map(rust_name_of).collect::<Vec<_>>())),
+            sp,
+        ),
     }
 }
 
@@ -967,6 +991,10 @@ enum RustType {
     /// `extern "C" fn(A, B) -> R` — a bare C function pointer (callback).
     /// Mirrors to a Maka fn-pointer type; a named Maka function is passed for it.
     CFnPtr { params: Vec<RustType>, ret: Box<RustType> },
+    /// A non-empty tuple `(A, B, ...)` — mirrored as a `#[repr(C)]` struct with
+    /// fields `f0`, `f1`, ... and a matching Maka `data`, like `Option`/`Result`.
+    /// Elements must be scalars / `bool` / `#[repr(C)]` structs.
+    Tuple(Vec<RustType>),
 }
 
 /// A field type whose Maka mirror has the SAME layout as the Rust type, so it is
@@ -1249,6 +1277,20 @@ fn map_syn_type(
 ) -> Result<RustType, String> {
     match t {
         syn::Type::Tuple(tt) if tt.elems.is_empty() => Ok(RustType::Unit),
+        // A non-empty tuple `(A, B, ...)` mirrors to a `#[repr(C)]` struct, but
+        // only when every element is a scalar/bool/repr-C type; otherwise it
+        // falls back to an opaque handle (same rule as Option/Result/Vec inners).
+        syn::Type::Tuple(tt) => {
+            let mut elems = Vec::with_capacity(tt.elems.len());
+            for e in &tt.elems { elems.push(map_syn_type(e, known_repr_c)?); }
+            if elems.iter().all(marshallable_in_container) {
+                Ok(RustType::Tuple(elems))
+            } else {
+                let mut s = String::new();
+                write_syn_type(t, &mut s);
+                Ok(RustType::Opaque(s))
+            }
+        }
         // `extern "C" fn(A, B) -> R` — a bare C callback the Maka side supplies a
         // function for.  Recursively map the argument and return types.
         syn::Type::BareFn(bf) => {
@@ -1478,6 +1520,15 @@ enum ContainerInst {
     Result(String, String),
     /// `Vec<T>`.
     Vec(String),
+    /// A non-empty tuple `(A, B, ...)` — one `#[repr(C)]` struct per element list.
+    Tuple(Vec<String>),
+}
+
+/// Struct/data name suffix for a tuple shape: sanitised element names joined by
+/// `_` (e.g. `(i64, f64)` -> `i64_f64`).  One source of truth for both the Rust
+/// `#[repr(C)]` struct and the mirrored Maka `data`, so their names always agree.
+fn tuple_label(elems: &[String]) -> String {
+    elems.iter().map(|e| sanitise(e)).collect::<Vec<_>>().join("_")
 }
 
 /// Walk the surface and collect every container shape we need to define a
@@ -1509,6 +1560,10 @@ fn push_container(ty: &RustType, out: &mut std::collections::BTreeSet<ContainerI
             out.insert(ContainerInst::Vec(rust_name_of(inner)));
             push_container(inner, out);
         }
+        RustType::Tuple(elems) => {
+            out.insert(ContainerInst::Tuple(elems.iter().map(rust_name_of).collect()));
+            for e in elems { push_container(e, out); }
+        }
         _ => {}
     }
 }
@@ -1522,6 +1577,8 @@ fn rust_name_of(ty: &RustType) -> String {
         RustType::StrSlice => "&str".to_string(),
         RustType::OwnedString => "String".to_string(),
         RustType::ReprC(n) => n.clone(),
+        RustType::Tuple(elems) => format!("({})",
+            elems.iter().map(rust_name_of).collect::<Vec<_>>().join(", ")),
         _ => "u64".to_string(),
     }
 }
@@ -1558,6 +1615,13 @@ fn emit_container_struct(c: &ContainerInst) -> String {
             t = t,
             lbl = sanitise(t),
         ),
+        ContainerInst::Tuple(elems) => {
+            let fields: String = elems.iter().enumerate()
+                .map(|(i, t)| format!("pub f{}: {}, ", i, t))
+                .collect();
+            format!("#[repr(C)] pub struct __MakaTup_{lbl} {{ {fields}}}\n",
+                lbl = tuple_label(elems), fields = fields)
+        }
     }
 }
 
@@ -1623,6 +1687,12 @@ fn build_container_data_decls(insts: &[ContainerInst]) -> Vec<DataDecl> {
                     ],
                 )
             }
+            ContainerInst::Tuple(elems) => (
+                format!("__MakaTup_{}", tuple_label(elems)),
+                elems.iter().enumerate()
+                    .map(|(i, t)| (format!("f{}", i), rust_name_to_maka_ty(t, sp)))
+                    .collect(),
+            ),
         };
         let fields = fields
             .into_iter()
