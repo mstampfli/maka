@@ -1,0 +1,7 @@
+// A mutable borrow through a `raw *const T` deref is still rejected - the pointee
+// is immutable, so `&mut p!` must fail even inside unsafe (only `raw *mut T`).
+data Sim { mut int hour; }
+unit bump(&mut Sim s) { s.hour = s.hour + 1; }
+unit main() {
+    unsafe { raw *const Sim s = alloc Sim { hour = 0 }; bump(&mut s!); }
+}

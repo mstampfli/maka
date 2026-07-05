@@ -1857,7 +1857,16 @@ impl<'a> TypeChecker<'a> {
                     _ => li.mut_payload,
                 }
             }
-            HExprKind::Unwrap { expr, .. } => matches!(expr.ty, HType::Ptr { mutable: true, .. }),
+            // `&mut p!` through a mutable pointer deref is a mutable place, for
+            // every mutable pointer kind - not just `*mut T`.  A `raw *mut T` /
+            // `own *mut T` deref already required `unsafe` / non-null, and direct
+            // assignment `p!.field = v` is allowed through them, so a mutable
+            // borrow must be too (same rule as diagnose_place_target /
+            // deref_target_mut, which this arm was inconsistent with).
+            HExprKind::Unwrap { expr, .. } => matches!(&expr.ty,
+                HType::Ptr { mutable: true, .. }
+                | HType::RawPtr { mutable: true, .. }
+                | HType::OwnPtr { mutable: true, .. }),
             HExprKind::Field { base, field } => {
                 let base_mut = self.is_place_addr_mut(base);
                 let sid = match struct_id_of(&base.ty) {

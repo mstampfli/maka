@@ -1,0 +1,23 @@
+// A mutable borrow through a mutable-pointer deref (`&mut p!`, `&mut p!.field`)
+// is a mutable place for every mutable pointer kind - `*mut T`, `raw *mut T`,
+// `own *mut T` - matching direct assignment `p!.field = v`. This is the core
+// FFI-state shape: a `raw *mut T` global reached by export entry points that
+// hand the engine's `&mut`-parameter functions a borrow, with no C trampoline.
+data W   { mut int x; }
+data Sim { mut int hour; mut W w; }
+
+unit sim_hour(&mut Sim s) { s.hour = s.hour + 1; }   // engine on &mut params
+unit mark(&mut W w, int i) { w.x = w.x + i; }
+
+unit main() {
+    unsafe {
+        raw *mut Sim s = alloc Sim { hour = 0, w = W { x = 100 } };
+        s!.hour = 5;             // direct assignment through the raw deref
+        sim_hour(&mut s!);       // &mut p!        -> 6
+        sim_hour(&mut s!);       // again          -> 7
+        mark(&mut s!.w, 11);     // &mut p!.field  -> 111
+        log(s!.hour);            // 7
+        log(s!.w.x);             // 111
+        free s;
+    }
+}
