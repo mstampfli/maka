@@ -243,6 +243,16 @@ fn run() {
     // libm: floating-point modulo lowers to fmod, which at low optimization is a
     // real libm call rather than an inlined builtin.  Harmless when unused.
     cc_args.push("-lm".into());
+    // On Windows the runtime pulls in Winsock (socket/htonl/WSAPoll), the
+    // multimedia timer (timeBeginPeriod), and the WaitOnAddress futex API, so
+    // link ws2_32 / winmm / synchronization by default - the same role `-lm`
+    // plays elsewhere.  `--link -l<name>` remains additive.
+    #[cfg(windows)]
+    {
+        cc_args.push("-lws2_32".into());
+        cc_args.push("-lwinmm".into());
+        cc_args.push("-lsynchronization".into());
+    }
     cc_args.push("-o".into());
     ensure_parent_dir(&out_bin);
     cc_args.push(out_bin.clone());
