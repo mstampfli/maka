@@ -95,10 +95,35 @@ can't transfer across the ABI — the other side won't run Maka's `free`), are
 rejected — pass those behind a `*T` pointer.  An `export` fn may not be generic
 (monomorphization yields many mangled symbols) or `inline` (no standalone symbol).
 
-**Callbacks (Maka function as a C function pointer).**  Because an `export` is a
-real C symbol, Rust takes its address as an `unsafe extern "C" fn` pointer and
-hands it to any callback-taking API (an audio device callback, a window event
-handler, an async completion):
+**Callbacks (Maka function as a C function pointer).**  There are two ways a Maka
+function crosses into Rust as a `extern "C" fn` pointer, depending on who holds it.
+
+*Forward — a fn-pointer parameter (the common case).*  When an rblock `pub fn`
+declares a parameter of type `extern "C" fn(A, B) -> R`, that parameter is a
+first-class marshalled type: it mirrors to a Maka fn-pointer type, and you pass a
+Maka function for it directly at the call site.  No `export` is needed — the Rust
+API just takes the callback as an argument:
+
+```maka
+int on_tick(int x) { return x * 2 + 1; }
+rblock "
+    pub fn run_with_cb(cb: extern \"C\" fn(i64) -> i64, x: i64) -> i64 { unsafe { cb(x) } }
+";
+unit main() { log(run_with_cb(on_tick, 21)); }   // Rust calls on_tick(21) -> 43
+```
+
+The Maka side emits the parameter as a bare C callback `R (*cb)(P...)` (not the
+fat env-carrying `Callable` a closure value is), and a named function lowers to
+its direct C address, which matches that type exactly.  Only a statically bare
+function can cross a C callback slot: a named function or a NON-capturing closure
+literal.  A capturing closure — or any fn-pointer-typed variable, both of which
+are fat `Callable`s (code + env) at runtime — has no C representation and is
+rejected at sema (a C callback carries no environment).
+
+*Reverse — Rust holds the address (`export`).*  Because an `export` is a real C
+symbol, Rust can also take its address as an `unsafe extern "C" fn` pointer and
+store it / register it with a foreign callback-taking API from inside the rblock
+(an audio device callback, a window event handler, an async completion):
 
 ```maka
 export int on_tick(int frame) { return frame * 2; }
@@ -109,13 +134,12 @@ rblock "
 ";
 ```
 
-A thread-crossing export (invoked from a device/decoder thread) should follow the
-same discipline as `gate` (§7 of SPEC.md): don't touch a non-atomic `mut` global
-from it (the cross-thread global-race check catches Maka-internal cases, but a
-callback fired by a foreign thread is on you).  The reverse direction — a Maka
-function *receiving* a Rust `extern "C" fn` pointer as a typed parameter — is not
-yet a first-class marshalled type; take it as a `raw *unit` and call it through a
-tiny rblock shim.
+Reach for `export` when Rust needs the symbol by name (a global, a C API it drives
+itself); reach for the forward fn-pointer parameter when Maka drives the call and
+just hands Rust a callback.  A thread-crossing export (invoked from a device or
+decoder thread) should follow the same discipline as `gate` (§7 of SPEC.md): don't
+touch a non-atomic `mut` global from it (the cross-thread global-race check catches
+Maka-internal cases, but a callback fired by a foreign thread is on you).
 
 ---
 
@@ -166,6 +190,7 @@ These pass through unchanged at the C ABI boundary:
 | `char`                          | `char`          | 4-byte Unicode scalar       |
 | `*const T`, `*mut T`            | `*T`, `*mut T`  | raw pointers, unchecked     |
 | `#[repr(C)] struct Foo { ... }` | `data Foo`      | identical layout            |
+| `extern "C" fn(A,B) -> R`       | fn-pointer type | bare C callback; pass a named fn or non-capturing closure (§1.5) |
 | `()`                            | `unit`          | direct                      |
 
 `#[repr(C)] pub struct` declarations in rblocks are mirrored as Maka
@@ -559,6 +584,27 @@ If the user wrote `Rust<Rc<String>>` instead, the sidecar's
 `assert_send` (or `assert_sync` for `share`) probe would fail at
 `cargo build`, and the driver remaps the diagnostic to the `spawn`
 line.
+
+### 10.7 Function-pointer callback parameter
+
+```maka
+int on_tick(int x) { return x * 2 + 1; }
+
+rblock "
+    pub fn run_with_cb(cb: extern \"C\" fn(i64) -> i64, x: i64) -> i64 {
+        unsafe { cb(x) }
+    }
+";
+
+unit main() {
+    log(run_with_cb(on_tick, 21));   // Rust invokes on_tick(21) -> 43
+}
+```
+
+The `extern "C" fn(i64) -> i64` parameter mirrors to a Maka fn-pointer type;
+`on_tick` lowers to its direct C address, which matches the callback exactly.
+Passing a capturing closure (or any fn-pointer variable) is rejected at sema —
+a C callback slot carries no environment (§1.5).
 
 ---
 

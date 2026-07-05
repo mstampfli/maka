@@ -422,6 +422,14 @@ cannot transfer across the ABI), are rejected - pass those behind a `*T` pointer
 can take its address as an `unsafe extern "C" fn` pointer and register it as a
 callback.  See `RUST_INTEROP.md` §1.5 and test `417_export_reverse_call.maka`.
 
+The forward direction is also first-class: an rblock `pub fn` may declare a
+parameter of type `extern "C" fn(A, B) -> R`, which mirrors to a Maka fn-pointer
+type, and a Maka function is passed for it directly - `run_with_cb(on_tick, 21)`.
+Only a statically bare function crosses a C callback slot (a named function or a
+non-capturing closure literal); a capturing closure or any fn-pointer variable is
+a fat closure value (code + env) with no C representation and is rejected at sema.
+See test `419_fn_ptr_callback.maka`.
+
 ### Compile-time functions (`constexpr fn`)
 
 A `constexpr` function is an ordinary function that may *also* be evaluated at
