@@ -4242,6 +4242,19 @@ impl<'a> TypeChecker<'a> {
                             let h = self.check_expr(a, None);
                             if type_eq(&h.ty, inner) {
                                 let sp = h.span;
+                                // Receiver-directed auto-borrow: `x.m()` where `m`
+                                // takes `&mut self` inserts `&mut x`, which must
+                                // honour the same mutability rule as an explicit
+                                // `&mut x` - a NAMED place (local/field/index) has to
+                                // be a `mut`/writable binding.  Without this, a
+                                // `&mut self` method silently mutates an immutable
+                                // binding.  A temporary (not a place) is fine: it is
+                                // hoisted to a fresh owned local and borrowed.
+                                if *mutable && is_place_expr(&h) {
+                                    if let Err(msg) = self.diagnose_place_target(&h) {
+                                        self.err(msg, sp);
+                                    }
+                                }
                                 hargs.push(HExpr {
                                     kind: HExprKind::AddrOfRef { mutable: *mutable, place: Box::new(h.clone()) },
                                     ty: HType::Ref { mutable: *mutable, inner: Box::new(h.ty.clone()) },
@@ -5943,6 +5956,16 @@ fn struct_id_of(t: &HType) -> Option<StructId> {
         HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::Heap { inner } => struct_id_of(inner),
         _ => None,
     }
+}
+
+/// Is this expression a place (an addressable location: a binding, a field/index
+/// of one, a global, or a deref) rather than a temporary value?  A `&mut` of a
+/// non-mut place is an error; a `&mut` of a temporary is fine (it is hoisted to a
+/// fresh owned local first).
+fn is_place_expr(e: &HExpr) -> bool {
+    matches!(&e.kind,
+        HExprKind::Local(_) | HExprKind::Field { .. } | HExprKind::Index { .. }
+        | HExprKind::GlobalRef(_) | HExprKind::Unwrap { .. } | HExprKind::DerefRef(_))
 }
 
 /// Does this type still contain an unresolved generic parameter?  Used by the

@@ -1,0 +1,9 @@
+// Receiver-directed auto-borrow must honour mutability: calling a `&mut self`
+// method on a NON-mut binding auto-inserts `&mut x`, which requires x be a
+// mutable place - else the method would silently mutate an immutable binding.
+import std.{String, string_new, push_str};
+use std.String.StringOps;
+unit main() {
+    String s = string_new();   // not `mut`
+    s.push_str("x");           // needs &mut self -> rejected: s declared without `mut`
+}
