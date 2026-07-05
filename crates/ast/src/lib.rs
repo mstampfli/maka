@@ -487,6 +487,9 @@ pub struct FuncDecl {
     pub is_inline: bool,
     pub is_gate: bool,
     pub is_pub: bool,
+    /// `export fn` - emit a stable, unmangled C symbol callable from C/Rust
+    /// (implies external linkage; signature must be C-ABI-safe).  Reverse-FFI.
+    pub is_export: bool,
     pub where_clauses: Vec<WhereClause>,
     pub span: Span,
 }

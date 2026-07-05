@@ -4595,6 +4595,7 @@ impl<'a> TypeChecker<'a> {
             is_gate: false,
             is_variadic: false,
             is_pub: false,
+            is_export: false,
             module_path: self.cur_module.clone(),
             imports: self.cur_imports.clone(),
             has_imports: self.cur_has_imports.clone(),

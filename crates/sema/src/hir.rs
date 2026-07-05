@@ -526,6 +526,9 @@ pub struct FuncSig {
     pub is_variadic: bool,
     /// `pub` visibility — if false, callers outside `module_path` get a sema error.
     pub is_pub: bool,
+    /// `export` — emit a stable unmangled C symbol (reverse-FFI: C/Rust may call it).
+    /// Implies external linkage; the signature is checked C-ABI-safe.
+    pub is_export: bool,
     /// Dotted module path the function was declared in.  Empty for the root module.
     pub module_path: Vec<String>,
     /// `import` declarations visible at this function's source file.  When the function

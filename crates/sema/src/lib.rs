@@ -194,6 +194,7 @@ fn lift_expr(e: &mut maka_ast::Expr, counter: &mut u32, out: &mut Vec<maka_ast::
                 is_inline: false,
                 is_gate: false,
                 is_pub: false,
+                is_export: false,
                 where_clauses: Vec::new(),
                 span: *span,
             };
@@ -489,6 +490,7 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                     is_gate: template_sig.is_gate,
                     is_variadic: template_sig.is_variadic,
                     is_pub: template_sig.is_pub,
+                    is_export: false,
                     module_path: template_sig.module_path.clone(),
                     imports: template_sig.imports.clone(),
                     has_imports: template_sig.has_imports.clone(),
@@ -551,6 +553,9 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
     // pool body is an unsynchronized data race: globals are referenced by name, not
     // captured, so the cross-thread capture check never sees them.  Reject it.
     check_cross_thread_global_races(&sym, &funcs, &mut errors);
+    // `export` functions emit a stable unmangled C symbol callable from C/Rust,
+    // so their signature must cross the C ABI cleanly.
+    check_exports(&sym, &mut errors);
 
     // Interprocedural pass — runs after every function (including instantiations)
     // is fully lowered.  First compute "never returns null" summaries by fixpoint
@@ -896,6 +901,51 @@ fn check_inline_loop_jumps(sym: &SymTab, funcs: &[HFunc], errors: &mut Vec<SemaE
             HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } => for (_, fe) in fields { wexpr(fe, depth, funcs, errors); },
             HExprKind::ArrayLit(es) => for ee in es { wexpr(ee, depth, funcs, errors); },
             _ => {}
+        }
+    }
+}
+
+/// Can a value of this type cross the C ABI by value as an `export` parameter or
+/// return - i.e. does Rust/C see a type it can declare and pass?  Scalars, `char`,
+/// `unit` (-> void), `string` (-> char*), and any pointer/reference (a raw address)
+/// qualify.  Owning pointers (ownership can't transfer across the ABI), by-value
+/// aggregates (Vec / String / structs / arrays / slices), enums, closures, and
+/// existentials do NOT - pass those behind a `*T`/`raw *T` pointer instead.
+fn is_c_abi_type(t: &HType) -> bool {
+    matches!(t,
+        HType::Int | HType::Float | HType::Bool | HType::Char | HType::Unit
+        | HType::SizedInt { .. } | HType::SizedFloat { .. } | HType::Str
+        | HType::Ptr { .. } | HType::RawPtr { .. } | HType::Ref { .. })
+}
+
+/// Verify every `export` function has a C-ABI-crossable signature and no feature
+/// that would defeat a stable, single, unmangled C symbol (generics monomorphize
+/// to many mangled symbols; `inline` emits no standalone symbol).
+fn check_exports(sym: &SymTab, errors: &mut Vec<SemaError>) {
+    for sig in &sym.sigs {
+        if !sig.is_export { continue; }
+        let sp = Span { start: 0, end: 0, line: 0, col: 0 };
+        if !sig.type_params.is_empty() {
+            errors.push(SemaError { msg: format!(
+                "`export` function `{}` cannot be generic - a monomorphized function has no single stable C symbol",
+                sig.name), span: sp });
+        }
+        if sig.is_inline {
+            errors.push(SemaError { msg: format!(
+                "`export` function `{}` cannot be `inline` - an inlined function emits no standalone C symbol",
+                sig.name), span: sp });
+        }
+        for (pt, pn) in sig.param_tys.iter().zip(sig.param_names.iter()) {
+            if !is_c_abi_type(pt) {
+                errors.push(SemaError { msg: format!(
+                    "`export` function `{}`: parameter `{}` has type `{}`, which does not cross the C ABI. Use a scalar, `string`, or a `*T`/`raw *T` pointer (owning/aggregate/enum/closure types can't be passed by value to C).",
+                    sig.name, pn, type_str(pt)), span: sp });
+            }
+        }
+        if !is_c_abi_type(&sig.ret) {
+            errors.push(SemaError { msg: format!(
+                "`export` function `{}`: return type `{}` does not cross the C ABI. Return a scalar, `string`, or a `*T`/`raw *T` pointer.",
+                sig.name, type_str(&sig.ret)), span: sp });
         }
     }
 }

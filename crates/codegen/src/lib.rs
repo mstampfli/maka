@@ -5855,7 +5855,7 @@ impl<'a> Cx<'a> {
         // externally, and `static` lets the C compiler inline/optimize them freely
         // (a large win for small hot helpers - vector math, etc.).  `main` stays
         // external for the C entry shim; `pub` and `extern` are left external.
-        let linkage = if !sig.is_pub && !sig.is_extern && !is_main { "static " } else { "" };
+        let linkage = if !sig.is_pub && !sig.is_export && !sig.is_extern && !is_main { "static " } else { "" };
         let mut out = format!("{}{} {}(", linkage, ret, mangled);
         if f.params.is_empty() { out.push_str("void"); }
         else {

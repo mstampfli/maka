@@ -1,0 +1,23 @@
+// Reverse FFI: an `export` function emits a stable, unmangled C symbol, so
+// rblock (Rust) code can declare it `extern "C"` and call BACK into Maka - the
+// Maka-emitted C and the Rust sidecar staticlib link into one binary. This is
+// what lets Maka own an inversion-of-control app's control plane (event handlers,
+// callbacks) instead of only ever calling out.
+import std.str_len;
+
+export int mk_add(int a, int b) { return a + b; }   // scalar signature
+export int slen(string s) { return str_len(s) as int; }   // string -> char*
+
+rblock "
+    extern \"C\" {
+        fn mk_add(a: i64, b: i64) -> i64;
+        fn slen(s: *const std::os::raw::c_char) -> i64;
+    }
+    pub fn via_rust(x: i64) -> i64 { unsafe { mk_add(x, 100) } }
+    pub fn via_rust_str() -> i64 { let c = b\"hello\\0\"; unsafe { slen(c.as_ptr() as *const _) } }
+";
+
+unit main() {
+    log(via_rust(5));       // Rust -> mk_add -> 105
+    log(via_rust_str());    // Rust -> slen("hello") -> 5
+}

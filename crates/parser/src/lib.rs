@@ -695,7 +695,7 @@ impl Parser {
         };
         Ok(FuncDecl {
             name, type_params, params, ret, body,
-            is_inline, is_gate, is_pub: false, where_clauses, span: start,
+            is_inline, is_gate, is_pub: false, is_export: false, where_clauses, span: start,
         })
     }
 
@@ -1042,9 +1042,11 @@ impl Parser {
         let start = self.peek_span();
         let mut is_inline = false;
         let mut is_gate = false;
+        let mut is_export = false;
         loop {
             if self.eat(&TokKind::Inline) { is_inline = true; }
             else if self.eat(&TokKind::Gate) { is_gate = true; }
+            else if self.eat(&TokKind::Export) { is_export = true; }
             // `constexpr` on a function means "also evaluable at compile time".
             // The pre-scan captured the body for the interpreter; here we just
             // consume the keyword so it parses as an ordinary function.
@@ -1070,7 +1072,7 @@ impl Parser {
         // Inline `<T: Attr>` shorthand contributes additional bounds.
         for b in inline_bounds { where_clauses.push(b); }
         let body = self.parse_block()?;
-        Ok(FuncDecl { name, type_params, params, ret, body, is_inline, is_gate, is_pub: false, where_clauses, span: start })
+        Ok(FuncDecl { name, type_params, params, ret, body, is_inline, is_gate, is_pub: false, is_export, where_clauses, span: start })
     }
 
     // -------- types --------

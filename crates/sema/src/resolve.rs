@@ -977,13 +977,17 @@ impl SymTab {
                         name: f.name.clone(),
                         param_tys, param_names, ret,
                         is_extern: false,
-                        c_name: mangle_c_stdlib_clash(&f.name),
+                        // An `export` fn's C symbol is EXACTLY its declared name (the
+                        // reverse-FFI contract); a normal fn dodges stdlib C clashes.
+                        c_name: if f.is_export { f.name.clone() } else { mangle_c_stdlib_clash(&f.name) },
                         logic: None,
                         type_params: f.type_params.clone(),
                         is_inline: f.is_inline,
                         is_gate: f.is_gate,
                         is_variadic: false,
-                        is_pub: f.is_pub,
+                        // `export` implies external linkage (C/Rust must reach the symbol).
+                        is_pub: f.is_pub || f.is_export,
+                        is_export: f.is_export,
                         module_path: item_module.clone(),
                         imports: item_imports.clone(),
                         has_imports: item_has_imports.clone(),
@@ -1014,6 +1018,7 @@ impl SymTab {
                         is_gate: e.is_gate,
                         is_variadic: e.is_variadic,
                         is_pub: e.is_pub,
+                        is_export: false,
                         module_path: item_module.clone(),
                         imports: item_imports.clone(),
                         has_imports: Vec::new(),
@@ -1077,6 +1082,7 @@ impl SymTab {
                             // `pub` on a logic-block method isn't a thing in the
                             // grammar — visibility flows from the block.
                             is_pub: l.is_pub || f.is_pub,
+                            is_export: false,
                             module_path: item_module.clone(),
                             imports: item_imports.clone(),
                             has_imports: item_has_imports.clone(),
@@ -1429,6 +1435,7 @@ impl SymTab {
                             is_gate: f_subst.is_gate,
                             is_variadic: false,
                             is_pub: h.is_pub,
+                            is_export: false,
                             module_path: item_module.clone(),
                             imports: item_imports.clone(),
                             has_imports: item_has_imports.clone(),
