@@ -502,6 +502,30 @@ lto = false
 unwinds programmatically, so Cargo's abort-on-panic gives faster
 codegen without losing the safety story.
 
+### 8.1 Windows and cross-compilation
+
+The final C link uses a **gnu-ABI** toolchain (mingw gcc), so on Windows the
+sidecar is built for `x86_64-pc-windows-gnu` (not the default MSVC target — its
+`NAME.lib` is neither found by the mingw linker's `libNAME.a` search nor
+consumable across the CRT boundary).  This needs a one-time
+`rustup target add x86_64-pc-windows-gnu`.  The driver adds Rust std's Win32
+native-lib dependencies (`ws2_32`, `winmm`, `synchronization`, `pthread`,
+`advapi32`, `userenv`, `bcrypt`, `ntdll`, ...) at the final link, since a
+staticlib carries none of its own.
+
+Set `MAKA_SIDECAR_TARGET=<triple>` to override the sidecar target — this also
+enables **cross-compiling from a non-Windows host**:
+
+```sh
+CC=x86_64-w64-mingw32-gcc MAKA_SIDECAR_TARGET=x86_64-pc-windows-gnu \
+    makac app.maka -o app.exe        # a Windows .exe built on Linux/macOS
+```
+
+The emitted C itself is written to compile under mingw for Windows (Winsock
+`char*` socket options, `<timeapi.h>` for the multimedia timer, `<sys/stat.h>`).
+MSVC `cl` is **not** supported: the runtime uses POSIX threads and the GCC/clang
+atomic builtins, so `cl` gets a clear `#error` pointing at mingw/clang.
+
 ---
 
 ## 9. Hard limits
