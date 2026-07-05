@@ -1,0 +1,16 @@
+// Generic struct literals parse in expression position: `Name<T> { f = ... }`.
+// In expression context `Name <` is otherwise a comparison, so the parser
+// speculatively reads the type args and commits only when a `{` field list
+// follows - both a generic constructor return and a plain comparison work.
+data Grid<T> { int w; int h; }
+
+Grid<float> gf(int w, int h) { return Grid<float> { w = w, h = h }; }   // return position
+
+unit main() {
+    Grid<float> g = gf(3, 4);
+    log(g.w + g.h);                                // 7
+    Grid<int> h = Grid<int> { w = 10, h = 5 };     // expression position
+    log(h.w - h.h);                                // 5
+    int a = 2; int b = 9;
+    if (a < b) { log(1); } else { log(0); }        // 1  (comparison still parses)
+}

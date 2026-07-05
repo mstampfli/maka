@@ -2031,6 +2031,29 @@ impl Parser {
                 if self.at(&TokKind::LBrace) && Self::is_struct_lit_context(self) {
                     return Ok(self.parse_struct_lit(Some(name), span)?);
                 }
+                // Generic struct literal `Name<T, ...> { field = ... }`.  In
+                // expression position `Name <` is otherwise a comparison, so
+                // speculatively parse the type-arg list and only commit when a `{`
+                // field-init list follows (the discriminator); the type args are
+                // inferred by sema, so we drop them.  Anything else rewinds and `<`
+                // parses as less-than.
+                if self.at(&TokKind::Lt) {
+                    let save = self.pos;
+                    self.bump(); // <
+                    let mut ok = loop {
+                        if self.parse_type().is_err() { break false; }
+                        if self.eat(&TokKind::Comma) { continue; }
+                        // Close on `>` or the first half of a `>>` (ShrOp) that ends
+                        // a nested generic; expect(Gt) splits the ShrOp.
+                        if self.at(&TokKind::Gt) || matches!(self.peek(), TokKind::ShrOp) { break true; }
+                        break false;
+                    };
+                    if ok { ok = self.expect(&TokKind::Gt, "`>`").is_ok(); }
+                    if ok && self.at(&TokKind::LBrace) && Self::is_struct_lit_context(self) {
+                        return Ok(self.parse_struct_lit(Some(name), span)?);
+                    }
+                    self.pos = save; // not a generic struct literal — `<` is comparison
+                }
                 // `Attr::method(args)` — attr-qualified prefix call (§10.5).
                 // Distinct from `Attr.method(args)`: `::` bypasses local
                 // shadowing so the qualifier always reaches the attr even when
