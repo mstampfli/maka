@@ -1,0 +1,27 @@
+// std.json - a dynamic JSON data plane: encode a JsonValue tree (with string
+// escaping), decode a JSON string via recursive descent, and read values back
+// through accessors.  Owned tree, auto-freed; verified ASan/LeakSanitizer-clean.
+import std.{Vec, push, JsonValue, json_encode, json_decode, json_get, json_at,
+    json_num_val, json_str_val, json_bool_val, json_len, json_kind,
+    json_num, json_str, json_bool, json_null, json_arr_of, json_obj_of, str_dup};
+
+unit main() {
+    // Build a value and encode it (note the escaped quote).
+    Vec<own *JsonValue> items = [];
+    push(items, json_num(1.0)); push(items, json_str("he\"llo")); push(items, json_bool(true)); push(items, json_null());
+    own *string enc = json_encode(json_arr_of(items));
+    if (enc != null) { log(enc!); }            // [1,"he\"llo",true,null]
+
+    // Decode a JSON document (whitespace, nesting, escapes, floats, negatives).
+    own *JsonValue doc = json_decode("  { \"name\": \"Slate\", \"a\": [10, 2.5, false, {\"c\": -3}] } ");
+    own *string re = json_encode(doc);
+    if (re != null) { log(re!); }              // {"name":"Slate","a":[10,2.5,false,{"c":-3}]}
+
+    // Read values back.
+    log(json_str_val(json_get(doc, "name")));  // Slate
+    log(json_len(json_get(doc, "a")));         // 4
+    log(json_num_val(json_at(json_get(doc, "a"), 0)) as int);   // 10
+    log(json_bool_val(json_at(json_get(doc, "a"), 2)));         // false
+    log(json_num_val(json_get(json_at(json_get(doc, "a"), 3), "c")) as int);  // -3
+    log(json_kind(json_get(doc, "missing")));  // -1 (absent -> null pointer)
+}
