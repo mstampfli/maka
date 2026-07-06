@@ -1,0 +1,14 @@
+// `.length` yields `int` (alongside `.len` which yields `usize`), so loop bounds
+// and comparisons over a container size need no `as int` cast at every site.
+import std.{Vec, push};
+unit main() {
+    Vec<int> v = []; push(v, 10); push(v, 20); push(v, 30);
+    log(v.length);                                    // 3
+    mut int s = 0;
+    for (int i in 0..v.length) { s = s + v[i]; }      // int loop var
+    log(s);                                           // 60
+    mut int i = 0;
+    while (i < v.length) { i = i + 1; }               // int < int
+    log(i);                                           // 3
+    log(v.len as int);                                // 3  (.len still usize)
+}

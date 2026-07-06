@@ -1922,18 +1922,19 @@ impl<'a> TypeChecker<'a> {
 
         // Built-in `.len` on slice / fixed-array / vector — lowers to the HIR's
         // SliceLen node so codegen emits the appropriate length expression.
-        if name == "len" {
+        // `.len` yields `usize`; `.length` yields `int` (same 64-bit value) so
+        // `while (i < v.length)` / `for (int i in 0..v.length)` need no `as int`
+        // cast on the loop bound.  Both read the same slot.
+        if name == "len" || name == "length" {
             let underlying = match &bh.ty {
                 HType::Ref { inner, .. } => inner.as_ref(),
                 HType::Heap { inner } => inner.as_ref(),
                 other => other,
             };
             if matches!(underlying, HType::Slice { .. } | HType::Array { .. } | HType::Vec { .. }) {
-                return HExpr {
-                    kind: HExprKind::SliceLen(Box::new(bh)),
-                    ty: HType::SizedInt { signed: false, bits: 0 },
-                    span: sp,
-                };
+                let ty = if name == "length" { HType::Int }
+                         else { HType::SizedInt { signed: false, bits: 0 } };
+                return HExpr { kind: HExprKind::SliceLen(Box::new(bh)), ty, span: sp };
             }
         }
 
