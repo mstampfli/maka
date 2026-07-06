@@ -2097,5 +2097,14 @@ These are real limitations the implementation is honest about:
   dispatches through a vtable, which is generated for `logic`-shaped traits
   (concrete-receiver methods); `attr` + `has` is not (yet) a valid `some`/`dyn`
   bound.
+- **Non-null narrowing does not flow through a non-trivial place.** A guard
+  `if (p != null) { p! }` narrows a plain local/parameter `p`, but not an
+  indexed or field place: `if (xs[0] != null) { xs[0]! }` still reports "cannot
+  prove non-null", because the narrowing is keyed on the binding, not on the
+  evaluated place expression, and re-evaluating `xs[0]` could in principle see a
+  different element.  Workaround: bind the element to a local first (a move,
+  `own *Node e = xs[0];`, or a borrow) and narrow that.  The fix is to key
+  narrowing on a normalized place path (index/field), matching how it already
+  works for a bare local.
 
 These are tractable to fix; they are not architectural blockers.
