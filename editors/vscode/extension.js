@@ -3,6 +3,8 @@
 // definition, the outline, and completion when `maka-lsp` is available.
 
 const vscode = require("vscode");
+const fs = require("fs");
+const path = require("path");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 
 let client;
@@ -12,7 +14,15 @@ function activate(context) {
   if (!cfg.get("server.enabled", true)) {
     return;
   }
-  const command = cfg.get("server.path") || "maka-lsp";
+  // Prefer an explicit setting, else a server bundled in the extension (a
+  // self-contained .vsix install), else `maka-lsp` on PATH.
+  const bundled = path.join(
+    context.extensionPath,
+    "bin",
+    process.platform === "win32" ? "maka-lsp.exe" : "maka-lsp"
+  );
+  const command =
+    cfg.get("server.path") || (fs.existsSync(bundled) ? bundled : "maka-lsp");
 
   const serverOptions = {
     run: { command, transport: TransportKind.stdio },

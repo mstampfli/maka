@@ -215,6 +215,32 @@ fn word_at(text: &str, pos: Position) -> Option<String> {
     Some(line[start..end].to_string())
 }
 
+/// Every word-boundaried occurrence of `name` in the document.  Name-based
+/// (does not model scope/shadowing, and may match inside comments/strings), but
+/// useful for references / highlight / rename of a distinctively-named symbol.
+fn occurrences(text: &str, name: &str) -> Vec<Range> {
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut out = Vec::new();
+    for (lineno, line) in text.lines().enumerate() {
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while let Some(rel) = line[i..].find(name) {
+            let start = i + rel;
+            let end = start + name.len();
+            let before_ok = start == 0 || !is_word(bytes[start - 1]);
+            let after_ok = end >= bytes.len() || !is_word(bytes[end]);
+            if before_ok && after_ok {
+                out.push(Range {
+                    start: Position { line: lineno as u32, character: start as u32 },
+                    end: Position { line: lineno as u32, character: end as u32 },
+                });
+            }
+            i = end.max(start + 1);
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------- lookups
 
 /// Resolve a name to (hover-markdown, optional definition-span).  Definitions
@@ -435,6 +461,9 @@ impl LanguageServer for Backend {
                 definition_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions::default()),
+                references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
         })
@@ -570,6 +599,59 @@ impl LanguageServer for Backend {
             }
         }
         Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn references(&self, p: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let pos = p.text_document_position.position;
+        let uri = p.text_document_position.text_document.uri;
+        let Some(text) = self.docs.get(&uri).map(|t| t.clone()) else {
+            return Ok(None);
+        };
+        let Some(name) = word_at(&text, pos) else {
+            return Ok(None);
+        };
+        let locs = occurrences(&text, &name)
+            .into_iter()
+            .map(|range| Location { uri: uri.clone(), range })
+            .collect();
+        Ok(Some(locs))
+    }
+
+    async fn document_highlight(
+        &self,
+        p: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let pos = p.text_document_position_params.position;
+        let uri = p.text_document_position_params.text_document.uri;
+        let Some(text) = self.docs.get(&uri).map(|t| t.clone()) else {
+            return Ok(None);
+        };
+        let Some(name) = word_at(&text, pos) else {
+            return Ok(None);
+        };
+        let hl = occurrences(&text, &name)
+            .into_iter()
+            .map(|range| DocumentHighlight { range, kind: Some(DocumentHighlightKind::TEXT) })
+            .collect();
+        Ok(Some(hl))
+    }
+
+    async fn rename(&self, p: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let pos = p.text_document_position.position;
+        let uri = p.text_document_position.text_document.uri;
+        let Some(text) = self.docs.get(&uri).map(|t| t.clone()) else {
+            return Ok(None);
+        };
+        let Some(name) = word_at(&text, pos) else {
+            return Ok(None);
+        };
+        let edits: Vec<TextEdit> = occurrences(&text, &name)
+            .into_iter()
+            .map(|range| TextEdit { range, new_text: p.new_name.clone() })
+            .collect();
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(uri, edits);
+        Ok(Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }))
     }
 }
 

@@ -10,49 +10,43 @@ Language support for [Maka](https://github.com/mstampfli/maka):
   **completion**. It links the compiler crates, so it reflects what the compiler
   actually sees.
 
-## Setup
+## Install (GUI, recommended)
 
-1. Build the compiler and the server:
-
-   ```sh
-   cd /path/to/maka
-   cargo build --release          # produces target/release/maka-lsp (and makac, maka)
-   ```
-
-2. Make `maka-lsp` findable. Either add `target/release` to your `PATH`, or set
-   the path in VS Code settings:
-
-   ```json
-   "maka.server.path": "/path/to/maka/target/release/maka-lsp"
-   ```
-
-3. Install this extension's client dependency and load it:
-
-   ```sh
-   cd editors/vscode
-   npm install                    # fetches vscode-languageclient
-   ln -s "$PWD" ~/.vscode/extensions/maka
-   ```
-
-   Reload VS Code (Ctrl+Shift+P -> "Developer: Reload Window"). Open any `.maka`
-   file: highlighting is immediate, and the server features come online once
-   `maka-lsp` is found.
-
-Syntax highlighting alone needs no `npm install` and no server. If you only want
-highlighting, set `"maka.server.enabled": false`.
-
-## Package a .vsix (to share / install elsewhere)
+Build a self-contained `.vsix` (it bundles the `maka-lsp` server, so there is
+nothing else to configure), then install it from the Extensions GUI:
 
 ```sh
-npm install -g @vscode/vsce
 cd editors/vscode
-npm install
-vsce package                      # produces maka-0.2.0.vsix
-code --install-extension maka-0.2.0.vsix
+./package.sh                       # builds maka-lsp --release, bundles it, makes maka-<v>.vsix
 ```
 
-(The server binary is not bundled; install `maka-lsp` separately and point
-`maka.server.path` at it.)
+In VS Code:
+
+1. Open the **Extensions** view (Ctrl+Shift+X).
+2. Click the **`...`** (More Actions) menu at the top of the panel.
+3. **Install from VSIX...**, and pick `editors/vscode/maka-<version>.vsix`.
+4. Reload if prompted.
+
+Open any `.maka` file: highlighting is instant and the language server (bundled)
+provides diagnostics, hover, go-to-definition, the outline, completion,
+references/rename, and style lints - no PATH or settings needed.
+
+## Install (developer symlink)
+
+For live iteration on the extension itself:
+
+```sh
+cd editors/vscode
+npm install                        # fetches vscode-languageclient
+ln -s "$PWD" ~/.vscode/extensions/maka
+cargo build --release -p maka_lsp  # or set maka.server.path to a debug build
+```
+
+Reload VS Code. If no server is bundled in `bin/`, set
+`"maka.server.path": "/path/to/maka/target/release/maka-lsp"` or put it on PATH.
+
+Syntax highlighting alone needs no server; set `"maka.server.enabled": false` to
+skip it.
 
 ## Settings
 
