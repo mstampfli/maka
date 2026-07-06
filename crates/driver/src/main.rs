@@ -1,6 +1,7 @@
 //! `makac` — compile a Maka source file to C and (optionally) invoke a C compiler.
 
 mod rust_bridge;
+mod lint;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -26,7 +27,12 @@ fn run() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("usage: makac <input.maka>... [-o output] [--emit-c] [--run]");
+        eprintln!("       makac lint <file.maka> ...   check style / naming conventions");
         std::process::exit(2);
+    }
+    // `makac lint FILE...` — style checker (STYLE_GUIDE.md); no compilation.
+    if args[1] == "lint" {
+        std::process::exit(lint::run(&args[2..]));
     }
     let mut inputs: Vec<String> = Vec::new();
     // .c / .o / .a source files that should be compiled+linked alongside our generated C.
