@@ -613,6 +613,28 @@ overrides the C link name. Trailing `...` marks a variadic. Variadic call sites
 require at least the fixed-arity prefix to match; trailing args type-check
 without coercion.
 
+**Emitted C type names.** An `extern` prototype (and any `cblock` that defines the
+same symbol) uses Maka's emitted C typedef names, which must match EXACTLY or the C
+compiler reports conflicting types:
+
+| Maka type          | Emitted C type        |
+|--------------------|-----------------------|
+| `int`              | `maka_int` (`int64_t`) |
+| `float` / `f64`    | `maka_float` (`double`) |
+| `bool`             | `bool`                |
+| `char` / `u8`      | `maka_char` (`uint8_t`) |
+| `i8/i16/i32/i64`   | `int8_t`..`int64_t`   |
+| `u16/u32/u64`      | `uint16_t`..`uint64_t` |
+| `usize` / `isize`  | `uintptr_t` / `intptr_t` |
+| `unit` (return)    | `void`                |
+| `unit` (value)     | `maka_unit`           |
+| `string` (param)   | `const char*`         |
+| `*T` / `raw *T` / `own *T` | `T*` (e.g. `raw *mut unit` -> `maka_unit*`, NOT `void*`) |
+| `data Foo`         | `Foo` (mirrored struct) |
+
+So a `cblock` helper backing `extern unit fill(raw *mut unit p)` must be
+`void fill(maka_unit* p)`, not `void fill(void* p)`.
+
 The driver accepts:
 - `-l<name>` and `-L<path>` for linker flags;
 - `--link path.c|path.o|path.a` for C source files / objects to compile-and-link
