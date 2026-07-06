@@ -14,15 +14,28 @@ function activate(context) {
   if (!cfg.get("server.enabled", true)) {
     return;
   }
-  // Prefer an explicit setting, else a server bundled in the extension (a
-  // self-contained .vsix install), else `maka-lsp` on PATH.
+  // Prefer an explicit setting; else a server bundled in the extension (a
+  // self-contained .vsix install); else `maka-lsp` on PATH.
   const bundled = path.join(
     context.extensionPath,
     "bin",
     process.platform === "win32" ? "maka-lsp.exe" : "maka-lsp"
   );
-  const command =
-    cfg.get("server.path") || (fs.existsSync(bundled) ? bundled : "maka-lsp");
+  const configured = (cfg.get("server.path") || "").trim();
+  let command;
+  if (configured) {
+    command = configured;
+  } else if (fs.existsSync(bundled)) {
+    // A .vsix zip may not preserve the exec bit; restore it defensively.
+    try {
+      fs.chmodSync(bundled, 0o755);
+    } catch (e) {
+      /* ignore */
+    }
+    command = bundled;
+  } else {
+    command = "maka-lsp";
+  }
 
   const serverOptions = {
     run: { command, transport: TransportKind.stdio },
