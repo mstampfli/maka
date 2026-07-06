@@ -475,7 +475,15 @@ impl<'a> TypeChecker<'a> {
         self.enter_scope();
         let mut stmts = Vec::new();
         for s in &b.stmts {
-            stmts.push(self.check_stmt(s));
+            // A destructuring `(a, b) = expr;` expands to several statements
+            // (a hidden temp + one bind per name) that must land in THIS block's
+            // scope, so it is handled here rather than in `check_stmt` (which
+            // returns a single statement).
+            if let ast::Stmt::LetTuple { names, init, span } = s {
+                stmts.extend(self.check_let_tuple(names, init, *span));
+            } else {
+                stmts.push(self.check_stmt(s));
+            }
         }
         self.leave_scope();
         HBlock { stmts, heap_to_free: Vec::new(), ptr_nulls: Vec::new(), stmt_nulls: Vec::new(), span: b.span }
@@ -484,6 +492,12 @@ impl<'a> TypeChecker<'a> {
     fn check_stmt(&mut self, s: &ast::Stmt) -> HStmt {
         match s {
             ast::Stmt::Let { mutness, ty, name, init, thread_local, span } => self.check_let(mutness.clone(), ty, name, init, *thread_local, *span),
+            // Expanded in `check_block` (it needs to emit several statements into
+            // the enclosing scope); never reaches here in practice.
+            ast::Stmt::LetTuple { span, .. } => {
+                self.err("internal error: destructuring `(...)` binding was not expanded".to_string(), *span);
+                HStmt::Block(HBlock { stmts: Vec::new(), heap_to_free: Vec::new(), ptr_nulls: Vec::new(), stmt_nulls: Vec::new(), span: *span })
+            }
             ast::Stmt::Assign { op, place, value, span } => self.check_assign(*op, place, value, *span),
             ast::Stmt::ExprStmt(e, span) => {
                 let h = self.check_expr(e, None);
@@ -617,6 +631,48 @@ impl<'a> TypeChecker<'a> {
         let id = self.fresh_local_with_tls(name.to_string(), declared, storage, mut_payload, reassignable, thread_local, span);
         self.bind_name(name, id);
         HStmt::Let { local: id, init: init_h, span }
+    }
+
+    /// Lower `([mut] a, [mut] b, ...) = expr;` into a hidden temp plus one bind
+    /// per name, positionally to the struct's fields (declaration order).  Reuses
+    /// the ordinary `Let` machinery for each bind, so ownership (an owning field
+    /// moves out and auto-nulls; the temp drops only what is left) and drops are
+    /// handled with no new HIR or codegen.  Works for an rblock tuple
+    /// (`__MakaTup`, scalar fields = pure copies) and any `data` struct.
+    fn check_let_tuple(&mut self, names: &[(bool, String)], init: &ast::Expr, span: Span) -> Vec<HStmt> {
+        let init_h = self.check_expr(init, None);
+        let vty = init_h.ty.clone();
+        let field_tys: Vec<HType> = match &vty {
+            HType::Struct(id) => self.sym.struct_info(*id).fields.iter().map(|f| f.ty.clone()).collect(),
+            _ => {
+                self.err(format!(
+                    "destructuring `(...)` needs a struct/tuple value on the right, got `{}`; bind it to a local and read its fields, or deref a pointer first",
+                    type_str(&vty)
+                ), span);
+                return Vec::new();
+            }
+        };
+        if field_tys.len() != names.len() {
+            self.err(format!(
+                "destructuring binds {} name(s) but `{}` has {} field(s)",
+                names.len(), type_str(&vty), field_tys.len()
+            ), span);
+            return Vec::new();
+        }
+        // Hidden temp: evaluate the right side exactly once.
+        let tmp = self.fresh_local("__destr".to_string(), vty.clone(), StorageClass::Stack, false, false, span);
+        let mut out = vec![HStmt::Let { local: tmp, init: init_h, span }];
+        for (i, (is_mut, name)) in names.iter().enumerate() {
+            let fty = field_tys[i].clone();
+            let mutness = if *is_mut { Mutness::Mut } else { Mutness::Const };
+            let (storage, mut_payload, reassignable) = self.binding_kind(&fty, &mutness);
+            let nid = self.fresh_local_with_tls(name.clone(), fty.clone(), storage, mut_payload, reassignable, false, span);
+            self.bind_name(name, nid);
+            let base = HExpr { kind: HExprKind::Local(tmp), ty: vty.clone(), span };
+            let fexpr = HExpr { kind: HExprKind::Field { base: Box::new(base), field: i }, ty: fty, span };
+            out.push(HStmt::Let { local: nid, init: fexpr, span });
+        }
+        out
     }
 
     /// Light-weight type probe for the limited cases where `check_let` needs to
@@ -6090,6 +6146,7 @@ fn rw_stmt(s: &mut ast::Stmt, c: &FieldCtx) {
     use ast::Stmt::*;
     match s {
         Let { init, .. } => rw_expr(init, c),
+        LetTuple { init, .. } => rw_expr(init, c),
         Assign { place, value, .. } => { rw_expr(place, c); rw_expr(value, c); }
         ExprStmt(e, _) => rw_expr(e, c),
         Return(Some(e), _) => rw_expr(e, c),

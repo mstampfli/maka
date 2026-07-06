@@ -89,6 +89,7 @@ fn lift_stmt(s: &mut maka_ast::Stmt, counter: &mut u32, out: &mut Vec<maka_ast::
     use maka_ast::Stmt::*;
     match s {
         Let { init, .. } => lift_expr(init, counter, out, in_unsafe),
+        LetTuple { init, .. } => lift_expr(init, counter, out, in_unsafe),
         Assign { place, value, .. } => { lift_expr(place, counter, out, in_unsafe); lift_expr(value, counter, out, in_unsafe); }
         ExprStmt(e, _) => lift_expr(e, counter, out, in_unsafe),
         Return(Some(e), _) => lift_expr(e, counter, out, in_unsafe),

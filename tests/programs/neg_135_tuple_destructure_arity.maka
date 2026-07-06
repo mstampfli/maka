@@ -1,0 +1,9 @@
+// A destructuring bind must name exactly as many bindings as the value has
+// fields; a mismatch is rejected (binding a field that does not exist, or
+// leaving one silently unbound, would both be bugs).
+data Pair { int f0; int f1; }
+Pair mk() { return Pair { f0 = 3, f1 = 2 }; }
+unit main() {
+    (a, b, c) = mk();   // 3 names, 2 fields
+    log(a);
+}

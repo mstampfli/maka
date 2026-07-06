@@ -1,0 +1,28 @@
+// Positional destructuring bind: `(a, b, ...) = expr` binds each name to the
+// corresponding field (by declaration order) of the struct on the right - an
+// rblock tuple `__MakaTup` or any `data`.  Covers scalar copy, `mut` bindings,
+// named-struct positional binding, and owning fields (move out, no double-free).
+data Pair { int f0; int f1; }
+data Point { int a; int b; }
+data Node { int v; }
+data Two { own *Node p; own *Node q; }
+
+Pair mk_pair() { return Pair { f0 = 3, f1 = 2 }; }
+Point mk_point() { return Point { a = 7, b = 9 }; }
+Two mk_two() { return Two { p = alloc Node { v = 1 }, q = alloc Node { v = 2 } }; }
+
+unit main() {
+    (q, r) = mk_pair();
+    log(q); log(r);            // 3, 2
+
+    (mut m, n) = mk_pair();
+    m = m + 100;
+    log(m); log(n);            // 103, 2
+
+    (x, y) = mk_point();       // positional: x<-a, y<-b
+    log(x); log(y);            // 7, 9
+
+    (o1, o2) = mk_two();       // owning fields move out
+    if (o1 != null) { log(o1!.v); }   // 1
+    if (o2 != null) { log(o2!.v); }   // 2
+}

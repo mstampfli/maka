@@ -374,6 +374,7 @@ Standard infix and unary operators with conventional precedence. Maka-specific:
 
 ```
 let_stmt    := [mut|const|thread_local]? Type name = expr;
+destructure := ( [mut]? name , [mut]? name , ... ) = expr;     // >= 2 names
 assign_stmt := place [+=|-=|*=|/=|%=|=] expr;
 expr_stmt   := expr;
 return_stmt := return [expr];
@@ -392,6 +393,15 @@ propagate_stmt := propagate [expr] ;                      // inside inline fn
 
 `Let` requires an explicit type. `mut int x = 5;` for a writable binding;
 without `mut`, the binding is immutable.
+
+**Positional destructuring bind.** `(q, r) = divmod(17, 5);` binds each name to
+the corresponding field (by declaration order) of the struct the right side
+evaluates to — an rblock tuple (`__MakaTup`, whose fields are `f0, f1, ...`) or
+any `data`. The names are yours; the mapping is by position, and the count must
+match the field count exactly. Each name may carry `mut` (`(mut q, r) = ...`).
+The right side is evaluated once; an owning field moves out into its binding
+(the temporary drops only what is left, so no double-free). At least two names
+are required — a single `(x) = e;` is an ordinary parenthesized assignment.
 
 `thread_local` on a `let` emits `static __thread` in C.
 

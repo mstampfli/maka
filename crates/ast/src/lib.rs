@@ -341,6 +341,15 @@ pub enum Stmt {
         thread_local: bool,
         span: Span,
     },
+    /// positional destructuring bind: `([mut] a, [mut] b, ...) = expr;` — binds
+    /// each name to the corresponding field (by declaration order) of the struct
+    /// `expr` evaluates to (an rblock tuple `__MakaTup`, or any `data`).  Each
+    /// `bool` is that binding's `mut`ness.
+    LetTuple {
+        names: Vec<(bool, String)>,
+        init: Expr,
+        span: Span,
+    },
     Assign {
         op: AssignOp,
         place: Expr,

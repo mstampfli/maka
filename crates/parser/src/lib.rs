@@ -1339,11 +1339,16 @@ impl Parser {
                 Ok(Stmt::Unsafe(b, start))
             }
             _ => {
-                // Could be a declaration (`Type name = expr;` possibly preceded by `mut`/`const`)
-                // or an assignment/expression statement.
-                if self.looks_like_decl() {
+                // Positional destructuring bind: `([mut] a, [mut] b, ...) = expr;`
+                // Detected before the decl/expr split (it starts with `(`, which
+                // would otherwise parse as a parenthesized expression).
+                if matches!(self.peek(), TokKind::LParen) && self.looks_like_tuple_destructure() {
+                    self.parse_let_tuple()
+                } else if self.looks_like_decl() {
+                    // Could be a declaration (`Type name = expr;` possibly preceded by `mut`/`const`)
                     self.parse_let()
                 } else {
+                    // or an assignment/expression statement.
                     self.parse_assign_or_expr()
                 }
             }
@@ -1536,6 +1541,47 @@ impl Parser {
         let init = self.parse_expr()?;
         self.expect(&TokKind::Semicolon, "`;`")?;
         Ok(Stmt::Let { mutness, ty, name, init, thread_local, span: start })
+    }
+
+    /// Look-ahead: does the statement start with `([mut] a, [mut] b, ...) =`?
+    /// Requires at least two names (a single `(x) = ...` stays a parenthesized
+    /// assignment target, not a destructure).
+    fn looks_like_tuple_destructure(&self) -> bool {
+        let k = |p: usize| self.toks.get(p).map(|t| &t.kind);
+        let mut p = self.pos;
+        if !matches!(k(p), Some(TokKind::LParen)) { return false; }
+        p += 1;
+        let mut names = 0usize;
+        loop {
+            if matches!(k(p), Some(TokKind::Mut)) { p += 1; }
+            if !matches!(k(p), Some(TokKind::Ident(_))) { return false; }
+            p += 1;
+            names += 1;
+            match k(p) {
+                Some(TokKind::Comma) => { p += 1; }
+                Some(TokKind::RParen) => { p += 1; break; }
+                _ => return false,
+            }
+        }
+        names >= 2 && matches!(k(p), Some(TokKind::Eq))
+    }
+
+    fn parse_let_tuple(&mut self) -> Result<Stmt, ParseError> {
+        let start = self.peek_span();
+        self.expect(&TokKind::LParen, "`(`")?;
+        let mut names = Vec::new();
+        loop {
+            let is_mut = self.eat(&TokKind::Mut);
+            let (name, _) = self.expect_ident("binding name")?;
+            names.push((is_mut, name));
+            if self.eat(&TokKind::Comma) { continue; }
+            break;
+        }
+        self.expect(&TokKind::RParen, "`)`")?;
+        self.expect(&TokKind::Eq, "`=`")?;
+        let init = self.parse_expr()?;
+        self.expect(&TokKind::Semicolon, "`;`")?;
+        Ok(Stmt::LetTuple { names, init, span: start })
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {

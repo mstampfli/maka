@@ -1629,6 +1629,9 @@ fn scan_stmt(sym: &SymTab, s: &ast::Stmt, tp: &[String], out: &mut Vec<(String, 
             scan_struct_insts(sym, ty, tp, out, errors);
             scan_struct_insts_expr(sym, init, tp, out, errors);
         }
+        ast::Stmt::LetTuple { init, .. } => {
+            scan_struct_insts_expr(sym, init, tp, out, errors);
+        }
         ast::Stmt::Assign { place, value, .. } => {
             scan_struct_insts_expr(sym, place, tp, out, errors);
             scan_struct_insts_expr(sym, value, tp, out, errors);
@@ -1761,6 +1764,7 @@ fn substitute_stmt_placeholders_ty(s: &mut ast::Stmt, recv: &ast::Type) {
             *ty = ty.subst_placeholder_ty(recv);
             substitute_expr_placeholders_ty(init, recv);
         }
+        LetTuple { init, .. } => { substitute_expr_placeholders_ty(init, recv); }
         Assign { place, value, .. } => {
             substitute_expr_placeholders_ty(place, recv);
             substitute_expr_placeholders_ty(value, recv);
@@ -1874,6 +1878,7 @@ fn substitute_stmt_placeholders(s: &mut ast::Stmt, impl_ty: &str) {
             *ty = ty.subst_placeholder(impl_ty);
             substitute_expr_placeholders(init, impl_ty);
         }
+        LetTuple { init, .. } => { substitute_expr_placeholders(init, impl_ty); }
         Assign { place, value, .. } => {
             substitute_expr_placeholders(place, impl_ty);
             substitute_expr_placeholders(value, impl_ty);
