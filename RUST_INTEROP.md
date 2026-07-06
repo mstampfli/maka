@@ -56,6 +56,19 @@ literal containing either a bare version (`"1.10"`) or an inline-table
 fragment (`"{ version = \"1\", features = [\"derive\"] }"`) which is
 spliced verbatim into the generated `Cargo.toml`.
 
+A `{ path = "..." }` dependency with a **relative** path resolves against the
+invocation directory (matching `clink` and `--link`), not against the sidecar's
+own `Cargo.toml` buried in `.maka_cache`.  Absolute paths and git/registry
+tables pass through untouched.
+
+If a dependency's **build script** requests extra native inputs
+(`cargo:rustc-link-search` / `cargo:rustc-link-lib`), those `-L`/`-l` flags are
+harvested from the sidecar build and forwarded to the final C link line -- a
+staticlib sidecar cannot bundle a non-`+bundle` native lib itself (e.g. an
+import lib like `WebView2Loader.dll`), so its symbols would otherwise be
+undefined at the final link.  The flags are cached alongside the sidecar so they
+are re-applied even when the sidecar build is skipped as up to date.
+
 Each `pub fn` declared in an `rblock` becomes a callable Maka function
 in the surrounding module; each `pub struct` (when `#[repr(C)]`)
 becomes a Maka `data` type; everything else is reachable as an opaque
@@ -185,13 +198,15 @@ makac app.maka
   │    if sidecar/.built absent:
   │        emit Cargo.toml from rdeps
   │        emit src/lib.rs from rblocks + auto-shims
-  │        cargo build --release --manifest-path sidecar/Cargo.toml
+  │        cargo build --release --manifest-path sidecar/Cargo.toml (json msgs)
+  │        harvest build-script -L/-l flags → sidecar/.link_flags
   │        touch sidecar/.built
   │    register sidecar/target/release/libmaka_rust_<M>.a as --link input
+  │    read sidecar/.link_flags → extra -L/-l for the final link
   ├─ sig-parse each rblock → extract pub fn / pub struct
   ├─ inject Maka extern decls + data decls + Rust<T> markers into AST
   ├─ sema, codegen as normal
-  └─ cc out.c <staticlibs> -o app
+  └─ cc out.c <staticlibs> <build-script -L/-l flags> -o app
 ```
 
 Cache key is a SHA-256 over the concatenation of `rblock` bodies (raw),

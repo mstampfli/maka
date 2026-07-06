@@ -8,6 +8,11 @@ members = [
     "crates/codegen",
     "crates/driver",
 ]
+# A fixture crate for the rdep link-metadata test (427); a path dependency of a
+# generated rblock sidecar, never part of this workspace.
+exclude = [
+    "tests/programs/427_rdep_linkmeta_crate",
+]
 
 [workspace.package]
 edition = "2021"

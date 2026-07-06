@@ -184,9 +184,16 @@ fn run() {
     // Phase 2: now that sema has surfaced per-call-site Send/Sync probes,
     // build the sidecar crates and add their staticlibs to the C link line.
     match rust_bridge::finish(prep, &hir.sym.send_probes, &hir.sym.sync_probes, &bridge_opts) {
-        Ok(libs) => {
+        Ok((libs, flags)) => {
+            // Staticlibs go on link_c (emitted first); the -l/-L flags their build
+            // scripts requested go on link_flags (emitted after), so a `-lFoo` that
+            // resolves an undefined symbol in the sidecar lands to its right, where
+            // GNU ld's left-to-right resolution needs it.
             for lib in libs {
                 link_c.push(lib);
+            }
+            for f in flags {
+                if !link_flags.contains(&f) { link_flags.push(f); }
             }
         }
         Err(e) => {

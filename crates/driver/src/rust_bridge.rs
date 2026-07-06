@@ -31,6 +31,9 @@ pub struct BridgeOutput {
     pub injected: Vec<(Vec<String>, Item)>,
     /// Static library paths to pass to the C linker.
     pub staticlibs: Vec<String>,
+    /// Extra `-l`/`-L` flags requested by dependency build scripts (emitted
+    /// after the staticlibs, where GNU ld's resolution order needs them).
+    pub link_flags: Vec<String>,
 }
 
 /// Driver-tuned options for the bridge.
@@ -69,7 +72,13 @@ pub fn prepare(module: &Module, project_root: &Path, opts: &BridgeOptions) -> Re
         let bundle = per_module.entry(mp).or_default();
         match item {
             Item::Rblock(src, _) => bundle.rblocks.push(src.clone()),
-            Item::Rdep(name, ver, _) => bundle.rdeps.push((name.clone(), ver.clone())),
+            // A relative `path = "..."` dep is written into a Cargo.toml deep in
+            // .maka_cache, where cargo would resolve it against the wrong base;
+            // absolutize it against the invocation dir now (matching `clink`),
+            // so it also folds into the cache hash consistently.
+            Item::Rdep(name, ver, _) => {
+                bundle.rdeps.push((name.clone(), resolve_rdep_path(ver, project_root)));
+            }
             _ => {}
         }
     }
@@ -140,14 +149,17 @@ pub fn prepare(module: &Module, project_root: &Path, opts: &BridgeOptions) -> Re
 }
 
 /// Phase 2 — build sidecar crates with per-call-site `Send` / `Sync` probes
-/// supplied by sema.  Returns staticlib paths to feed the C linker.
+/// supplied by sema.  Returns `(staticlib paths, extra link flags)`: the flags
+/// are the `-l`/`-L` a dependency's build script asked for (e.g. wry pulling in
+/// `WebView2Loader.dll`), which a staticlib alone can't convey to the C linker.
 pub fn finish(
     prep: BridgePrep,
     send_probes: &[String],
     sync_probes: &[String],
     opts: &BridgeOptions,
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, Vec<String>), String> {
     let mut staticlibs: Vec<String> = Vec::new();
+    let mut link_flags: Vec<String> = Vec::new();
     for pm in &prep.modules {
         // Filter the global probe lists down to the types this module's
         // sidecar can actually see in scope — anything else would cause a
@@ -214,8 +226,19 @@ pub fn finish(
         }
 
         staticlibs.push(staticlib_path.to_string_lossy().to_string());
+
+        // Pick up any link flags this sidecar's build scripts persisted (present
+        // whether we just built it or reused a cached build).
+        if let Ok(txt) = std::fs::read_to_string(sidecar_dir.join(".link_flags")) {
+            for f in txt.lines() {
+                let f = f.trim();
+                if !f.is_empty() && !link_flags.contains(&f.to_string()) {
+                    link_flags.push(f.to_string());
+                }
+            }
+        }
     }
-    Ok(staticlibs)
+    Ok((staticlibs, link_flags))
 }
 
 /// Pull opaque-type label names out of a `RustType`, recursing into
@@ -241,8 +264,8 @@ fn collect_opaque_names(ty: &RustType, out: &mut Vec<String>) {
 pub fn process(module: &Module, project_root: &Path, opts: &BridgeOptions) -> Result<BridgeOutput, String> {
     let prep = prepare(module, project_root, opts)?;
     let injected = prep.injected.clone();
-    let staticlibs = finish(prep, &[], &[], opts)?;
-    Ok(BridgeOutput { injected, staticlibs })
+    let (staticlibs, link_flags) = finish(prep, &[], &[], opts)?;
+    Ok(BridgeOutput { injected, staticlibs, link_flags })
 }
 
 #[derive(Default)]
@@ -405,6 +428,11 @@ fn build_sidecar_with_probes(
     if !verbose {
         cargo_args.push("--quiet");
     }
+    // Emit machine-readable messages on stdout (artifacts + build-script output)
+    // while rendering diagnostics as human text on stderr, so we can harvest the
+    // `linked-libs` / `linked-paths` a dependency's build script requests (a
+    // staticlib swallows this metadata; the final cc link must be told).
+    cargo_args.push("--message-format=json-render-diagnostics");
     // On Windows the sidecar must match the mingw gcc the driver links with, so
     // build it for the gnu ABI rather than the default MSVC ABI (whose `.lib`
     // the mingw linker can neither find by name nor consume).
@@ -432,19 +460,69 @@ fn build_sidecar_with_probes(
         } else {
             ""
         };
+        // With --message-format=json-render-diagnostics cargo renders the human
+        // errors to stderr and reserves stdout for the machine JSON stream, so
+        // only fall back to dumping stdout when stderr came back empty.
+        let tail = if stderr.trim().is_empty() {
+            format!("\n--- stdout ---\n{}", stdout)
+        } else {
+            String::new()
+        };
         return Err(format!(
-            "cargo build failed for rblock sidecar at {}{}\n--- stderr ---\n{}\n--- stdout ---\n{}",
+            "cargo build failed for rblock sidecar at {}{}\n--- stderr ---\n{}{}",
             dir.display(),
             hint,
             stderr,
-            stdout
+            tail
         ));
     }
     if verbose {
         std::io::Write::write_all(&mut std::io::stderr(), &out.stderr).ok();
     }
+    // Harvest `linked-libs` / `linked-paths` from any dependency build script and
+    // persist them next to the sidecar, so the final cc link picks them up even on
+    // a cached rebuild (where build scripts don't re-run and re-emit the JSON).
+    let flags = parse_link_metadata(&String::from_utf8_lossy(&out.stdout));
+    if !flags.is_empty() {
+        std::fs::write(dir.join(".link_flags"), flags.join("\n")).ok();
+    } else {
+        let _ = std::fs::remove_file(dir.join(".link_flags"));
+    }
     std::fs::write(dir.join(".built"), "").ok();
     Ok(())
+}
+
+/// Extract `-l<lib>` / `-L<path>` flags from cargo's JSON message stream: for
+/// every `build-script-executed` line, its `linked_libs` become `-l` flags and
+/// its `linked_paths` become `-L` flags (both may carry a `kind=`/`native=`
+/// prefix, which is stripped).  A minimal parser - lib names and paths never
+/// contain array-breaking characters - to avoid a serde_json dependency.
+fn parse_link_metadata(stdout: &str) -> Vec<String> {
+    fn json_str_array(line: &str, key: &str) -> Vec<String> {
+        let pat = format!("\"{}\":[", key);
+        let Some(s) = line.find(&pat) else { return Vec::new() };
+        let rest = &line[s + pat.len()..];
+        let Some(e) = rest.find(']') else { return Vec::new() };
+        rest[..e].split(',')
+            .map(|x| x.trim().trim_matches('"'))
+            .filter(|x| !x.is_empty())
+            // drop a `kind=` / `native=` / `dependency=` prefix if present.
+            .map(|x| x.split_once('=').map(|(_, v)| v).unwrap_or(x).to_string())
+            .collect()
+    }
+    let mut out: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        if !line.contains("\"build-script-executed\"") { continue; }
+        for p in json_str_array(line, "linked_paths") {
+            let f = format!("-L{}", p);
+            if !out.contains(&f) { out.push(f); }
+        }
+        for l in json_str_array(line, "linked_libs") {
+            let f = format!("-l{}", l);
+            if !out.contains(&f) { out.push(f); }
+        }
+    }
+    out
 }
 
 fn format_rdep_rhs(v: &str) -> String {
@@ -456,6 +534,51 @@ fn format_rdep_rhs(v: &str) -> String {
     } else {
         format!("\"{}\"", t.replace('"', "\\\""))
     }
+}
+
+/// If an rdep RHS is an inline table with a relative `path = "..."`, rewrite the
+/// path to an absolute one anchored at `base` (the invocation dir).  Bare
+/// version strings, git/registry tables, and already-absolute paths pass through
+/// unchanged.  A minimal scan (dep tables are simple) to avoid a toml dependency.
+fn resolve_rdep_path(rhs: &str, base: &Path) -> String {
+    let t = rhs.trim();
+    if !t.starts_with('{') {
+        return rhs.to_string();
+    }
+    // Find `path` used as a key: preceded by `{` / `,` / whitespace, and the
+    // next non-space char is `=`.
+    let b = t.as_bytes();
+    let key = "path";
+    let mut from = 0;
+    let kpos = loop {
+        let Some(rel) = t[from..].find(key) else { return rhs.to_string() };
+        let pos = from + rel;
+        let before_ok = pos == 0
+            || matches!(b[pos - 1], b'{' | b',') || b[pos - 1].is_ascii_whitespace();
+        let after_trim = t[pos + key.len()..].trim_start();
+        if before_ok && after_trim.starts_with('=') {
+            break pos;
+        }
+        from = pos + key.len();
+    };
+    // Walk past `path`, optional ws, `=`, optional ws, opening `"`.
+    let mut i = kpos + key.len();
+    while i < b.len() && b[i].is_ascii_whitespace() { i += 1; }
+    if b.get(i) != Some(&b'=') { return rhs.to_string(); }
+    i += 1;
+    while i < b.len() && b[i].is_ascii_whitespace() { i += 1; }
+    if b.get(i) != Some(&b'"') { return rhs.to_string(); }
+    i += 1;
+    let val_start = i;
+    let Some(endrel) = t[val_start..].find('"') else { return rhs.to_string() };
+    let val_end = val_start + endrel;
+    let val = &t[val_start..val_end];
+    if Path::new(val).is_absolute() {
+        return rhs.to_string();
+    }
+    let abs = base.join(val);
+    let abs = abs.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    format!("{}{}{}", &t[..val_start], abs, &t[val_end..])
 }
 
 // ------------------------------------------------------------------------

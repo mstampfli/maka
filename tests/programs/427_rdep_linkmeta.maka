@@ -1,0 +1,15 @@
+// A dependency build script can request extra linker inputs
+// (cargo:rustc-link-search / cargo:rustc-link-lib). Because the rblock sidecar
+// is a staticlib, it cannot bundle those native libs itself, so makac must
+// forward the flags to the final cc link. Here `linkmeta::answer` reaches a C
+// symbol provided only by such a build-script lib: it links (and prints 42)
+// solely because that forwarding works.
+rdep linkmeta = "{ path = \"tests/programs/427_rdep_linkmeta_crate\" }";
+
+rblock "
+    pub fn answer() -> i32 { linkmeta::answer() }
+";
+
+unit main() {
+    log(answer());   // 42
+}

@@ -1,0 +1,11 @@
+[package]
+name = "linkmeta"
+version = "0.1.0"
+edition = "2021"
+
+# A path-dependency crate whose build script asks the linker for a native
+# static lib it compiles on the fly. The sidecar staticlib references that
+# symbol but cannot bundle it, so the final cc link only succeeds if makac
+# forwarded the build script's rustc-link-search / rustc-link-lib flags.
+[lib]
+crate-type = ["rlib"]
