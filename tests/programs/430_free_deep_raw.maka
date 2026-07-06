@@ -1,0 +1,29 @@
+// `free deep p` reclaims an owning graph parked behind a `raw *T` — the
+// FFI-singleton teardown pattern.  A plain `free p` frees only the top World
+// allocation and leaks the three owned Nodes; `free deep p` first runs the same
+// recursive drop glue an owning value gets at scope exit, so the whole graph is
+// reclaimed.  Looped 1000x so a leak regression shows up under a sanitizer / RSS
+// while stdout stays deterministic.
+data Node  { own *Node next; int val; }
+data World { own *Node head; int size; }
+
+unit main() {
+    mut int total = 0;
+    mut int i = 0;
+    while (i < 1000) {
+        unsafe {
+            // Build an owned 3-node list; each alloc moves the prior head in.
+            own *Node a = alloc Node { next = null, val = 3 };
+            own *Node b = alloc Node { next = a, val = 2 };
+            own *Node c = alloc Node { next = b, val = 1 };
+            // Park the whole graph behind a raw World pointer (World takes the list).
+            raw *World w = alloc World { head = c, size = 3 };
+            if (w != null) {
+                total = total + w!.size;
+                free deep w;   // frees the 3 Nodes AND the World — no leak
+            }
+        }
+        i = i + 1;
+    }
+    log(total);   // 3000
+}

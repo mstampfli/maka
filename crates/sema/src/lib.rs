@@ -837,7 +837,7 @@ fn inline_jumps_out_expr(e: &HExpr) -> bool {
         HExprKind::Bin { lhs, rhs, .. } => inline_jumps_out_expr(lhs) || inline_jumps_out_expr(rhs),
         HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } | HExprKind::Cast { expr, .. }
         | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
-        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr) | HExprKind::SliceLen(expr)
+        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr, _) | HExprKind::SliceLen(expr)
         | HExprKind::EnumTag(expr) | HExprKind::Transfer(expr) | HExprKind::ArrayToSlice { base: expr, .. }
         | HExprKind::AddrOfRef { place: expr, .. } | HExprKind::Field { base: expr, .. } => inline_jumps_out_expr(expr),
         HExprKind::Index { base, idx } => inline_jumps_out_expr(base) || inline_jumps_out_expr(idx),
@@ -903,7 +903,7 @@ fn check_inline_loop_jumps(sym: &SymTab, funcs: &[HFunc], errors: &mut Vec<SemaE
             HExprKind::Bin { lhs, rhs, .. } => { wexpr(lhs, depth, funcs, errors); wexpr(rhs, depth, funcs, errors); }
             HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } | HExprKind::Cast { expr, .. }
             | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
-            | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr) | HExprKind::SliceLen(expr)
+            | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr, _) | HExprKind::SliceLen(expr)
             | HExprKind::EnumTag(expr) | HExprKind::Transfer(expr) | HExprKind::ArrayToSlice { base: expr, .. }
             | HExprKind::AddrOfRef { place: expr, .. } | HExprKind::Field { base: expr, .. } => wexpr(expr, depth, funcs, errors),
             HExprKind::Index { base, idx } => { wexpr(base, depth, funcs, errors); wexpr(idx, depth, funcs, errors); }
@@ -1089,7 +1089,7 @@ fn collect_thread_effects_expr(
             collect_thread_effects_expr(sym, base, writes, calls, spawns);
             collect_thread_effects_expr(sym, idx, writes, calls, spawns);
         }
-        HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner) | HExprKind::Free(inner)
+        HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner) | HExprKind::Free(inner, _)
         | HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) =>
             collect_thread_effects_expr(sym, inner, writes, calls, spawns),
         HExprKind::Closure { env_values, .. } =>
@@ -1360,7 +1360,7 @@ fn rewrite_placeholders(f: &mut HFunc, mapping: &[u32]) {
             // Free's operand is walked too: a generic call inside `free X;`
             // (HExprKind::Free) otherwise keeps its placeholder callee FuncId,
             // which codegen indexes out of bounds -> compiler panic.
-            HExprKind::HeapAlloc(inner) | HExprKind::Free(inner) => rw_expr(inner, mapping),
+            HExprKind::HeapAlloc(inner) | HExprKind::Free(inner, _) => rw_expr(inner, mapping),
             HExprKind::CallIndirect { callee, args } => {
                 rw_expr(callee, mapping);
                 for a in args { rw_expr(a, mapping); }

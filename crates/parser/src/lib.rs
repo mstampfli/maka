@@ -1807,9 +1807,23 @@ impl Parser {
                 self.bump();
                 // `free value` — bare-word deallocator for `raw *T`.  Sema
                 // checks the operand is `raw *T` AND the call site is inside
-                // an `unsafe { }` block.
+                // an `unsafe { }` block.  An optional contextual `deep` modifier
+                // (`free deep value`) runs the recursive drop glue on the target
+                // first.  `deep` stays a valid identifier: it is only read as the
+                // modifier when an operand follows it, so `free deep;` (and
+                // `free deep.f` / `deep[i]` / `deep(..)` / `deep as T`) still free
+                // a variable named `deep`.
+                let deep = matches!(self.peek(), TokKind::Ident(n) if n == "deep")
+                    && !matches!(
+                        self.toks.get(self.pos + 1).map(|t| &t.kind),
+                        Some(TokKind::Semicolon) | Some(TokKind::Dot) | Some(TokKind::LBracket)
+                            | Some(TokKind::LParen) | Some(TokKind::As) | Some(TokKind::ColonColon)
+                            | Some(TokKind::Comma) | Some(TokKind::RParen) | Some(TokKind::RBrace)
+                            | Some(TokKind::RBracket) | Some(TokKind::Colon) | None
+                    );
+                if deep { self.bump(); }
                 let v = self.parse_unary()?;
-                Ok(Expr::Free { value: Box::new(v), span: start })
+                Ok(Expr::Free { value: Box::new(v), deep, span: start })
             }
             TokKind::Transfer | TokKind::Share => {
                 let mode = if matches!(self.peek(), TokKind::Transfer) {

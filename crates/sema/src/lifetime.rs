@@ -547,7 +547,7 @@ fn harvest_expr(
         }
         HExprKind::ArrayLit(elems) => for el in elems { harvest_expr(el, state, summaries, out); },
         HExprKind::DropWrite(inner) | HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner)
-            | HExprKind::Free(inner) | HExprKind::Transfer(inner) | HExprKind::SliceLen(inner)
+            | HExprKind::Free(inner, _) | HExprKind::Transfer(inner) | HExprKind::SliceLen(inner)
             | HExprKind::EnumTag(inner) => harvest_expr(inner, state, summaries, out),
         HExprKind::ArrayToSlice { base, .. } => harvest_expr(base, state, summaries, out),
         HExprKind::Match { scrutinee, arms, .. } => {
@@ -1228,7 +1228,7 @@ impl<'a> Analyzer<'a> {
             HExprKind::ArrayToSlice { base, .. } => self.walk_expr(base),
             HExprKind::DerefRef(inner) => self.walk_expr(inner),
             HExprKind::HeapAlloc(inner) => self.walk_expr(inner),
-            HExprKind::Free(inner) => self.walk_expr(inner),
+            HExprKind::Free(inner, _) => self.walk_expr(inner),
             HExprKind::CallIndirect { callee, args } => {
                 self.walk_expr(callee);
                 for a in args { self.walk_expr(a); }
@@ -1442,7 +1442,7 @@ impl<'a> Analyzer<'a> {
                 for (_, fe) in fields { self.check_no_local_ref_escape(fe, under_deref); }
             }
             ArrayLit(elems) => for el in elems { self.check_no_local_ref_escape(el, under_deref); }
-            HeapAlloc(inner) | Free(inner) => self.check_no_local_ref_escape(inner, under_deref),
+            HeapAlloc(inner) | Free(inner, _) => self.check_no_local_ref_escape(inner, under_deref),
             // Cast / DropWrite preserve borrow-ness; a DEREF (DerefRef/Unwrap) or a
             // unary op CONSUMES the borrow into a plain value, so a holds-dying-borrow
             // local under it does not escape AS a borrow - mark under_deref.
@@ -1801,7 +1801,7 @@ impl<'a> Analyzer<'a> {
             HExprKind::HeapAlloc(_) => {
                 // Fresh heap LID; no deps from source. We model it as `{}`.
             }
-            HExprKind::Free(_) => {
+            HExprKind::Free(_, _) => {
                 // `free p;` returns unit; deps don't propagate from the freed pointer.
             }
             HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => self.collect_deps(base, out),
@@ -2151,7 +2151,7 @@ fn hoist_in_expr(sym: &SymTab, e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: 
         | HExprKind::DropWrite(expr)
         | HExprKind::DerefRef(expr)
         | HExprKind::HeapAlloc(expr)
-        | HExprKind::Free(expr)
+        | HExprKind::Free(expr, _)
         | HExprKind::SliceLen(expr)
         | HExprKind::EnumTag(expr)
         | HExprKind::ArrayToSlice { base: expr, .. } => hoist_in_expr(sym, expr, locals, pre),
@@ -2488,7 +2488,7 @@ fn expr_mentions_local(e: &HExpr, t: LocalId) -> bool {
         Bin { lhs, rhs, .. } => expr_mentions_local(lhs, t) || expr_mentions_local(rhs, t),
         Un { expr, .. } | Unwrap { expr, .. } | Cast { expr, .. } | CheckedCast { expr, .. }
         | DropWrite(expr) => expr_mentions_local(expr, t),
-        DerefRef(i) | HeapAlloc(i) | Free(i) | Transfer(i) | SliceLen(i) | EnumTag(i) => expr_mentions_local(i, t),
+        DerefRef(i) | HeapAlloc(i) | Free(i, _) | Transfer(i) | SliceLen(i) | EnumTag(i) => expr_mentions_local(i, t),
         Call { args, .. } | InlineCall { args, .. } => args.iter().any(|a| expr_mentions_local(a, t)),
         CallIndirect { callee, args } => expr_mentions_local(callee, t) || args.iter().any(|a| expr_mentions_local(a, t)),
         Struct { fields, .. } | VariantCtor { fields, .. } => fields.iter().any(|(_, fe)| expr_mentions_local(fe, t)),
@@ -2575,7 +2575,7 @@ fn inject_nulls_in_expr(e: &mut HExpr, locals: &[LocalInfo]) {
         CallIndirect { callee, args } => { inject_nulls_in_expr(callee, locals); for a in args { inject_nulls_in_expr(a, locals); } }
         Bin { lhs, rhs, .. } => { inject_nulls_in_expr(lhs, locals); inject_nulls_in_expr(rhs, locals); }
         Un { expr, .. } | Unwrap { expr, .. } | Cast { expr, .. } | CheckedCast { expr, .. }
-        | DropWrite(expr) | DerefRef(expr) | HeapAlloc(expr) | Free(expr) | Transfer(expr)
+        | DropWrite(expr) | DerefRef(expr) | HeapAlloc(expr) | Free(expr, _) | Transfer(expr)
         | SliceLen(expr) | EnumTag(expr) => inject_nulls_in_expr(expr, locals),
         AddrOfRef { place, .. } => inject_nulls_in_expr(place, locals),
         Field { base, .. } | ArrayToSlice { base, .. } => inject_nulls_in_expr(base, locals),
@@ -2711,7 +2711,7 @@ fn expr_moves_owning_local(sym: &SymTab, e: &HExpr, target: LocalId) -> bool {
         HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } | HExprKind::Cast { expr, .. }
         | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
         | HExprKind::AddrOfRef { place: expr, .. } | HExprKind::Field { base: expr, .. }
-        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr) | HExprKind::SliceLen(expr)
+        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr, _) | HExprKind::SliceLen(expr)
         | HExprKind::EnumTag(expr) | HExprKind::ArrayToSlice { base: expr, .. } => expr_moves_owning_local(sym, expr, target),
         HExprKind::Transfer(inner) => matches!(inner.kind, HExprKind::Local(id) if id == target) || expr_moves_owning_local(sym, inner, target),
         HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } =>
@@ -2779,7 +2779,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
             HExprKind::ArrayToSlice { base, .. } => moved_locals_in_expr(sym, base, out),
             HExprKind::DerefRef(inner) => moved_locals_in_expr(sym, inner, out),
             HExprKind::HeapAlloc(inner) => moved_locals_in_expr(sym, inner, out),
-            HExprKind::Free(inner) => moved_locals_in_expr(sym, inner, out),
+            HExprKind::Free(inner, _) => moved_locals_in_expr(sym, inner, out),
             HExprKind::CallIndirect { callee, args } => {
                 moved_locals_in_expr(sym, callee, out);
                 for a in args { moved_locals_in_expr(sym, a, out); }
@@ -2967,7 +2967,7 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
                 visit_matches_in_expr(sym, locals, base, scope_chain, loop_start, moved, owning_params);
                 visit_matches_in_expr(sym, locals, idx, scope_chain, loop_start, moved, owning_params);
             }
-            HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner) | HExprKind::Free(inner)
+            HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner) | HExprKind::Free(inner, _)
             | HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => visit_matches_in_expr(sym, locals, inner, scope_chain, loop_start, moved, owning_params),
             HExprKind::Closure { env_values, .. } => {
                 for v in env_values { visit_matches_in_expr(sym, locals, v, scope_chain, loop_start, moved, owning_params); }
@@ -3333,7 +3333,7 @@ fn mark_closure_escapes_block(b: &HBlock, cands: &std::collections::HashSet<Loca
             HExprKind::Bin { lhs, rhs, .. } => { ex(lhs, cands, escaped); ex(rhs, cands, escaped); }
             HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } | HExprKind::Cast { expr, .. }
             | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
-            | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr) | HExprKind::SliceLen(expr)
+            | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr, _) | HExprKind::SliceLen(expr)
             | HExprKind::EnumTag(expr) | HExprKind::ArrayToSlice { base: expr, .. } | HExprKind::Transfer(expr) => ex(expr, cands, escaped),
             HExprKind::AddrOfRef { place, .. } => ex(place, cands, escaped),
             HExprKind::Field { base, .. } => ex(base, cands, escaped),
@@ -3493,7 +3493,7 @@ fn each_arm_body_in_expr(e: &HExpr, g: &mut dyn FnMut(&HBlock)) {
         HExprKind::AddrOfRef { place, .. } => each_arm_body_in_expr(place, g),
         HExprKind::Field { base, .. } | HExprKind::ArrayToSlice { base, .. } => each_arm_body_in_expr(base, g),
         HExprKind::Index { base, idx } => { each_arm_body_in_expr(base, g); each_arm_body_in_expr(idx, g); }
-        HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner) | HExprKind::Free(inner)
+        HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner) | HExprKind::Free(inner, _)
         | HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => each_arm_body_in_expr(inner, g),
         HExprKind::Closure { env_values, .. } => { for v in env_values { each_arm_body_in_expr(v, g); } }
         HExprKind::VariantCtor { fields, .. } | HExprKind::Struct { fields, .. } => { for (_, fe) in fields { each_arm_body_in_expr(fe, g); } }
@@ -3519,7 +3519,7 @@ fn each_arm_body_in_expr_mut(e: &mut HExpr, g: &mut dyn FnMut(&mut HBlock)) {
         HExprKind::AddrOfRef { place, .. } => each_arm_body_in_expr_mut(place, g),
         HExprKind::Field { base, .. } | HExprKind::ArrayToSlice { base, .. } => each_arm_body_in_expr_mut(base, g),
         HExprKind::Index { base, idx } => { each_arm_body_in_expr_mut(base, g); each_arm_body_in_expr_mut(idx, g); }
-        HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner) | HExprKind::Free(inner)
+        HExprKind::DerefRef(inner) | HExprKind::HeapAlloc(inner) | HExprKind::Free(inner, _)
         | HExprKind::Transfer(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => each_arm_body_in_expr_mut(inner, g),
         HExprKind::Closure { env_values, .. } => { for v in env_values { each_arm_body_in_expr_mut(v, g); } }
         HExprKind::VariantCtor { fields, .. } | HExprKind::Struct { fields, .. } => { for (_, fe) in fields { each_arm_body_in_expr_mut(fe, g); } }
@@ -3636,7 +3636,7 @@ fn collect_param_moves_expr(sym: &SymTab, e: &HExpr, out: &mut std::collections:
         HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. }
         | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr) => collect_param_moves_expr(sym, expr, out),
         HExprKind::ArrayToSlice { base, .. } => collect_param_moves_expr(sym, base, out),
-        HExprKind::HeapAlloc(inner) | HExprKind::Free(inner) => collect_param_moves_expr(sym, inner, out),
+        HExprKind::HeapAlloc(inner) | HExprKind::Free(inner, _) => collect_param_moves_expr(sym, inner, out),
         HExprKind::CallIndirect { callee, args } => {
             collect_param_moves_expr(sym, callee, out);
             for a in args { collect_param_moves_expr(sym, a, out); }

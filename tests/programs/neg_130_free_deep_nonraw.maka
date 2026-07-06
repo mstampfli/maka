@@ -1,0 +1,11 @@
+// `free deep` only accepts `raw *T`, same as plain `free`.  A Maka-managed
+// owning pointer (`own *T`) auto-frees its graph at scope exit — deep-freeing it
+// by hand would double-free, so it is rejected.
+data Node  { own *Node next; int val; }
+data World { own *Node head; int size; }
+unit main() {
+    unsafe {
+        own *World owner = alloc World { head = null, size = 0 };
+        free deep owner;   // `free`/`free deep` only accept `raw *T`
+    }
+}

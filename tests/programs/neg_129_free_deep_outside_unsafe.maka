@@ -1,0 +1,7 @@
+// `free deep p;` must be inside `unsafe { ... }`, exactly like plain `free p;`.
+data Node  { own *Node next; int val; }
+data World { own *Node head; int size; }
+unit main() {
+    raw *World w = alloc World { head = null, size = 0 };  // (alloc into raw needs unsafe too)
+    free deep w;   // free deep outside unsafe
+}

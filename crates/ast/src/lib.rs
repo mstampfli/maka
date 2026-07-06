@@ -257,7 +257,10 @@ pub enum Expr {
     HeapAlloc { value: Box<Expr>, span: Span },
     /// `free value` — deallocate a `raw *T`.  Sema requires the arg to be
     /// `raw *T` AND the call site to be inside an `unsafe { ... }` block.
-    Free { value: Box<Expr>, span: Span },
+    /// `deep` (`free deep value`) additionally runs the recursive drop glue on
+    /// the pointer's target first, reclaiming an owned graph parked behind a raw
+    /// pointer (the FFI-singleton teardown case) instead of leaking it.
+    Free { value: Box<Expr>, deep: bool, span: Span },
     /// `Enum.Variant { f = e, ... }` — construct a tagged-enum variant value.
     /// Payload-less variants use `Field` (kept for back-compat with C-style enums).
     VariantCtor { enum_name: String, variant: String, fields: Vec<(String, Expr)>, span: Span },

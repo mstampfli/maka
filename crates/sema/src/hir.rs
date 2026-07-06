@@ -666,8 +666,10 @@ pub enum HExprKind {
     /// `heap value` — emit `malloc(sizeof(T)); *p = value; p` and produce a fresh heap LID.
     HeapAlloc(Box<HExpr>),
     /// `free value` — bare-word deallocator for `raw *T` (only inside `unsafe { }`).
-    /// Codegen lowers to `free((void*)(value))`.
-    Free(Box<HExpr>),
+    /// Codegen lowers to `free((void*)(value))`.  When the `bool` is true
+    /// (`free deep value`), codegen first runs the recursive drop glue on the
+    /// pointer's target (the same drop an owning value gets at scope exit).
+    Free(Box<HExpr>, bool),
     /// Function name used in expression position (function pointer value).
     FnRef(FuncId),
     /// Indirect call through a function pointer value.

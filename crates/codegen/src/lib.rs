@@ -108,6 +108,9 @@ struct Cx<'a> {
     yield_exit: Vec<(LocalId, String)>,
     /// Monotonic counter for unique `yield`-arm end labels.
     yield_label_seq: u32,
+    /// Monotonic counter for the temp binding a `free deep p` uses inside its
+    /// GNU statement-expression, so two deep-frees never share a temp name.
+    free_deep_seq: u32,
     /// When Some(tag), sub-expression emission (`emit_sub`) resolves local names
     /// via the inline expansion's tagged scope instead of the normal one.  Set only
     /// while emitting a builtin-sentinel call spliced from an inline body, so the one
@@ -143,6 +146,7 @@ impl<'a> Cx<'a> {
             cur_abandoned_handles: Default::default(),
             yield_exit: Vec::new(),
             yield_label_seq: 0,
+            free_deep_seq: 0,
             inline_tag: None,
             noted_aggregates: Default::default(),
             freestanding: false,
@@ -5377,7 +5381,7 @@ impl<'a> Cx<'a> {
             HExprKind::ArrayToSlice { base, .. } => self.scan_expr(base),
             HExprKind::DerefRef(inner) => self.scan_expr(inner),
             HExprKind::HeapAlloc(inner) => self.scan_expr(inner),
-            HExprKind::Free(inner) => self.scan_expr(inner),
+            HExprKind::Free(inner, _) => self.scan_expr(inner),
             HExprKind::CallIndirect { callee, args } => {
                 self.scan_expr(callee);
                 for a in args { self.scan_expr(a); }
@@ -8721,9 +8725,9 @@ impl<'a> Cx<'a> {
                 let v = self.emit_inline_expr(inline_f, inner, tag);
                 format!("(__extension__ ({{ {0}* __p = ({0}*)malloc(sizeof({0})); *__p = ({1}); __p; }}))", ic, v)
             }
-            HExprKind::Free(inner) => {
+            HExprKind::Free(inner, deep) => {
                 let s = self.emit_inline_expr(inline_f, inner, tag);
-                format!("(free((void*)({})), MAKA_UNIT)", s)
+                self.emit_free(s, &inner.ty, *deep)
             }
             HExprKind::Match { scrutinee, arms, result_ty } => {
                 self.emit_inline_match(inline_f, scrutinee, arms, result_ty, tag)
@@ -10413,9 +10417,9 @@ impl<'a> Cx<'a> {
                 let v = self.emit_move_consuming(f, inner);
                 format!("(__extension__ ({{ {0}* __p = ({0}*)malloc(sizeof({0})); *__p = ({1}); __p; }}))", inner_c, v)
             }
-            HExprKind::Free(inner) => {
+            HExprKind::Free(inner, deep) => {
                 let s = self.emit_expr(f, inner);
-                format!("(free((void*)({})), MAKA_UNIT)", s)
+                self.emit_free(s, &inner.ty, *deep)
             }
             HExprKind::Match { scrutinee, arms, result_ty } => {
                 self.emit_match(f, scrutinee, arms, result_ty)
@@ -10591,6 +10595,41 @@ impl<'a> Cx<'a> {
         if needs_value { body.push_str("__r; "); } else { body.push_str("MAKA_UNIT; "); }
         body.push_str("})");
         body
+    }
+
+    /// Lower a `free value` node to a C expression of type `MAKA_UNIT`.
+    /// `ptr_expr` is the already-emitted operand (a `raw *T`), `ptr_ty` its
+    /// HType.  A shallow free is just `free((void*)p)`; a `free deep p` first
+    /// runs the SAME recursive drop glue an owning value gets at scope exit, by
+    /// treating the raw pointer as an `own *T` and reusing `emit_field_drop`, so
+    /// every pointee shape (struct/enum graph, array-of-owning, `Vec`, nested)
+    /// is reclaimed uniformly.  The whole thing is a GNU statement-expression so
+    /// it stays a single expression usable in any position, and the operand is
+    /// bound to a temp so it is evaluated exactly once.
+    fn emit_free(&mut self, ptr_expr: String, ptr_ty: &HType, deep: bool) -> String {
+        let shallow = || format!("(free((void*)({})), MAKA_UNIT)", ptr_expr);
+        if !deep {
+            return shallow();
+        }
+        let pointee = match ptr_ty {
+            HType::RawPtr { inner, .. } | HType::Ptr { inner, .. } | HType::OwnPtr { inner, .. } => {
+                inner.as_ref().clone()
+            }
+            // Not a pointer we can walk (should not reach here after the sema
+            // `raw *T` check); degrade to a shallow free rather than miscompile.
+            _ => return shallow(),
+        };
+        // `own *T` and `raw *T` share a C representation, so recast the operand
+        // into an owning pointer and let the standard drop path free the graph.
+        let own_ty = HType::OwnPtr { mutable: true, inner: Box::new(pointee) };
+        let cty = self.c_type(&own_ty);
+        self.free_deep_seq += 1;
+        let tmp = format!("__fd{}", self.free_deep_seq);
+        // emit_field_drop(OwnPtr) => `if (tmp) { <drop *tmp's owned fields>; free(tmp); }`.
+        let drops = self.capture_drops(&[(tmp.clone(), own_ty)]);
+        format!(
+            "(__extension__ ({{ {cty} {tmp} = ({cty})({ptr_expr}); {drops} MAKA_UNIT; }}))"
+        )
     }
 
     /// Emit drops for a resolved (c_name, type) list, captured as a C string
@@ -11240,7 +11279,7 @@ fn expr_has_break_continue(e: &HExpr) -> bool {
         HExprKind::Bin { lhs, rhs, .. } => expr_has_break_continue(lhs) || expr_has_break_continue(rhs),
         HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. } | HExprKind::Cast { expr, .. }
         | HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
-        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr) | HExprKind::SliceLen(expr)
+        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr, _) | HExprKind::SliceLen(expr)
         | HExprKind::EnumTag(expr) | HExprKind::Transfer(expr) | HExprKind::ArrayToSlice { base: expr, .. }
         | HExprKind::AddrOfRef { place: expr, .. } | HExprKind::Field { base: expr, .. } => expr_has_break_continue(expr),
         HExprKind::Index { base, idx } => expr_has_break_continue(base) || expr_has_break_continue(idx),
@@ -11300,7 +11339,7 @@ fn local_used_by_value(e: &HExpr, id: u32) -> bool {
         HExprKind::Unwrap { expr, .. } | HExprKind::Un { expr, .. }
         | HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. }
         | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
-        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr)
+        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr, _)
         | HExprKind::SliceLen(expr) | HExprKind::EnumTag(expr)
         | HExprKind::ArrayToSlice { base: expr, .. } => local_used_by_value(expr, id),
         HExprKind::Bin { lhs, rhs, .. } => local_used_by_value(lhs, id) || local_used_by_value(rhs, id),
@@ -11337,7 +11376,7 @@ fn expr_contains_local(e: &HExpr, id: u32) -> bool {
         HExprKind::Unwrap { expr, .. } | HExprKind::Un { expr, .. }
         | HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. }
         | HExprKind::DropWrite(expr) | HExprKind::DerefRef(expr)
-        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr)
+        | HExprKind::HeapAlloc(expr) | HExprKind::Free(expr, _)
         | HExprKind::SliceLen(expr) | HExprKind::EnumTag(expr)
         | HExprKind::ArrayToSlice { base: expr, .. } => expr_contains_local(expr, id),
         HExprKind::AddrOfRef { place, .. } => expr_contains_local(place, id),
@@ -11443,7 +11482,7 @@ fn expr_mutates_local(e: &HExpr, iv: u32) -> bool {
         HExprKind::Un { expr, .. } | HExprKind::Unwrap { expr, .. }
         | HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. } => expr_mutates_local(expr, iv),
         HExprKind::DropWrite(e) | HExprKind::DerefRef(e) | HExprKind::HeapAlloc(e)
-        | HExprKind::Free(e) | HExprKind::Transfer(e) | HExprKind::SliceLen(e)
+        | HExprKind::Free(e, _) | HExprKind::Transfer(e) | HExprKind::SliceLen(e)
         | HExprKind::EnumTag(e) => expr_mutates_local(e, iv),
         HExprKind::ArrayToSlice { base, .. } => expr_mutates_local(base, iv),
         HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } =>
@@ -11687,7 +11726,7 @@ fn collect_local_reads_expr(e: &HExpr, out: &mut std::collections::HashSet<u32>)
         CallIndirect { callee, args } => { collect_local_reads_expr(callee, out); for a in args { collect_local_reads_expr(a, out); } }
         Bin { lhs, rhs, .. } => { collect_local_reads_expr(lhs, out); collect_local_reads_expr(rhs, out); }
         Un { expr, .. } | Unwrap { expr, .. } | Cast { expr, .. } | CheckedCast { expr, .. }
-        | DropWrite(expr) | DerefRef(expr) | HeapAlloc(expr) | Free(expr) | Transfer(expr)
+        | DropWrite(expr) | DerefRef(expr) | HeapAlloc(expr) | Free(expr, _) | Transfer(expr)
         | SliceLen(expr) | EnumTag(expr) => collect_local_reads_expr(expr, out),
         AddrOfRef { place, .. } => collect_local_reads_expr(place, out),
         Struct { fields, .. } | VariantCtor { fields, .. } => for (_, fe) in fields { collect_local_reads_expr(fe, out); },

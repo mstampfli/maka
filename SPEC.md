@@ -186,6 +186,15 @@ a compile error directing the user at `own *T` or `own &T`.
 call and is the inverse of `alloc → raw *T`.  Outside `unsafe`, or on any
 other pointer kind, sema rejects it.
 
+`free deep p;` is the deep variant: before freeing `p` it runs the **same
+recursive drop glue** an owning value gets at scope exit on `p`'s target, so an
+owned graph parked behind a raw pointer (the FFI-singleton teardown pattern -
+`mut raw *mut World` reset on reboot/save-load) is fully reclaimed instead of
+leaking its nested `own *` fields.  `deep` is a contextual modifier: it is only
+read as such when an operand follows it, so `free deep;` still frees a variable
+named `deep`.  Same `raw *T` + `unsafe` requirement as plain `free`; on a pointee
+with no owned fields it is identical to a shallow `free`.
+
 For Maka-managed memory there is no `free`:
 
 - `own *T` and `own &T` auto-free at scope exit.  The free is **recursive**:
@@ -746,7 +755,8 @@ compile error** (`poisoned`).
    - `raw *T x = alloc T { ... };` — allocate into an untracked pointer
      (no auto-free; the binding leaves with no destructor).
    - `free p;` — bare-word keyword statement, lowers to a C `free` call;
-     accepts only `raw *T`.
+     accepts only `raw *T`.  `free deep p;` also runs the recursive drop glue
+     on the target first, reclaiming an owned graph parked behind the pointer.
 5. Mentioning `*unit` (the untyped opaque pointer) in a let binding,
    function parameter, or return type.  In safe code `*unit` is rejected
    outright — typed handles from the stdlib (`Atomic`, `Mutex`,

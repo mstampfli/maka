@@ -1076,7 +1076,7 @@ impl<'a> TypeChecker<'a> {
                     span: *span,
                 }
             }
-            ast::Expr::Free { value, span } => {
+            ast::Expr::Free { value, deep, span } => {
                 // `free value`: bare-word deallocator for `raw *T`, only inside `unsafe { }`.
                 let h = self.check_expr(value, None);
                 let ok_ty = matches!(h.ty, HType::RawPtr { .. });
@@ -1100,7 +1100,7 @@ impl<'a> TypeChecker<'a> {
                     );
                 }
                 HExpr {
-                    kind: HExprKind::Free(Box::new(h)),
+                    kind: HExprKind::Free(Box::new(h), *deep),
                     ty: HType::Unit,
                     span: *span,
                 }
@@ -6235,7 +6235,7 @@ fn shift_placeholder_fids(f: &mut HFunc, base: u32) {
                 }
             }
             HExprKind::HeapAlloc(inner) | HExprKind::Transfer(inner)
-            | HExprKind::Free(inner) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => sh_expr(inner, base),
+            | HExprKind::Free(inner, _) | HExprKind::SliceLen(inner) | HExprKind::EnumTag(inner) => sh_expr(inner, base),
             HExprKind::CallIndirect { callee, args } => { sh_expr(callee, base); for a in args { sh_expr(a, base); } }
             HExprKind::Closure { env_values, .. } => for v in env_values { sh_expr(v, base); },
             HExprKind::ArrayLit(es) => for e2 in es { sh_expr(e2, base); },
