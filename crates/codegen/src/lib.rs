@@ -11674,7 +11674,36 @@ fn c_ident(name: &str) -> String {
         if c.is_ascii_alphanumeric() || c == '_' { out.push(c); }
         else { out.push_str(&format!("_{:02x}", c as u32)); }
     }
+    // A Maka identifier that is a C keyword but not a Maka keyword (`double`,
+    // `void`, `long`, `struct`, `switch`, `static`, ...) would emit an illegal C
+    // name and fail to compile.  Suffix `_` to disambiguate.  Done inside
+    // `c_ident` so EVERY emission site (a declaration and each of its uses)
+    // mangles identically.  Globals are already prefixed (`__maka_global__`) and
+    // externs keep their raw ABI name, so neither routes through here.
+    if is_c_keyword(&out) {
+        out.push('_');
+    }
     out
+}
+
+/// The C11 keyword set.  Maka's own keywords (`int`, `char`, `for`, ...) can
+/// never be identifiers, so the overlap is harmless; the ones that matter are
+/// the C keywords that ARE legal Maka identifiers (`double`, `void`, `long`,
+/// `short`, `signed`, `unsigned`, `struct`, `union`, `switch`, `case`,
+/// `default`, `do`, `goto`, `sizeof`, `static`, `register`, `volatile`,
+/// `restrict`, `typedef`, `auto`).
+fn is_c_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "auto" | "break" | "case" | "char" | "const" | "continue" | "default"
+            | "do" | "double" | "else" | "enum" | "extern" | "float" | "for"
+            | "goto" | "if" | "inline" | "int" | "long" | "register" | "restrict"
+            | "return" | "short" | "signed" | "sizeof" | "static" | "struct"
+            | "switch" | "typedef" | "union" | "unsigned" | "void" | "volatile"
+            | "while" | "_Bool" | "_Complex" | "_Imaginary" | "_Alignas"
+            | "_Alignof" | "_Atomic" | "_Generic" | "_Noreturn"
+            | "_Static_assert" | "_Thread_local"
+    )
 }
 
 fn inline_local_name(_inline_f: &HFunc, id: LocalId, tag: &str) -> String {

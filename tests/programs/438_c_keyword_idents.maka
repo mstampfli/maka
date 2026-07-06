@@ -1,0 +1,14 @@
+// C keywords that are legal Maka identifiers (double, struct, long, switch,
+// default, static, ...) must not collide with the C keywords of the same
+// spelling in the emitted code.  codegen suffixes such names with `_`.
+int double(int x) { return x * 2; }
+data Cell { int struct; int long; }
+enum Kind { switch, default }
+
+unit main() {
+    log(double(21));                        // 42
+    Cell c = Cell { struct = 3, long = 4 };
+    log(c.struct + c.long);                 // 7
+    Kind k = Kind.default;
+    log(k.tag);                             // 1
+}
