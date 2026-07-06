@@ -1,0 +1,34 @@
+// Non-null narrowing now flows through a projected place, not just a bare local:
+// `if (P != null) { P! }` works for an indexed owning element `xs[0]`, a struct
+// field `s.p`, and in the `else` of an `== null` guard.  (SPEC 17.)
+data Node { int v; own *Node next; }
+data Wrap { own *Node p; }
+
+unit main() {
+    Vec<own *Node> xs = [];
+    push(xs, alloc Node { v = 7, next = null });
+
+    // indexed owning element
+    if (xs[0] != null) {
+        log(xs[0]!.v);              // 7
+    }
+
+    // struct field place
+    Wrap w = Wrap { p = alloc Node { v = 9, next = null } };
+    if (w.p != null) {
+        log(w.p!.v);               // 9
+    }
+
+    // else-branch of an `== null` guard narrows the place non-null
+    if (xs[0] == null) {
+        log(0);
+    } else {
+        log(xs[0]!.v);             // 7
+    }
+
+    // two derefs of the same place within one call's arguments (both proven
+    // before the call executes)
+    if (xs[0] != null) {
+        log(xs[0]!.v + xs[0]!.v);      // 14
+    }
+}

@@ -1,0 +1,12 @@
+// Place-narrowing must be invalidated by a call that can mutate the container:
+// `pop(xs)` removes the element, so the earlier `xs[0] != null` is stale and
+// `xs[0]!` must NOT be proven.
+data Node { int v; own *Node next; }
+unit main() {
+    Vec<own *Node> xs = [];
+    push(xs, alloc Node { v = 7, next = null });
+    if (xs[0] != null) {
+        own *Node g = pop(xs);   // removes xs[0]
+        log(xs[0]!.v);           // must be rejected: element gone
+    }
+}

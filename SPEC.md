@@ -2097,14 +2097,16 @@ These are real limitations the implementation is honest about:
   dispatches through a vtable, which is generated for `logic`-shaped traits
   (concrete-receiver methods); `attr` + `has` is not (yet) a valid `some`/`dyn`
   bound.
-- **Non-null narrowing does not flow through a non-trivial place.** A guard
-  `if (p != null) { p! }` narrows a plain local/parameter `p`, but not an
-  indexed or field place: `if (xs[0] != null) { xs[0]! }` still reports "cannot
-  prove non-null", because the narrowing is keyed on the binding, not on the
-  evaluated place expression, and re-evaluating `xs[0]` could in principle see a
-  different element.  Workaround: bind the element to a local first (a move,
-  `own *Node e = xs[0];`, or a borrow) and narrow that.  The fix is to key
-  narrowing on a normalized place path (index/field), matching how it already
-  works for a bare local.
+- **Non-null narrowing of a projected place is `if`-only and owning-only.**
+  `if (P != null) { P! }` now narrows an indexed or field OWNING place - an
+  `own *T` element `xs[0]` or field `s.p`, keyed on a normalized place path - not
+  just a bare local.  The narrowing is dropped the moment anything could change
+  the place: a write to it or its container/index, a move of the element, the
+  container going out of scope, or any intervening call (conservatively, a call
+  clears all place-narrowings, since it may mutate a container through a `&mut`
+  argument - so bind to a local across a call).  Two limits remain: it fires for
+  `if` guards only (not `while`), and only for OWNING places - a non-owning `*T`
+  element aliases memory owned elsewhere that could be freed without touching the
+  container (a use-after-free the pass cannot see), so those are still refused.
 
 These are tractable to fix; they are not architectural blockers.

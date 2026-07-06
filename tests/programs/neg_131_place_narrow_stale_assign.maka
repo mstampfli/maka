@@ -1,0 +1,12 @@
+// Place-narrowing must be invalidated when the place is written between the
+// guard and the deref: `xs[0] = null` makes the earlier `xs[0] != null` stale,
+// so `xs[0]!` must NOT be proven (allowing it would deref null).
+data Node { int v; own *Node next; }
+unit main() {
+    Vec<own *Node> xs = [];
+    push(xs, alloc Node { v = 7, next = null });
+    if (xs[0] != null) {
+        xs[0] = null;
+        log(xs[0]!.v);   // must be rejected: the narrowing is stale
+    }
+}

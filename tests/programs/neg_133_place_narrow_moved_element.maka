@@ -1,0 +1,13 @@
+// Moving an owning element out of the container auto-nulls the source slot at
+// runtime (SPEC 6.4), so a prior `xs[0] != null` narrowing is stale.  `xs[0]!`
+// must be rejected - otherwise it dereferences the now-null slot (a segfault the
+// place-narrowing feature must never enable).
+data Node { int v; own *Node next; }
+unit main() {
+    Vec<own *Node> xs = [];
+    push(xs, alloc Node { v = 7, next = null });
+    if (xs[0] != null) {
+        own *Node e = xs[0];   // moves the element out
+        log(xs[0]!.v);         // must be rejected: source auto-nulled
+    }
+}

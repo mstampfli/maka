@@ -577,12 +577,101 @@ fn detect_null_narrow(cond: &HExpr) -> (Option<LocalId>, Option<LocalId>) {
     }
 }
 
+/// A normalized non-null narrowing for a *place* that is not a bare local -
+/// `xs[0]`, `s.field`, `xs[0].p` - keyed structurally so a guard `if (P != null)`
+/// and a later deref `P!` match by identity.  Bare locals are handled by the
+/// per-local `narrowed_until` flag; this handles the projected-place cases the
+/// slot-based narrowing cannot (see SPEC 17).
+#[derive(Clone, PartialEq, Eq)]
+enum IdxKey {
+    Const(i64),
+    Local(u32),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum PlaceKey {
+    Local(u32),
+    Field(Box<PlaceKey>, usize),
+    Index(Box<PlaceKey>, IdxKey),
+}
+
+/// An active place-narrowing fact: `key` is provably non-null while in scope.
+struct PlaceFact {
+    key: PlaceKey,
+    /// Block depth this fact is scoped to; dropped when that block exits.
+    depth: u32,
+    /// Locals whose mutation could change the place (its root container and any
+    /// index variables).  Touching any of them invalidates the fact.
+    deps: Vec<u32>,
+}
+
+/// Detect a projected-place null guard: `P != null` (`want_ne`) or `P == null`
+/// (`!want_ne`) where `P` is a Field/Index place (bare locals are handled by the
+/// per-local narrowing path, so they are deliberately excluded here).
+fn detect_place_narrow(cond: &HExpr, want_ne: bool) -> Option<(PlaceKey, Vec<u32>)> {
+    let HExprKind::Bin { op, lhs, rhs } = &cond.kind else { return None };
+    if !matches!((op, want_ne), (HBinOp::Ne, true) | (HBinOp::Eq, false)) {
+        return None;
+    }
+    let place = match (&lhs.kind, &rhs.kind) {
+        (_, HExprKind::LitNull) => lhs.as_ref(),
+        (HExprKind::LitNull, _) => rhs.as_ref(),
+        _ => return None,
+    };
+    if !matches!(place.kind, HExprKind::Field { .. } | HExprKind::Index { .. }) {
+        return None;
+    }
+    // Only OWNING places (`own *T` / `own &T`).  An owning element's pointee lives
+    // exactly as long as the element holds it, and every release path (move-out,
+    // reassign, container drop, an intervening call) invalidates the fact - so the
+    // narrowing stays sound.  A non-owning `*T`/`raw *T` element aliases memory
+    // owned elsewhere that could be freed without touching this container (a UAF
+    // we cannot see), and unlike a bare-local alias there is no dep edge to catch
+    // it - so we refuse to narrow those.
+    if !matches!(place.ty, HType::OwnPtr { .. } | HType::Heap { .. }) {
+        return None;
+    }
+    place_key(place)
+}
+
+/// Normalize a narrowable place expression to a `(key, dep-locals)` pair, or
+/// `None` if the expression is not a stable projected place rooted at a local
+/// (e.g. it indexes by a computed expression, or derefs a pointer mid-path -
+/// both of which we cannot cheaply prove stable, so we refuse to narrow them).
+fn place_key(e: &HExpr) -> Option<(PlaceKey, Vec<u32>)> {
+    match &e.kind {
+        HExprKind::Local(id) => Some((PlaceKey::Local(id.0), vec![id.0])),
+        HExprKind::Field { base, field } => {
+            let (bk, deps) = place_key(base)?;
+            Some((PlaceKey::Field(Box::new(bk), *field), deps))
+        }
+        HExprKind::Index { base, idx } => {
+            let (bk, mut deps) = place_key(base)?;
+            let ik = match &idx.kind {
+                HExprKind::LitInt(n) => IdxKey::Const(*n),
+                HExprKind::Local(id) => { deps.push(id.0); IdxKey::Local(id.0) }
+                // A computed index (`xs[i+1]`, `xs[f()]`) is not tracked: proving
+                // it unchanged between guard and deref needs value analysis we
+                // don't do, so refuse rather than narrow unsoundly.
+                _ => return None,
+            };
+            Some((PlaceKey::Index(Box::new(bk), ik), deps))
+        }
+        _ => None,
+    }
+}
+
 struct Analyzer<'a> {
     #[allow(dead_code)]
     sym: &'a SymTab,
     f: *mut HFunc,
     /// One LocalState per LocalId.
     state: Vec<LocalState>,
+    /// Active non-null narrowings for projected places (`xs[0]`, `s.p`).  A
+    /// depth-scoped stack, separate from `state` so it needs no snapshotting:
+    /// facts are pushed on entering a guard branch and dropped when that block
+    /// exits or a dep local / any call could have changed the place.
+    place_facts: Vec<PlaceFact>,
     errors: Vec<SemaError>,
     /// Non-fatal diagnostics — surfaced when an auto-nulled pointer is observed
     /// at a use site without intervening re-assignment on every code path.
@@ -632,6 +721,7 @@ impl<'a> Analyzer<'a> {
             sym,
             f: f as *mut _,
             state: (0..n).map(|_| LocalState::fresh()).collect(),
+            place_facts: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
             summaries,
@@ -831,6 +921,13 @@ impl<'a> Analyzer<'a> {
                         let sp = *span;
                         self.mark_moved(src, sp);
                     }
+                } else if ty_owns_heap(self.sym, &init.ty)
+                    && matches!(init.kind, HExprKind::Field { .. } | HExprKind::Index { .. })
+                {
+                    // `own *T e = xs[0];` moves the element out and auto-nulls the
+                    // source slot at runtime, so a prior `xs[0] != null` narrowing
+                    // is now stale - invalidate it (else `xs[0]!` would deref null).
+                    if let Some(r) = root_local(init) { self.invalidate_place_facts(r.0); }
                 }
             }
             HStmt::Assign { op, place, value, drop_old, span } => {
@@ -872,6 +969,13 @@ impl<'a> Analyzer<'a> {
                 // it per SPEC 6.4 - so it is safe to flag the move here too; a
                 // straight-line `x = y; y.use()` is then a proper use-after-move.
                 self.mark_owning_move(value);
+                // The write (to `xs = ..`, `xs[i] = ..`, `s.f = ..`, or an index
+                // variable `i = ..`) can change any narrowed place rooted at the
+                // assigned local, so invalidate those facts.  Done after walking
+                // both sides, so a deref in `value`/`place` is still proven.
+                if let Some(r) = root_local(place) {
+                    self.invalidate_place_facts(r.0);
+                }
                 // Reassigning a pointer-like or borrow-bearing local overwrites
                 // its deps (§3.8).  Pointers (`HType::Ptr`) participate in the
                 // null-collapse path; anything else (refs, structs that contain
@@ -992,9 +1096,12 @@ impl<'a> Analyzer<'a> {
             }
             HStmt::If { cond, then_b, else_b, span } => {
                 self.walk_expr(cond);
-                // narrowing: detect `p != null` or `null != p` for an immediate Local(p)
+                // narrowing: detect `p != null` / `null != p` for an immediate
+                // Local(p), and `P != null` for a projected place P (`xs[0]`, `s.p`).
                 let then_narrow = self.detect_not_null_narrow(cond);
                 let else_narrow = self.detect_is_null_narrow(cond);
+                let then_place = detect_place_narrow(cond, true);
+                let else_place = detect_place_narrow(cond, false);
 
                 // Snapshot state for branch join
                 let snap = self.snapshot();
@@ -1003,10 +1110,16 @@ impl<'a> Analyzer<'a> {
                 if let Some(p) = then_narrow {
                     self.state[p.0 as usize].narrowed_until = Some(depth + 1);
                 }
+                if let Some((k, deps)) = &then_place {
+                    self.place_facts.push(PlaceFact { key: k.clone(), depth: depth + 1, deps: deps.clone() });
+                }
                 self.walk_block(then_b, live_outer, depth + 1);
                 if let Some(p) = then_narrow {
                     self.state[p.0 as usize].narrowed_until = None;
                 }
+                // Drop place-facts scoped to this branch (this guard's, plus any
+                // from nested guards inside it that weren't already invalidated).
+                self.place_facts.retain(|f| f.depth <= depth);
                 let then_state = self.snapshot();
                 self.restore(snap.clone());
 
@@ -1015,10 +1128,14 @@ impl<'a> Analyzer<'a> {
                     if let Some(p) = else_narrow {
                         self.state[p.0 as usize].narrowed_until = Some(depth + 1);
                     }
+                    if let Some((k, deps)) = &else_place {
+                        self.place_facts.push(PlaceFact { key: k.clone(), depth: depth + 1, deps: deps.clone() });
+                    }
                     self.walk_block(b, live_outer, depth + 1);
                     if let Some(p) = else_narrow {
                         self.state[p.0 as usize].narrowed_until = None;
                     }
+                    self.place_facts.retain(|f| f.depth <= depth);
                 }
                 let else_state = self.snapshot();
 
@@ -1217,6 +1334,11 @@ impl<'a> Analyzer<'a> {
                         self.check_no_local_ref_escape(&args[1], false);
                     }
                 }
+                // A call can mutate any container reachable through a `&mut`
+                // argument (push/pop/clear/swap...), which could change a narrowed
+                // element's value, so conservatively drop all place-facts after the
+                // args are evaluated (a deref passed AS an arg is already proven).
+                self.place_facts.clear();
             }
             HExprKind::Cast { expr, .. } => self.walk_expr(expr),
             HExprKind::CheckedCast { expr, .. } => self.walk_expr(expr),
@@ -1232,6 +1354,7 @@ impl<'a> Analyzer<'a> {
             HExprKind::CallIndirect { callee, args } => {
                 self.walk_expr(callee);
                 for a in args { self.walk_expr(a); }
+                self.place_facts.clear();
             }
             HExprKind::InlineCall { args, .. } => {
                 // InlineCall must mirror Call's move semantics: an `own *T`/`heap T`
@@ -1244,6 +1367,7 @@ impl<'a> Analyzer<'a> {
                     self.walk_expr(a);
                     self.mark_owning_move(a);
                 }
+                self.place_facts.clear();
             }
             HExprKind::Closure { env_values, lifted, capture_lids, .. } => {
                 for (i, v) in env_values.iter_mut().enumerate() {
@@ -1661,6 +1785,9 @@ impl<'a> Analyzer<'a> {
             return;
         }
         self.state[id.0 as usize].moved = true;
+        // A move invalidates any place-narrowing rooted at (or indexed by) this
+        // local: the container/element it names is now owned elsewhere.
+        self.invalidate_place_facts(id.0);
         // Moving an owner POINTER (by-value into a call/struct/array/return, into
         // another owning local, or via `transfer` across a gate) transfers its heap
         // to the new owner, which frees it - any `*T`/`&T` alias of it now dangles.
@@ -1696,6 +1823,11 @@ impl<'a> Analyzer<'a> {
             if let HExprKind::Local(id) = a.kind {
                 // mark_moved poisons the owner's aliases (single move choke point).
                 self.mark_moved(id, a.span);
+            } else if matches!(a.kind, HExprKind::Field { .. } | HExprKind::Index { .. }) {
+                // A projected owning place moved out (`f(xs[0])`, `S { g = s.p }`)
+                // auto-nulls the source at runtime (SPEC 6.4), so any place-narrowing
+                // rooted there is now stale.
+                if let Some(r) = root_local(a) { self.invalidate_place_facts(r.0); }
             }
         }
     }
@@ -1709,6 +1841,21 @@ impl<'a> Analyzer<'a> {
 
     /// Is this RHS expression statically known to produce a non-null pointer?
     /// True for `heap T(...)` and for locals already known non-null.
+    /// A projected place (`xs[0]`, `s.p`) is proven non-null iff a live fact
+    /// keys to it exactly.
+    fn place_nonnull(&self, key: &PlaceKey) -> bool {
+        self.place_facts.iter().any(|f| &f.key == key)
+    }
+
+    /// Drop every place-fact whose dependency set mentions `local` - it was
+    /// mutated / moved / freed / went out of scope, so any narrowing riding on
+    /// it is no longer sound.
+    fn invalidate_place_facts(&mut self, local: u32) {
+        if !self.place_facts.is_empty() {
+            self.place_facts.retain(|f| !f.deps.contains(&local));
+        }
+    }
+
     fn expr_nonnull(&self, e: &HExpr) -> bool {
         match &e.kind {
             HExprKind::HeapAlloc(_) => true,
@@ -1716,6 +1863,11 @@ impl<'a> Analyzer<'a> {
             HExprKind::Local(id) => {
                 let st = &self.state[id.0 as usize];
                 st.known_nonnull || st.narrowed_until.is_some()
+            }
+            // A projected place guarded by `if (P != null)`: proven while the
+            // matching place-fact is live (see `place_facts`).
+            HExprKind::Field { .. } | HExprKind::Index { .. } => {
+                place_key(e).map_or(false, |(k, _)| self.place_nonnull(&k))
             }
             HExprKind::Cast { expr, kind, .. } | HExprKind::CheckedCast { expr, kind, .. } => {
                 // The tag-checked `*int → *Enum` cast can yield null even when
@@ -1863,6 +2015,9 @@ impl<'a> Analyzer<'a> {
                 }
             }
         }
+        // Freeing / moving / scope-exiting the killed local invalidates any
+        // place-narrowing rooted at (or indexed by) it.
+        self.invalidate_place_facts(lid_num);
         nulled
     }
 

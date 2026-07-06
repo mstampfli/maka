@@ -1,0 +1,15 @@
+// A NON-owning `*T` element aliases memory owned elsewhere.  Freeing that owner
+// (here `owner = null`) dangles the element without touching the container, and
+// unlike a bare-local alias there is no dependency edge to catch it - so place
+// narrowing must NOT apply to non-owning element places.  `xs[0]!` must be
+// rejected (proving it would be a use-after-free).
+data Node { int v; own *Node next; }
+unit main() {
+    own *Node owner = alloc Node { v = 7, next = null };
+    Vec<*Node> xs = [];
+    push(xs, &mut owner!);
+    if (xs[0] != null) {
+        owner = null;          // frees the pointee; xs[0] now dangles
+        log(xs[0]!.v);         // must be rejected: non-owning place not narrowed
+    }
+}
