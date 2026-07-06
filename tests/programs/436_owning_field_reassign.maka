@@ -1,0 +1,34 @@
+// Reassigning an owning FIELD whose RHS references the same root local is
+// drop-then-move, like indexed places: the old field value is freed exactly
+// once, a moved-out sibling source is nulled, and self-assign is a no-op.
+// (Previously `s.f = make(s.dim)` skipped the old drop and leaked - the
+// civsim `s.fires = fires_new(s.w.w, s.w.h)` shape.)
+import std.{Vec, push};
+
+data Inner { mut Vec<int> cells; }
+data Outer { mut int dim; mut Inner inner; }
+
+Outer make(int n) {
+    Vec<int> b = [];
+    push(b, n);
+    return Outer{ dim = n, inner = Inner{ cells = b } };
+}
+
+data Holder { mut int size; mut Outer o; mut Outer p; }
+
+unit main() {
+    mut Holder h = Holder{ size = 7, o = make(1), p = make(2) };
+
+    // same-root call RHS: old h.o must be dropped, not leaked
+    h.o = make(h.size);
+    log(h.o.inner.cells[0]);        // 7
+
+    // sibling field move: old h.o dropped once, h.p moved in and nulled
+    h.o = h.p;
+    log(h.o.inner.cells[0]);        // 2
+
+    // self-assign: correct no-op (source nulled before the old drop)
+    h.o = h.o;
+    log(h.o.inner.cells[0]);        // 2
+    log(h.o.dim);                   // 2
+}

@@ -9136,6 +9136,12 @@ impl<'a> Cx<'a> {
                     if field_is_heap {
                         let s = self.emit_expr(f, init);
                         self.wl(&format!("{} {} = {};", ptr_ty, name, s));
+                        // Ownership TRANSFERRED out of the field: null the source
+                        // so neither a later drop-on-reassign of that field nor
+                        // the container's drop frees the moved pointer again
+                        // (take-and-replace stays single-owner; a read after the
+                        // move faults loudly instead of aliasing a freed box).
+                        self.emit_move_out_null(f, init);
                         return;
                     }
                 }
@@ -9231,18 +9237,21 @@ impl<'a> Cx<'a> {
         //   - RHS uses the place only via a borrow    -> the old value is still live
         //     (`s = s + x`, `+` takes `&self`): compute the new value into a temp,
         //     then drop the old value, then assign (free it exactly once).
-        //   - RHS reads/moves the place by value      -> it derives the new value FROM
-        //     the old one (`node = node.next`, `p.a = p.b`): leave the old value alone
-        //     (dropping it would double-free the moved-out part).
+        //   - RHS reads/moves the BARE-LOCAL place by value -> it derives the new
+        //     value FROM the old one (`node = node.next`, the list-walk idiom):
+        //     leave the old value alone (dropping it would double-free the
+        //     moved-out part, and a walker does not own the nodes it visits).
         if drop_old && matches!(op, HAssignOp::Assign) && self.drop_ty_owns(&place.ty) {
             if let Some(root) = place_root_local(place) {
-                // An INDEXED owning place whose RHS reads the same container
-                // (`bs[i] = bs[j]`): the root-based heuristic below can't tell
-                // whether `i == j` at runtime, so it used to skip the old-slot
-                // drop and leak.  Use the aliasing-safe order: copy the RHS into
-                // a temp, NULL the source slot, drop the old slot (a no-op when
-                // `i == j`, since it was just nulled), then move the temp in.
-                if place_is_indexed(place) && expr_contains_local(value, root) {
+                // A PROJECTED owning place (field or index chain) whose RHS reads
+                // the same root (`bs[i] = bs[j]`, `s.fires = fires_new(s.w.w, ..)`,
+                // `p.a = p.b`): the root-based heuristic below can't tell whether
+                // the RHS touches the place's own old value, so it used to skip
+                // the old drop and leak it.  Use the aliasing-safe order: copy the
+                // RHS into a temp, NULL any source slot it moved out of, drop the
+                // old place (a no-op when the RHS was the place itself, since it
+                // was just nulled), then move the temp in.
+                if place_is_projection(place) && expr_contains_local(value, root) {
                     let ty = self.c_type(&place.ty);
                     self.wl(&format!("{{ {} __new = {};", ty, rhs));
                     self.emit_move_out_null(f, value);
@@ -11309,14 +11318,15 @@ fn place_root_local(e: &HExpr) -> Option<u32> {
     }
 }
 
-/// Does this place go through an `[i]` index?  Such a place aliases its
-/// container at a runtime-computed slot, so `vec[i] = vec[j]` needs the
-/// aliasing-safe drop-on-reassign order (null source before dropping the slot).
-fn place_is_indexed(e: &HExpr) -> bool {
+/// Is this place a PROJECTION of its root (a field or index chain) rather than
+/// the bare root local itself?  A projection's old value only flows into the
+/// RHS if the RHS reads that same projection - which the aliasing-safe
+/// reassign order handles - so drop-then-move applies.  The bare local keeps
+/// the leave-alone rule (`node = node.next` list walking).
+fn place_is_projection(e: &HExpr) -> bool {
     match &e.kind {
-        HExprKind::Index { .. } => true,
-        HExprKind::Field { base, .. } => place_is_indexed(base),
-        HExprKind::Unwrap { expr, .. } | HExprKind::DerefRef(expr) => place_is_indexed(expr),
+        HExprKind::Index { .. } | HExprKind::Field { .. } => true,
+        HExprKind::Unwrap { expr, .. } | HExprKind::DerefRef(expr) => place_is_projection(expr),
         _ => false,
     }
 }

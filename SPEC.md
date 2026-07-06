@@ -691,6 +691,23 @@ When an owning binding goes out of scope without being moved, the compiler
 emits `free(binding)` automatically. `own *T` also auto-frees on reassignment
 (the previous value is freed before the new one is stored).
 
+Reassigning an owning PLACE (a local, a field, or an indexed element) is
+drop-then-move: the previous value is freed exactly once before the new one
+is stored. When the RHS references the same root as a projected place
+(`bs[i] = bs[j]`, `s.f = make(s.x)`, `p.a = p.b`), the compiler emits the
+aliasing-safe order - compute the new value into a temporary, null any slot
+the RHS moved out of, drop the old value (a no-op when the RHS was the place
+itself), then move the temporary in - so self-assignment is a no-op and
+swap-remove compaction frees the removed element exactly once. Exception:
+a bare owning LOCAL whose RHS derives from its own old value
+(`node = node.next`, the list-walk idiom) leaves the old value untouched;
+a walker does not own the nodes it visits.
+
+Moving an `own &T` out of a field (`own &Box tmp = p.a;`) nulls the source
+field at the transfer: ownership has one home, the container's later drop
+skips the moved-out slot (`free(NULL)` is a no-op), and a read of the field
+after the move faults instead of aliasing a freed value.
+
 ### 6.3 Forced handling for `*T` deref
 
 Dereferencing any nullable pointer (`*T`, `own *T`, `raw *T`) requires the
