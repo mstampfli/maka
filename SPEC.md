@@ -2084,12 +2084,6 @@ These are real limitations the implementation is honest about:
   a parameter is rejected, since the compiler can't prove the borrow's source
   outlives the struct.  Lifetime annotations would let this loosen; v1 takes
   the safe-by-default rejection.
-- **No auto-borrow on method calls.** `p.method()` requires `p` to match the
-  receiver's type exactly; if the method takes `&_ self`, the call site must
-  write `(&p).method()`.  No magic `&` insertion at dispatch.  (Qualified
-  dispatch — `A::run(&f)` / `f.A::run()` / the legacy `Attr.method(&x)` dot form,
-  and return-type-directed disambiguation — IS supported now; see §10.1.  The
-  remaining gap is only the receiver auto-borrow above.)
 - **No turbofish.** A return-only generic type parameter is pinned by the
   expected type (§10.1), not by `f<T>(x)` — `<` at a call site parses as a
   comparison operator.
