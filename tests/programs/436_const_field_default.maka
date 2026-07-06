@@ -1,0 +1,8 @@
+// A const-foldable integer expression is a valid data-field default (not just a
+// bare literal): `0 - 1`, `2 * 3`, etc. fold at resolve time so the field may be
+// omitted from a struct literal.
+data Box { mut int a = 0 - 1; mut int b = 2 * 3; mut int c = 10 / 4; int y; }
+unit main() {
+    Box x = Box { y = 5 };
+    log(x.a); log(x.b); log(x.c); log(x.y);   // -1, 6, 2, 5
+}

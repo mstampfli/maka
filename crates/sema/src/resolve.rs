@@ -42,6 +42,30 @@ fn rust_type_string(t: &ast::Type) -> String {
 /// spliced in when a struct literal omits the field.  Supports literal defaults
 /// (and a negated numeric literal); anything more complex is left as `None`
 /// (the field then has no usable default and must be supplied explicitly).
+/// Fold a const integer expression (literals + `+ - * / %` + unary neg) to its
+/// value, for a data-field default like `mut int x = 0 - 1;`.  Returns None on
+/// anything non-constant (a call, an identifier, a divide-by-zero).
+fn fold_int_default(e: &ast::Expr) -> Option<i64> {
+    match e {
+        ast::Expr::Lit(ast::Lit::Int(n), _) => Some(*n),
+        ast::Expr::Lit(ast::Lit::Char(c), _) => Some(*c as i64),
+        ast::Expr::Un { op: ast::UnOp::Neg, expr, .. } => fold_int_default(expr).map(|v| v.wrapping_neg()),
+        ast::Expr::Bin { op, lhs, rhs, .. } => {
+            let l = fold_int_default(lhs)?;
+            let r = fold_int_default(rhs)?;
+            Some(match op {
+                ast::BinOp::Add => l.wrapping_add(r),
+                ast::BinOp::Sub => l.wrapping_sub(r),
+                ast::BinOp::Mul => l.wrapping_mul(r),
+                ast::BinOp::Div => if r != 0 { l.wrapping_div(r) } else { return None; },
+                ast::BinOp::Mod => if r != 0 { l.wrapping_rem(r) } else { return None; },
+                _ => return None,
+            })
+        }
+        _ => None,
+    }
+}
+
 fn lower_field_default(d: Option<&ast::Expr>, ty: &HType, sym: &SymTab) -> Option<HExpr> {
     fn lit_kind(l: &ast::Lit) -> Option<HExprKind> {
         Some(match l {
@@ -79,6 +103,14 @@ fn lower_field_default(d: Option<&ast::Expr>, ty: &HType, sym: &SymTab) -> Optio
                 }
             }
             return None;
+        }
+        // A const-foldable integer expression default (`0 - 1`, `2 * 3`, ...) on an
+        // int-typed field folds to a literal so struct literals may omit the field.
+        other if matches!(ty, HType::Int | HType::SizedInt { .. } | HType::Char) => {
+            match fold_int_default(other) {
+                Some(v) => (HExprKind::LitInt(v), other.span()),
+                None => return None,
+            }
         }
         _ => return None,
     };
