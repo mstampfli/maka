@@ -1,0 +1,23 @@
+// Assigning into an owning-element slot `vec[i] = vec[j]` drops the OLD element
+// before moving the RHS in (previously it clobbered the slot and leaked the old
+// owning content). Aliasing-safe: `vec[i] = vec[i]` is a correct no-op, and the
+// swap-remove compaction pattern doesn't double-free the moved-out slot.
+import std.{Vec, push, pop};
+data Battle { Vec<int> units; }
+unit main() {
+    Vec<Battle> bs = [];
+    push(bs, Battle { units = [1, 1, 1] });
+    push(bs, Battle { units = [2, 2] });
+    push(bs, Battle { units = [3] });
+    bs[0] = bs[2];                       // drop old [1,1,1], move [3] in
+    log(bs[0].units.len as int);         // 1
+    bs[1] = bs[1];                        // self-assign: no-op
+    log(bs[1].units.len as int);         // 2
+    // swap-remove: overwrite slot 0 with the last, then shrink
+    push(bs, Battle { units = [4, 4, 4, 4] });
+    int last = (bs.len as int) - 1;
+    bs[0] = bs[last];
+    _ = pop(bs);
+    log(bs[0].units.len as int);         // 4
+    log(bs.len as int);                  // 3
+}

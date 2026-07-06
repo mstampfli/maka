@@ -9232,6 +9232,20 @@ impl<'a> Cx<'a> {
         //     (dropping it would double-free the moved-out part).
         if drop_old && matches!(op, HAssignOp::Assign) && self.drop_ty_owns(&place.ty) {
             if let Some(root) = place_root_local(place) {
+                // An INDEXED owning place whose RHS reads the same container
+                // (`bs[i] = bs[j]`): the root-based heuristic below can't tell
+                // whether `i == j` at runtime, so it used to skip the old-slot
+                // drop and leak.  Use the aliasing-safe order: copy the RHS into
+                // a temp, NULL the source slot, drop the old slot (a no-op when
+                // `i == j`, since it was just nulled), then move the temp in.
+                if place_is_indexed(place) && expr_contains_local(value, root) {
+                    let ty = self.c_type(&place.ty);
+                    self.wl(&format!("{{ {} __new = {};", ty, rhs));
+                    self.emit_move_out_null(f, value);
+                    self.emit_field_drop(&lhs, &place.ty, 0);
+                    self.wl(&format!("{} = __new; }}", lhs));
+                    return;
+                }
                 if !expr_contains_local(value, root) {
                     self.emit_field_drop(&lhs, &place.ty, 0);
                 } else if !local_used_by_value(value, root) {
@@ -11253,6 +11267,18 @@ fn place_root_local(e: &HExpr) -> Option<u32> {
         HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => place_root_local(base),
         HExprKind::Unwrap { expr, .. } | HExprKind::DerefRef(expr) => place_root_local(expr),
         _ => None,
+    }
+}
+
+/// Does this place go through an `[i]` index?  Such a place aliases its
+/// container at a runtime-computed slot, so `vec[i] = vec[j]` needs the
+/// aliasing-safe drop-on-reassign order (null source before dropping the slot).
+fn place_is_indexed(e: &HExpr) -> bool {
+    match &e.kind {
+        HExprKind::Index { .. } => true,
+        HExprKind::Field { base, .. } => place_is_indexed(base),
+        HExprKind::Unwrap { expr, .. } | HExprKind::DerefRef(expr) => place_is_indexed(expr),
+        _ => false,
     }
 }
 
