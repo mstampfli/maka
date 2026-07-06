@@ -7,7 +7,18 @@
 use maka_sema::*;
 
 pub fn emit(m: &HirModule) -> String {
+    emit_with_debug(m, &std::collections::HashMap::new())
+}
+
+/// Like `emit`, but emits `#line` directives mapping generated C back to Maka
+/// source, using `debug_files` (module path -> `.maka` file).  The driver passes
+/// this for a normal build so gdb/lldb/VS Code debug Maka source directly.
+pub fn emit_with_debug(
+    m: &HirModule,
+    debug_files: &std::collections::HashMap<Vec<String>, String>,
+) -> String {
     let mut cx = Cx::new(&m.sym, &m.cincludes, &m.cblocks);
+    cx.debug_files = debug_files.clone();
     cx.emit_module();
     cx.out
 }
@@ -121,6 +132,14 @@ struct Cx<'a> {
     /// extern symbols (`__maka_alloc`, `__maka_free`, `__maka_panic`,
     /// `__maka_log`).  Set by `emit_freestanding()`.
     pub freestanding: bool,
+    /// Debug source maps: module path -> the `.maka` file it was parsed from.
+    /// When non-empty, codegen emits `#line N "file.maka"` directives so the
+    /// binary's DWARF references Maka source and gdb/lldb/VS Code debug Maka
+    /// lines directly instead of the generated C.  Empty = no directives.
+    debug_files: std::collections::HashMap<Vec<String>, String>,
+    /// The `.maka` file of the function currently being emitted (its module's
+    /// entry in `debug_files`), used to stamp each statement's `#line`.
+    cur_debug_file: Option<String>,
 }
 
 impl<'a> Cx<'a> {
@@ -150,6 +169,8 @@ impl<'a> Cx<'a> {
             inline_tag: None,
             noted_aggregates: Default::default(),
             freestanding: false,
+            debug_files: Default::default(),
+            cur_debug_file: None,
         }
     }
 
@@ -7612,6 +7633,11 @@ impl<'a> Cx<'a> {
         // inline functions are spliced at each call site; no standalone C function emitted.
         if self.sym.func_sig(f.id).is_inline { return; }
         self.cur_c_func_ret = self.sym.func_sig(f.id).ret.clone();
+        // The `.maka` file backing this function's module, for `#line` stamping.
+        self.cur_debug_file = self
+            .debug_files
+            .get(&self.sym.func_sig(f.id).module_path)
+            .cloned();
         // Abandoned *Thread handles: declared but never referenced again (not
         // joined/detached/stored/returned).  Each leaks its runtime Thread
         // struct, so it is auto-detached at its declaring block's exit.
@@ -7672,6 +7698,12 @@ impl<'a> Cx<'a> {
     fn emit_block(&mut self, f: &HFunc, b: &HBlock, is_top: bool) {
         if !is_top { self.wl("{"); self.open(); }
         for s in &b.stmts {
+            // Stamp each real block statement with its Maka source line so DWARF
+            // maps back to `.maka`.  Only here (a genuine statement context) - NOT
+            // in `emit_stmt` itself, which the match-expression / inline paths also
+            // call while building single-line C expressions where a `#line`
+            // preprocessor directive would be illegal.
+            self.emit_line_directive(s);
             self.emit_stmt(f, s);
         }
         // Null-collapse pointers whose deps just died.
@@ -7705,6 +7737,21 @@ impl<'a> Cx<'a> {
             }
         }
         if !is_top { self.close(); self.wl("}"); }
+    }
+
+    /// Emit `#line N "file.maka"` for a statement (file + line, so there's no
+    /// cross-function bleed).  A no-op when debug mapping is off or the statement
+    /// has no source span.
+    fn emit_line_directive(&mut self, s: &HStmt) {
+        if let Some(file) = self.cur_debug_file.clone() {
+            if let Some(line) = hstmt_line(s) {
+                self.wl(&format!(
+                    "#line {} \"{}\"",
+                    line,
+                    file.replace('\\', "\\\\").replace('"', "\\\"")
+                ));
+            }
+        }
     }
 
     fn emit_stmt(&mut self, f: &HFunc, s: &HStmt) {
@@ -11692,6 +11739,28 @@ fn c_ident(name: &str) -> String {
 /// `short`, `signed`, `unsigned`, `struct`, `union`, `switch`, `case`,
 /// `default`, `do`, `goto`, `sizeof`, `static`, `register`, `volatile`,
 /// `restrict`, `typedef`, `auto`).
+/// The Maka source line of a statement, for `#line` stamping.  `None` for a
+/// statement with no meaningful span (line 0 = synthesized).
+fn hstmt_line(s: &HStmt) -> Option<u32> {
+    let sp = match s {
+        HStmt::Let { span, .. }
+        | HStmt::Assign { span, .. }
+        | HStmt::Return { span, .. }
+        | HStmt::If { span, .. }
+        | HStmt::While { span, .. }
+        | HStmt::Break { span, .. }
+        | HStmt::Continue { span, .. }
+        | HStmt::ForC { span, .. }
+        | HStmt::ForEach { span, .. }
+        | HStmt::Propagate { span, .. } => *span,
+        HStmt::Unsafe(_, span) => *span,
+        HStmt::ExprStmt(e) => e.span,
+        HStmt::Block(b) => b.span,
+        _ => return None,
+    };
+    if sp.line == 0 { None } else { Some(sp.line) }
+}
+
 fn is_c_keyword(s: &str) -> bool {
     matches!(
         s,

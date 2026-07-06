@@ -96,6 +96,10 @@ fn run() {
         has_imports: Vec::new(),
         item_has_imports: Vec::new(),
     };
+    // Module path -> the `.maka` file it was parsed from, so codegen can emit
+    // `#line` directives and a debugger maps to Maka source (see emit_with_debug).
+    let mut module_files: std::collections::HashMap<Vec<String>, String> =
+        std::collections::HashMap::new();
     // Standard library: parsed at every build from `stdlib/std.maka`.  The
     // file is embedded into the compiler binary at build time via
     // `include_str!` so deployments stay single-binary, but it's a real Maka
@@ -106,6 +110,15 @@ fn run() {
     // not magic prelude.
     let std_src = include_str!("../../../stdlib/std.maka");
     if !freestanding {
+    // Best-effort path to the stdlib source, so stdlib frames also get `#line`
+    // stamps (and no `#line` bleed into them); the file exists in a repo checkout.
+    {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std.maka");
+        let sp = std::fs::canonicalize(&p)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "std.maka".to_string());
+        module_files.insert(vec!["std".to_string()], sp);
+    }
     if let Ok(m) = maka_parser::parse(std_src) {
         let path: Vec<String> = m.module_path.clone().unwrap_or_default();
         let flat_imports: Vec<(Vec<String>, String)> = m.imports.iter()
@@ -128,6 +141,12 @@ fn run() {
             Ok(m) => {
                 // Tag every item with this file's module path AND this file's imports.
                 let path = m.module_path.unwrap_or_default();
+                // Record this module's source file for `#line` debug mapping
+                // (absolute so a debugger finds it from any working directory).
+                let abs = std::fs::canonicalize(f)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| f.clone());
+                module_files.insert(path.clone(), abs);
                 // Flatten ImportDecl list into a Vec<(module_path, name)> the
                 // visibility checker can scan in O(n).
                 let flat_imports: Vec<(Vec<String>, String)> = m.imports.iter()
@@ -216,7 +235,7 @@ fn run() {
     let c_code = if freestanding {
         maka_codegen::emit_freestanding(&hir)
     } else {
-        maka_codegen::emit(&hir)
+        maka_codegen::emit_with_debug(&hir, &module_files)
     };
 
     let stem = PathBuf::from(&first_input).file_stem().unwrap().to_string_lossy().to_string();
@@ -239,6 +258,9 @@ fn run() {
     std::fs::write(&tmp, &c_code).expect("write C tmp");
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
     let mut cc_args: Vec<String> = vec!["-std=c11".into(), opt_level.clone(),
+        // Debug info, so the binary carries DWARF; combined with the `#line`
+        // directives codegen emits, gdb/lldb/VS Code map to Maka source.
+        "-g".into(),
         // Define integer overflow as two's-complement wrap (Maka `int` is i64
         // and is expected to wrap, e.g. hashes/RNGs), and disable strict
         // aliasing since the runtime reinterprets memory through several pointer
