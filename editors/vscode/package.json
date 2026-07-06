@@ -1,8 +1,8 @@
 {
   "name": "maka",
   "displayName": "Maka",
-  "description": "Syntax highlighting for the Maka programming language (with embedded Rust in rblock and C in cblock).",
-  "version": "0.1.0",
+  "description": "Language support for Maka: syntax highlighting (embedded Rust/C) plus a language server (diagnostics, hover, go-to-definition, outline, completion).",
+  "version": "0.2.0",
   "publisher": "mstampfli",
   "license": "MIT",
   "repository": {
@@ -10,10 +10,14 @@
     "url": "https://github.com/mstampfli/maka"
   },
   "engines": {
-    "vscode": "^1.60.0"
+    "vscode": "^1.75.0"
   },
   "categories": [
     "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:maka"
   ],
   "contributes": {
     "languages": [
@@ -34,6 +38,24 @@
           "meta.embedded.block.c": "c"
         }
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Maka",
+      "properties": {
+        "maka.server.path": {
+          "type": "string",
+          "default": "maka-lsp",
+          "description": "Path to the maka-lsp language server binary. Defaults to `maka-lsp` on PATH; set an absolute path (e.g. .../target/release/maka-lsp) for a dev build."
+        },
+        "maka.server.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the maka-lsp language server (diagnostics, hover, definition, outline, completion)."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^8.1.0"
   }
 }

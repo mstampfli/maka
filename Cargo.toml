@@ -8,6 +8,7 @@ members = [
     "crates/codegen",
     "crates/driver",
     "crates/cli",
+    "crates/lsp",
 ]
 # A fixture crate for the rdep link-metadata test (427); a path dependency of a
 # generated rblock sidecar, never part of this workspace.

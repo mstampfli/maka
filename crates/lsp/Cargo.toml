@@ -1,0 +1,21 @@
+[package]
+name = "maka_lsp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# `maka-lsp` — a Language Server for Maka.  Links the compiler crates directly
+# (no shelling out) so it works from the real typed HIR + symbol table.
+[[bin]]
+name = "maka-lsp"
+path = "src/main.rs"
+
+[dependencies]
+maka_lexer = { workspace = true }
+maka_ast = { workspace = true }
+maka_parser = { workspace = true }
+maka_sema = { workspace = true }
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }
+dashmap = "5"
+serde_json = "1"

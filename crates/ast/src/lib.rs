@@ -700,7 +700,7 @@ pub fn receiver_canonical_name(t: &Type) -> String {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Module {
     pub items: Vec<Item>,
     /// Dotted module path declared via `module a.b.c;` at the top of the file.

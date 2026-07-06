@@ -1,43 +1,67 @@
 # Maka for VS Code
 
-Syntax highlighting for the [Maka](https://github.com/mstampfli/maka) language:
-keywords, types, the five pointer flavors, strings/chars/numbers, comments, and
-function names. `rblock "..."` bodies are highlighted as **Rust** and
-`cblock "..."` bodies as **C**.
+Language support for [Maka](https://github.com/mstampfli/maka):
 
-This is a grammar-only extension (TextMate). Semantic features (hover types,
-go-to-definition, diagnostics) will come from a language server later.
+- **Syntax highlighting** (TextMate grammar) — keywords, types, the five pointer
+  flavors, strings/chars/numbers, comments, function names; `rblock "..."` bodies
+  highlight as **Rust** and `cblock "..."` bodies as **C**. Works with no server.
+- **Language server** (`maka-lsp`) — live **diagnostics** (parse + type errors),
+  **hover** types/signatures, **go-to-definition**, **document outline**, and
+  **completion**. It links the compiler crates, so it reflects what the compiler
+  actually sees.
 
-## Install (local)
+## Setup
 
-Symlink or copy this directory into your VS Code extensions folder, then reload:
+1. Build the compiler and the server:
 
-```sh
-ln -s "$PWD" ~/.vscode/extensions/maka
-# or: cp -r editors/vscode ~/.vscode/extensions/maka
-```
+   ```sh
+   cd /path/to/maka
+   cargo build --release          # produces target/release/maka-lsp (and makac, maka)
+   ```
 
-Reload the window (Ctrl+Shift+P -> "Developer: Reload Window"). Any `.maka` file
-now highlights.
+2. Make `maka-lsp` findable. Either add `target/release` to your `PATH`, or set
+   the path in VS Code settings:
+
+   ```json
+   "maka.server.path": "/path/to/maka/target/release/maka-lsp"
+   ```
+
+3. Install this extension's client dependency and load it:
+
+   ```sh
+   cd editors/vscode
+   npm install                    # fetches vscode-languageclient
+   ln -s "$PWD" ~/.vscode/extensions/maka
+   ```
+
+   Reload VS Code (Ctrl+Shift+P -> "Developer: Reload Window"). Open any `.maka`
+   file: highlighting is immediate, and the server features come online once
+   `maka-lsp` is found.
+
+Syntax highlighting alone needs no `npm install` and no server. If you only want
+highlighting, set `"maka.server.enabled": false`.
 
 ## Package a .vsix (to share / install elsewhere)
 
 ```sh
 npm install -g @vscode/vsce
 cd editors/vscode
-vsce package                 # produces maka-0.1.0.vsix
-code --install-extension maka-0.1.0.vsix
+npm install
+vsce package                      # produces maka-0.2.0.vsix
+code --install-extension maka-0.2.0.vsix
 ```
 
-## What it highlights
+(The server binary is not bundled; install `maka-lsp` separately and point
+`maka.server.path` at it.)
 
-- Control flow (`if`/`else`/`while`/`for`/`match`/`return`/`propagate`/`unsafe`)
-- Declarations (`data`/`enum`/`attr`/`has`/`logic`/`module`/`import`/`use`)
-- Modifiers (`mut`/`const`/`pub`/`own`/`raw`/`inline`/`gate`/`export`)
-- Memory (`alloc`/`free`/`transfer`/`share`/`as`) and FFI
-  (`cinclude`/`cblock`/`clink`/`rblock`/`rdep`)
-- Primitive and sized types (`int`/`float`/`string`/`unit`/`i32`/`usize`/...) and
-  PascalCase user types
-- Strings (with escapes), char literals, integer/float/hex numbers, `true`/`false`/`null`
-- Function names (identifier before `(`)
-- Embedded Rust (rblock) and C (cblock)
+## Settings
+
+- `maka.server.path` — path to the `maka-lsp` binary (default: `maka-lsp` on PATH).
+- `maka.server.enabled` — run the language server (default: `true`).
+
+## Server limitation (v1)
+
+`rblock` function signatures are injected by the compiler's Rust bridge, which
+the server does not link, so calls into rblock functions may show as unresolved
+in the editor even though the real build resolves them. Everything else
+(including stdlib names) is accurate.
