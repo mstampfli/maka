@@ -15,11 +15,11 @@
 use maka_ast::*;
 use maka_lexer::Span;
 
-struct Finding {
-    line: u32,
-    col: u32,
-    rule: &'static str,
-    msg: String,
+pub struct Finding {
+    pub line: u32,
+    pub col: u32,
+    pub rule: &'static str,
+    pub msg: String,
 }
 
 /// Lint every path; returns a process exit code (0 = all clean).
@@ -142,6 +142,14 @@ impl NameKind {
 }
 
 // ------------------------------------------------------------------ walk
+
+/// Collect style/naming findings for a parsed module (used by both the CLI and
+/// the language server).
+pub fn lint_module_findings(m: &Module) -> Vec<Finding> {
+    let mut out = Vec::new();
+    lint_module(m, &mut out);
+    out
+}
 
 fn lint_module(m: &Module, out: &mut Vec<Finding>) {
     if let Some(path) = &m.module_path {

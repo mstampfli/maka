@@ -16,6 +16,7 @@ maka_ast = { workspace = true }
 maka_parser = { workspace = true }
 maka_sema = { workspace = true }
 maka_bridge = { workspace = true }
+maka_lint = { workspace = true }
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }
 dashmap = "5"

@@ -120,6 +120,26 @@ fn analyze_inner(text: &str) -> Analysis {
             None
         }
     };
+
+    // Style/naming lints (STYLE_GUIDE.md), reported as INFORMATION so they read
+    // as suggestions distinct from compiler errors/warnings.  Same crate the
+    // `makac lint` CLI uses, so the editor and the CLI agree.
+    if let Some(m) = &user_ast {
+        for f in maka_lint::lint_module_findings(m) {
+            let start = Position {
+                line: f.line.saturating_sub(1),
+                character: f.col.saturating_sub(1),
+            };
+            diagnostics.push(Diagnostic {
+                range: Range { start, end: Position { line: start.line, character: start.character + 1 } },
+                severity: Some(DiagnosticSeverity::INFORMATION),
+                source: Some("maka-lint".into()),
+                message: format!("{} [{}]", f.msg, f.rule),
+                ..Default::default()
+            });
+        }
+    }
+
     Analysis { user_ast, diagnostics, hir }
 }
 

@@ -1,0 +1,15 @@
+[package]
+name = "maka_lint"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# The Maka style/naming linter (STYLE_GUIDE.md).  A shared library so both the
+# `makac lint` CLI command and the language server report the same findings.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+maka_ast = { workspace = true }
+maka_lexer = { workspace = true }
+maka_parser = { workspace = true }
