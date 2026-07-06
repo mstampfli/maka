@@ -21,14 +21,26 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 /// resolution (Vec, String, Option, ...) works during analysis.
 const STDLIB: &str = include_str!("../../../stdlib/std.maka");
 
-/// Result of analyzing one document's text.
+/// A cross-file top-level definition, for go-to-definition and hover of symbols
+/// declared in another project file.
+#[derive(Clone)]
+struct SymDef {
+    name: String,
+    uri: Url,
+    range: Range,
+    detail: String,
+}
+
+/// Result of analyzing a document in the context of its whole project.
 struct Analysis {
-    /// Parse of JUST this document (user spans), for the outline.
+    /// Parse of JUST the open document (user spans), for the outline + locals.
     user_ast: Option<Module>,
-    /// Compiler diagnostics for this document.
+    /// Diagnostics for the open document.
     diagnostics: Vec<Diagnostic>,
-    /// The typed HIR from the stdlib-merged analysis (None if it failed hard).
+    /// The typed HIR from the project-wide analysis (None if it failed hard).
     hir: Option<HirModule>,
+    /// Every top-level definition across every project file (name -> file+range).
+    symbol_index: Vec<SymDef>,
 }
 
 struct Backend {
@@ -41,61 +53,200 @@ struct Backend {
 /// Parse + merge stdlib + analyze, on a large-stack thread (the parser/sema
 /// recurse per nesting level) with panics caught, so a compiler bug can never
 /// take the server down.
-fn analyze_text(text: &str) -> Analysis {
-    let text = text.to_string();
+fn to_path(uri: &Url) -> Option<std::path::PathBuf> {
+    uri.to_file_path().ok()
+}
+fn path_uri(p: &std::path::Path) -> Option<Url> {
+    Url::from_file_path(p).ok()
+}
+
+/// The project root: the nearest ancestor directory holding a `maka.toml`, or
+/// `None` (so we never scan an unbounded tree from a loose file that happens to
+/// live high in the filesystem).
+fn find_root(file: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut cur = file.parent();
+    let mut hops = 0;
+    while let Some(d) = cur {
+        if d.join("maka.toml").is_file() {
+            return Some(d.to_path_buf());
+        }
+        hops += 1;
+        if hops > 40 {
+            break;
+        }
+        cur = d.parent();
+    }
+    None
+}
+
+const MAX_PROJECT_FILES: usize = 2000;
+
+/// Every `.maka` file under `dir` (skipping hidden / build dirs), recursively,
+/// bounded by depth and a file cap so it can never walk away.
+fn gather_maka(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, depth: u32) {
+    if out.len() >= MAX_PROJECT_FILES || depth > 12 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        if out.len() >= MAX_PROJECT_FILES {
+            return;
+        }
+        let p = e.path();
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if name.starts_with('.') {
+            continue; // .git, .maka_cache, dotfiles
+        }
+        if p.is_dir() {
+            if matches!(name, "target" | "node_modules") {
+                continue;
+            }
+            gather_maka(&p, out, depth + 1);
+        } else if p.extension().map_or(false, |x| x == "maka") {
+            out.push(p);
+        }
+    }
+}
+
+/// Index every top-level definition in a module for cross-file go-to-def/hover.
+fn collect_symbols(m: &Module, uri: &Url, out: &mut Vec<SymDef>) {
+    let mut add = |name: &str, span: Span, detail: String| {
+        out.push(SymDef { name: name.to_string(), uri: uri.clone(), range: span_to_range(span), detail });
+    };
+    for it in &m.items {
+        match it {
+            Item::Func(f) => add(&f.name, f.span, format!("{}(...)", f.name)),
+            Item::Data(d) => add(&d.name, d.span, format!("data {}", d.name)),
+            Item::Enum(e) => add(&e.name, e.span, format!("enum {}", e.name)),
+            Item::Attr(a) => add(&a.name, a.span, format!("attr {}", a.name)),
+            Item::Logic(l) => add(&l.name, l.span, format!("logic {}", l.name)),
+            Item::Global(g) => {
+                add(&g.name, g.span, format!("{}{}", if g.is_mut { "mut " } else { "" }, g.name))
+            }
+            Item::Constexpr(c) => add(&c.name, c.span, format!("constexpr {} = {}", c.name, c.value)),
+            _ => {}
+        }
+    }
+}
+
+/// Analyze a document in the context of its WHOLE project: parse the stdlib plus
+/// every `.maka` file under the project root (open buffers override disk, so
+/// unsaved edits are reflected; unopened files are read from disk), merge exactly
+/// as the compiler does, run the rblock bridge, and analyze.  Cross-file types
+/// therefore resolve and diagnostics match the build; every definition is indexed
+/// for go-to-def.  Runs on a large-stack thread with panics caught.
+fn analyze_doc(this_path: Option<std::path::PathBuf>, this_text: String, open: std::collections::HashMap<std::path::PathBuf, String>) -> Analysis {
+    let empty = || Analysis { user_ast: None, diagnostics: Vec::new(), hir: None, symbol_index: Vec::new() };
     let handle = std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
         .spawn(move || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyze_inner(&text)))
-                .unwrap_or_else(|_| Analysis { user_ast: None, diagnostics: Vec::new(), hir: None })
-        })
-        .expect("spawn analysis thread");
-    handle.join().unwrap_or(Analysis { user_ast: None, diagnostics: Vec::new(), hir: None })
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyze_inner(this_path, this_text, open)))
+                .unwrap_or_else(|_| Analysis { user_ast: None, diagnostics: Vec::new(), hir: None, symbol_index: Vec::new() })
+        });
+    match handle {
+        Ok(h) => h.join().unwrap_or_else(|_| empty()),
+        Err(_) => empty(),
+    }
 }
 
-fn analyze_inner(text: &str) -> Analysis {
-    // Parse of the document alone, for the outline + accurate user spans.
-    let user_ast = maka_parser::parse(text).ok();
+fn analyze_inner(this_path: Option<std::path::PathBuf>, this_text: String, open: std::collections::HashMap<std::path::PathBuf, String>) -> Analysis {
+    let user_ast = maka_parser::parse(&this_text).ok();
 
-    // Build the merged module: stdlib first (module `std`), then the user file,
-    // carrying each item's module path + imports exactly as the driver does.
+    // Discover project files.  With a `maka.toml` root, every `.maka` under it
+    // (bounded); otherwise ONLY the open file's own directory (one readdir, no
+    // recursion), so a loose multi-file layout still resolves without ever
+    // scanning an unbounded tree.
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(p) = &this_path {
+        match find_root(p) {
+            Some(root) => gather_maka(&root, &mut files, 0),
+            None => {
+                if let Some(dir) = p.parent() {
+                    if let Ok(rd) = std::fs::read_dir(dir) {
+                        for e in rd.flatten() {
+                            let q = e.path();
+                            if q.is_file() && q.extension().map_or(false, |x| x == "maka") {
+                                files.push(q);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !files.iter().any(|f| f == p) {
+            files.push(p.clone());
+        }
+    }
+
     let mut merged = Module::default();
-    let mut push_all = |m: Module| {
+    let mut symbol_index: Vec<SymDef> = Vec::new();
+    let mut diagnostics = Vec::new();
+
+    let append = |merged: &mut Module, m: Module| {
         let path = m.module_path.clone().unwrap_or_default();
         let flat: Vec<(Vec<String>, String)> = m
             .imports
             .iter()
             .flat_map(|imp| imp.names.iter().map(|n| (imp.path.clone(), n.clone())))
             .collect();
-        let has_imports = m.has_imports.clone();
+        let hi = m.has_imports.clone();
         for _ in &m.items {
             merged.item_modules.push(path.clone());
             merged.item_imports.push(flat.clone());
-            merged.item_has_imports.push(has_imports.clone());
+            merged.item_has_imports.push(hi.clone());
         }
         merged.items.extend(m.items);
     };
+
     if let Ok(std_m) = maka_parser::parse(STDLIB) {
-        push_all(std_m);
+        append(&mut merged, std_m);
     }
 
-    let mut diagnostics = Vec::new();
-    match maka_parser::parse(text) {
-        Ok(user_m) => push_all(user_m),
-        Err(msg) => {
-            diagnostics.push(parse_error_diagnostic(&msg));
-            return Analysis { user_ast, diagnostics, hir: None };
+    for f in &files {
+        // Prefer an open buffer (unsaved edits) over the on-disk file.
+        let text = match open.get(f) {
+            Some(t) => t.clone(),
+            None => match std::fs::read_to_string(f) {
+                Ok(t) => t,
+                Err(_) => continue,
+            },
+        };
+        let is_open_file = this_path.as_ref() == Some(f);
+        match maka_parser::parse(&text) {
+            Ok(m) => {
+                if let Some(uri) = path_uri(f) {
+                    collect_symbols(&m, &uri, &mut symbol_index);
+                }
+                append(&mut merged, m);
+            }
+            Err(msg) => {
+                if is_open_file {
+                    diagnostics.push(parse_error_diagnostic(&msg));
+                    return Analysis { user_ast, diagnostics, hir: None, symbol_index };
+                }
+                // A parse error in another file: skip it (can't merge), no diag here.
+            }
+        }
+    }
+    // If the open file is not on disk yet (never saved), still analyze its buffer.
+    if this_path.is_none() {
+        match maka_parser::parse(&this_text) {
+            Ok(m) => append(&mut merged, m),
+            Err(msg) => {
+                diagnostics.push(parse_error_diagnostic(&msg));
+                return Analysis { user_ast, diagnostics, hir: None, symbol_index };
+            }
         }
     }
 
-    // If the file uses `rblock`, run the Rust bridge's phase-1 signature
-    // extraction (the same code the compiler uses) so calls into rblock `pub fn`s
-    // resolve.  Guarded on an rblock actually being present, since `prepare`
-    // spawns `rustc --version`; a failure (no rustc, malformed rblock) just
-    // leaves those calls unresolved rather than breaking the rest.
+    // rblock phase-1 signature extraction (same code the compiler uses).
     if merged.items.iter().any(|it| matches!(it, Item::Rblock(_, _))) {
         let opts = maka_bridge::BridgeOptions { no_rust: false, profile: "dev".into() };
-        let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let root = this_path
+            .as_ref()
+            .and_then(|p| find_root(p))
+            .or_else(|| this_path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf())))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
         if let Ok(prep) = maka_bridge::prepare(&merged, &root, &opts) {
             for (mp, item) in prep.injected {
                 merged.items.push(item);
@@ -106,30 +257,35 @@ fn analyze_inner(text: &str) -> Analysis {
         }
     }
 
+    // The analysis spans errors across all files, but only the open document's are
+    // ours to publish.  Without file-tagged spans we approximate: keep those whose
+    // line is within the open document.  A clean project yields none, so cross-file
+    // false errors disappear.
+    let this_lines = this_text.lines().count() as u32 + 1;
     let hir = match maka_sema::analyze(&merged) {
         Ok(h) => {
             for w in &h.warnings {
-                diagnostics.push(diag(w.span, DiagnosticSeverity::WARNING, w.msg.clone()));
+                if w.span.line <= this_lines {
+                    diagnostics.push(diag(w.span, DiagnosticSeverity::WARNING, w.msg.clone()));
+                }
             }
             Some(h)
         }
         Err(errs) => {
             for e in errs {
-                diagnostics.push(diag(e.span, DiagnosticSeverity::ERROR, e.msg));
+                if e.span.line <= this_lines {
+                    diagnostics.push(diag(e.span, DiagnosticSeverity::ERROR, e.msg));
+                }
             }
             None
         }
     };
 
-    // Style/naming lints (STYLE_GUIDE.md), reported as INFORMATION so they read
-    // as suggestions distinct from compiler errors/warnings.  Same crate the
-    // `makac lint` CLI uses, so the editor and the CLI agree.
+    // Style/naming lints for the open file (INFORMATION severity, distinct from
+    // compiler diagnostics), from the same crate `makac lint` uses.
     if let Some(m) = &user_ast {
         for f in maka_lint::lint_module_findings(m) {
-            let start = Position {
-                line: f.line.saturating_sub(1),
-                character: f.col.saturating_sub(1),
-            };
+            let start = Position { line: f.line.saturating_sub(1), character: f.col.saturating_sub(1) };
             diagnostics.push(Diagnostic {
                 range: Range { start, end: Position { line: start.line, character: start.character + 1 } },
                 severity: Some(DiagnosticSeverity::INFORMATION),
@@ -140,7 +296,7 @@ fn analyze_inner(text: &str) -> Analysis {
         }
     }
 
-    Analysis { user_ast, diagnostics, hir }
+    Analysis { user_ast, diagnostics, hir, symbol_index }
 }
 
 // ---------------------------------------------------------------- positions
@@ -481,15 +637,15 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, p: DidOpenTextDocumentParams) {
         let uri = p.text_document.uri.clone();
-        self.docs.insert(uri.clone(), p.text_document.text.clone());
-        self.publish(uri, p.text_document.text).await;
+        self.docs.insert(uri.clone(), p.text_document.text);
+        self.publish(uri).await;
     }
 
     async fn did_change(&self, mut p: DidChangeTextDocumentParams) {
         if let Some(change) = p.content_changes.pop() {
             let uri = p.text_document.uri.clone();
-            self.docs.insert(uri.clone(), change.text.clone());
-            self.publish(uri, change.text).await;
+            self.docs.insert(uri.clone(), change.text);
+            self.publish(uri).await;
         }
     }
 
@@ -510,11 +666,16 @@ impl LanguageServer for Backend {
         if PRIMS.contains(&name.as_str()) {
             return Ok(Some(hover_md(format!("{} — built-in type", name))));
         }
-        let a = analyze_text(&text);
+        let a = self.analyze(&uri);
+        // Open-file local/param/decl (typed via the HIR).
         if let (Some(hir), Some(user)) = (&a.hir, &a.user_ast) {
             if let Some((md, _)) = resolve(user, hir, &name, pos.line) {
                 return Ok(Some(hover_md(md)));
             }
+        }
+        // A definition in another project file.
+        if let Some(d) = a.symbol_index.iter().find(|d| d.name == name) {
+            return Ok(Some(hover_md(code_md(&d.detail))));
         }
         Ok(None)
     }
@@ -531,14 +692,22 @@ impl LanguageServer for Backend {
         let Some(name) = word_at(&text, pos) else {
             return Ok(None);
         };
-        let a = analyze_text(&text);
+        let a = self.analyze(&uri);
+        // A local / parameter, or a declaration in THIS file.
         if let (Some(hir), Some(user)) = (&a.hir, &a.user_ast) {
             if let Some((_, Some(sp))) = resolve(user, hir, &name, pos.line) {
                 return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                    uri,
+                    uri: uri.clone(),
                     range: span_to_range(sp),
                 })));
             }
+        }
+        // A top-level definition in another project file (jump to that file).
+        if let Some(d) = a.symbol_index.iter().find(|d| d.name == name) {
+            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                uri: d.uri.clone(),
+                range: d.range,
+            })));
         }
         Ok(None)
     }
@@ -551,7 +720,7 @@ impl LanguageServer for Backend {
         let Some(text) = self.docs.get(&uri).map(|t| t.clone()) else {
             return Ok(None);
         };
-        let a = analyze_text(&text);
+        let a = self.analyze(&uri);
         if let Some(m) = &a.user_ast {
             return Ok(Some(DocumentSymbolResponse::Nested(document_symbols(m))));
         }
@@ -577,7 +746,7 @@ impl LanguageServer for Backend {
             add(t, CompletionItemKind::STRUCT, Some("built-in type".into()));
         }
         if let Some(text) = text {
-            let a = analyze_text(&text);
+            let a = self.analyze(&uri);
             if let Some(hir) = &a.hir {
                 for f in &hir.sym.funcs {
                     if f.name.starts_with("__") {
@@ -656,8 +825,24 @@ impl LanguageServer for Backend {
 }
 
 impl Backend {
-    async fn publish(&self, uri: Url, text: String) {
-        let a = analyze_text(&text);
+    /// Analyze the document at `uri` in the context of its whole project,
+    /// snapshotting every OTHER open buffer so unsaved edits across files are
+    /// reflected.
+    fn analyze(&self, uri: &Url) -> Analysis {
+        let this_text = self.docs.get(uri).map(|t| t.clone()).unwrap_or_default();
+        let this_path = to_path(uri);
+        let mut open: std::collections::HashMap<std::path::PathBuf, String> =
+            std::collections::HashMap::new();
+        for e in self.docs.iter() {
+            if let Some(p) = to_path(e.key()) {
+                open.insert(p, e.value().clone());
+            }
+        }
+        analyze_doc(this_path, this_text, open)
+    }
+
+    async fn publish(&self, uri: Url) {
+        let a = self.analyze(&uri);
         self.client.publish_diagnostics(uri, a.diagnostics, None).await;
     }
 }
