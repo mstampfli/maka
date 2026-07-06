@@ -4632,12 +4632,18 @@ impl<'a> TypeChecker<'a> {
                     }
                     CastKind::Reinterpret
                 }
-                (SizedInt { bits: 0, .. }, Ptr { .. }) | (Int, Ptr { .. }) => {
+                (SizedInt { bits: 0, .. }, Ptr { inner, .. }) | (Int, Ptr { inner, .. }) => {
                     if self.in_unsafe == 0 {
-                        self.err(
-                            "synthesizing a pointer from an integer requires an `unsafe { ... }` \
-                             block — this is the one operation that can produce a dangling pointer \
-                             the lifetime pass cannot track".to_string(),
+                        // Casting an int to a pointer-TO-ENUM is a common mistake by
+                        // someone who wanted a checked enum cast: point them at the
+                        // two real forms so the incident ends here rather than after
+                        // they wrap the synthesis in `unsafe` and deref garbage.
+                        let hint = if matches!(inner.as_ref(), Enum(_)) {
+                            " - if you meant a checked enum cast, use `v as <Enum>` (value, panics on a bad tag) or `*int as *<Enum>` (pointer, null on a bad tag), NOT `int as *<Enum>` (which synthesizes an address)"
+                        } else { "" };
+                        self.err(format!(
+                            "synthesizing a pointer from an integer requires an `unsafe {{ ... }}` block - this is the one operation that can produce a dangling pointer the lifetime pass cannot track{}",
+                            hint),
                             sp,
                         );
                     }

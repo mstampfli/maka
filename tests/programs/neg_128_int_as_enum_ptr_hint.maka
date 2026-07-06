@@ -1,0 +1,5 @@
+// `int as *Enum` synthesizes a pointer (address) and needs `unsafe`; the
+// diagnostic must steer someone who wanted a CHECKED enum cast to `v as Enum`
+// or `*int as *Enum` instead of wrapping the synthesis in unsafe.
+enum Biome { Forest, Desert, Ocean }
+unit main() { int tag = 1; *Biome b = tag as *Biome; }
