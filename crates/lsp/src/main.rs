@@ -5,9 +5,9 @@
 //! Features: diagnostics (parse + sema), hover (type of the symbol under the
 //! cursor), go-to-definition, document symbols (outline), and completion.
 //!
-//! Limitation (v1): `rblock` function signatures are injected by the driver's
-//! Rust bridge, which is not linked here, so calls into rblock functions may
-//! show as unresolved in the editor even though the real build resolves them.
+//! `rblock` functions resolve too: the same Rust bridge the compiler uses
+//! (`maka_bridge::prepare`) extracts their signatures into extern decls before
+//! analysis.  `cblock` functions resolve via their `extern` declaration as usual.
 
 use dashmap::DashMap;
 use maka_ast::{Item, Module};
@@ -85,6 +85,24 @@ fn analyze_inner(text: &str) -> Analysis {
         Err(msg) => {
             diagnostics.push(parse_error_diagnostic(&msg));
             return Analysis { user_ast, diagnostics, hir: None };
+        }
+    }
+
+    // If the file uses `rblock`, run the Rust bridge's phase-1 signature
+    // extraction (the same code the compiler uses) so calls into rblock `pub fn`s
+    // resolve.  Guarded on an rblock actually being present, since `prepare`
+    // spawns `rustc --version`; a failure (no rustc, malformed rblock) just
+    // leaves those calls unresolved rather than breaking the rest.
+    if merged.items.iter().any(|it| matches!(it, Item::Rblock(_, _))) {
+        let opts = maka_bridge::BridgeOptions { no_rust: false, profile: "dev".into() };
+        let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        if let Ok(prep) = maka_bridge::prepare(&merged, &root, &opts) {
+            for (mp, item) in prep.injected {
+                merged.items.push(item);
+                merged.item_modules.push(mp);
+                merged.item_imports.push(Vec::new());
+                merged.item_has_imports.push(Vec::new());
+            }
         }
     }
 

@@ -1,6 +1,6 @@
 //! `makac` — compile a Maka source file to C and (optionally) invoke a C compiler.
 
-mod rust_bridge;
+use maka_bridge as rust_bridge;
 mod lint;
 
 use std::path::PathBuf;

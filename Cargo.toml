@@ -6,6 +6,7 @@ members = [
     "crates/parser",
     "crates/sema",
     "crates/codegen",
+    "crates/bridge",
     "crates/driver",
     "crates/cli",
     "crates/lsp",
@@ -27,6 +28,7 @@ maka_ast    = { path = "crates/ast" }
 maka_parser = { path = "crates/parser" }
 maka_sema   = { path = "crates/sema" }
 maka_codegen = { path = "crates/codegen" }
+maka_bridge = { path = "crates/bridge" }
 
 [profile.dev]
 opt-level = 0

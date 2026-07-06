@@ -14,5 +14,4 @@ maka_parser = { workspace = true }
 maka_ast = { workspace = true }
 maka_sema = { workspace = true }
 maka_codegen = { workspace = true }
-syn = { version = "2", features = ["full", "extra-traits"] }
-quote = "1"
+maka_bridge = { workspace = true }

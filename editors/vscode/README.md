@@ -59,9 +59,7 @@ code --install-extension maka-0.2.0.vsix
 - `maka.server.path` — path to the `maka-lsp` binary (default: `maka-lsp` on PATH).
 - `maka.server.enabled` — run the language server (default: `true`).
 
-## Server limitation (v1)
-
-`rblock` function signatures are injected by the compiler's Rust bridge, which
-the server does not link, so calls into rblock functions may show as unresolved
-in the editor even though the real build resolves them. Everything else
-(including stdlib names) is accurate.
+`rblock` and `cblock` functions resolve like any other: the server runs the same
+Rust-bridge signature extraction the compiler uses (guarded so a file without an
+rblock pays nothing), and `cblock` functions resolve through their `extern`
+declaration.

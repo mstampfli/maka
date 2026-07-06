@@ -1,0 +1,18 @@
+[package]
+name = "maka_bridge"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# The Rust interop bridge: parses `rblock` Rust with `syn`, extracts `pub fn`
+# signatures + mirrors `#[repr(C)]` structs into extern/data AST items (phase 1,
+# `prepare`), and builds the sidecar staticlibs (phase 2, `finish`).  Shared by
+# the compiler driver and the language server so both resolve rblocks identically.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+maka_ast = { workspace = true }
+maka_lexer = { workspace = true }
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
