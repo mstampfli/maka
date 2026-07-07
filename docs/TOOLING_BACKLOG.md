@@ -15,9 +15,11 @@ are queued; check them off as they land.
       server shows on hover. Pick a syntax (e.g. `///` doc lines above the decl,
       or `//!` for module docs), have the lexer/parser retain them attached to the
       following item, and render them in hover markdown below the signature.
-- [ ] **Signature help.** While typing a call's arguments, show the callee's
-      parameter list and highlight the parameter currently being entered
-      (`textDocument/signatureHelp`, trigger on `(` and `,`).
+- [x] **Signature help.** Typing a call's arguments now shows the callee's
+      signature and highlights the active parameter (triggered on `(` and `,`).
+      Token-based enclosing-call detection (ignores commas/parens in strings and
+      comments), prefers the open file's own function over a same-named stdlib
+      overload. (Builtins without a `FuncSig`, e.g. `push`, don't show it yet.)
 - [x] **Enum hover polish.** The "enum X enum" duplicate no longer reproduces.
       Cross-file enum hover now shows the full variant list (with payload field
       names) via a shared `enum_signature`, matching the in-file path, and the

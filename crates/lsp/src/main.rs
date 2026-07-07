@@ -11,7 +11,7 @@
 
 use dashmap::DashMap;
 use maka_ast::{EnumDecl, Item, Module};
-use maka_lexer::Span;
+use maka_lexer::{Span, TokKind};
 use maka_sema::hir::{HType, HirModule, SymTab};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -496,6 +496,62 @@ fn occurrences(text: &str, name: &str) -> Vec<Range> {
     out
 }
 
+/// Byte offset of a 0-based (line, character) position in `text` (character is
+/// treated as a UTF-16 offset, exact for the ASCII that Maka identifiers use).
+fn pos_to_byte(text: &str, pos: Position) -> usize {
+    let mut byte = 0usize;
+    for (i, line) in text.split('\n').enumerate() {
+        if i as u32 == pos.line {
+            let mut col = 0u32;
+            for (bi, ch) in line.char_indices() {
+                if col >= pos.character {
+                    return byte + bi;
+                }
+                col += ch.len_utf16() as u32;
+            }
+            return byte + line.len();
+        }
+        byte += line.len() + 1; // + '\n'
+    }
+    byte.min(text.len())
+}
+
+/// For signature help: given the cursor, find the innermost enclosing call and
+/// which argument the cursor is in.  Token-based (so commas/parens inside strings
+/// and comments do not fool it): scan the tokens before the cursor backward,
+/// tracking bracket depth, to the unmatched `(` whose preceding token is the
+/// callee name; count depth-0 commas after it for the active parameter.
+fn enclosing_call(text: &str, pos: Position) -> Option<(String, u32)> {
+    let cursor = pos_to_byte(text, pos);
+    let tokens = maka_lexer::Lexer::new(text).tokenize().ok()?;
+    let toks: Vec<&maka_lexer::Token> = tokens.iter().filter(|t| t.span.start < cursor).collect();
+    let mut depth = 0i32;
+    let mut commas = 0u32;
+    let mut i = toks.len();
+    while i > 0 {
+        i -= 1;
+        match &toks[i].kind {
+            TokKind::RParen | TokKind::RBracket | TokKind::RBrace => depth += 1,
+            TokKind::LParen if depth == 0 => {
+                // The enclosing open paren: a call iff the previous token names it.
+                if i > 0 {
+                    if let TokKind::Ident(name) = &toks[i - 1].kind {
+                        return Some((name.clone(), commas));
+                    }
+                }
+                return None;
+            }
+            // An enclosing `[`/`{` at depth 0 means we are in an array literal or a
+            // block, not a call's argument list.
+            TokKind::LBracket | TokKind::LBrace if depth == 0 => return None,
+            TokKind::LParen | TokKind::LBracket | TokKind::LBrace => depth -= 1,
+            TokKind::Comma if depth == 0 => commas += 1,
+            _ => {}
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------- lookups
 
 /// Resolve a name to (hover-markdown, optional definition-span).  Definitions
@@ -741,6 +797,11 @@ impl LanguageServer for Backend {
                 definition_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions::default()),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".into(), ",".into()]),
+                    retrigger_characters: Some(vec![",".into()]),
+                    work_done_progress_options: Default::default(),
+                }),
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
@@ -858,6 +919,65 @@ impl LanguageServer for Backend {
             return Ok(Some(DocumentSymbolResponse::Nested(document_symbols(m))));
         }
         Ok(None)
+    }
+
+    /// Signature help: while typing a call's arguments, show the callee's
+    /// signature and highlight the parameter being entered.
+    async fn signature_help(&self, p: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let pos = p.text_document_position_params.position;
+        let uri = p.text_document_position_params.text_document.uri;
+        let Some(text) = self.docs.get(&uri).map(|t| t.clone()) else {
+            return Ok(None);
+        };
+        let Some((name, active)) = enclosing_call(&text, pos) else {
+            return Ok(None);
+        };
+        let a = self.analyze(&uri);
+        let Some(hir) = &a.hir else { return Ok(None) };
+        let sym = &hir.sym;
+        let mut found: Option<(String, Vec<String>)> = None;
+        // Prefer the open file's own function (matched to its HIR twin by start
+        // line), so a same-named stdlib overload does not shadow it.
+        if let Some(user) = &a.user_ast {
+            if let Some(f) = user.items.iter().find_map(|it| match it {
+                Item::Func(f) if f.name == name => Some(f),
+                _ => None,
+            }) {
+                if let Some(hf) =
+                    sym.funcs.iter().find(|hf| hf.name == name && hf.span.line == f.span.line)
+                {
+                    let params: Vec<String> = hf
+                        .params
+                        .iter()
+                        .map(|lid| {
+                            let l = &hf.locals[lid.0 as usize];
+                            format!("{} {}", render_type(&l.ty, sym), l.name)
+                        })
+                        .collect();
+                    let label = format!("{} {}({})", render_type(&hf.ret, sym), hf.name, params.join(", "));
+                    found = Some((label, params));
+                }
+            }
+        }
+        // Otherwise any signature of that name (stdlib / builtin extern).
+        if found.is_none() {
+            if let Some(s) = sym.sigs.iter().find(|s| s.name == name && !s.name.starts_with("__")) {
+                let params: Vec<String> = s
+                    .param_names
+                    .iter()
+                    .zip(s.param_tys.iter())
+                    .map(|(n, t)| format!("{} {}", render_type(t, sym), n))
+                    .collect();
+                let label = format!("{} {}({})", render_type(&s.ret, sym), s.name, params.join(", "));
+                found = Some((label, params));
+            }
+        }
+        let Some((label, params)) = found else { return Ok(None) };
+        Ok(Some(SignatureHelp {
+            signatures: vec![signature_from(label, params, active)],
+            active_signature: Some(0),
+            active_parameter: Some(active),
+        }))
     }
 
     async fn completion(&self, p: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -1040,6 +1160,25 @@ fn hover_md(md: String) -> Hover {
             value: md,
         }),
         range: None,
+    }
+}
+
+/// Build a `SignatureInformation` from a rendered signature label and its
+/// per-parameter labels, highlighting the active one.
+fn signature_from(label: String, params: Vec<String>, active: u32) -> SignatureInformation {
+    let parameters = params
+        .iter()
+        .map(|p| ParameterInformation {
+            label: ParameterLabel::Simple(p.clone()),
+            documentation: None,
+        })
+        .collect::<Vec<_>>();
+    let active = active.min(params.len().saturating_sub(1) as u32);
+    SignatureInformation {
+        label,
+        documentation: None,
+        parameters: Some(parameters),
+        active_parameter: Some(active),
     }
 }
 
