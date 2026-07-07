@@ -9,7 +9,8 @@
 //!   maka test  [--release]        compile+run tests/*.maka, diff vs .expected
 //!   maka lint                     run `makac lint` over src/*.maka
 //!   maka fmt [--check] [FILE...]  reformat (layout) src/*.maka in place
-//!   maka add NAME [VERSION]       guidance for adding a dependency
+//!   maka add NAME [VERSION]       add a Rust crate: insert `rdep` beside an
+//!                                 rblock, or scaffold an FFI module for it
 //!
 //! A project is a directory with a `maka.toml`:
 //!
@@ -65,7 +66,7 @@ usage:
   maka test  [--release]       compile+run tests/*.maka, diff stdout vs .expected
   maka lint                    check style/naming with `makac lint` over src/
   maka fmt [--check] [file...] reformat (layout) src/ in place, or the given files
-  maka add <name> [version]    how to add a Rust crate / C library dependency
+  maka add <name> [version]    add a Rust crate (rdep beside an rblock, or a new FFI module)
   maka version                 print the version
 "
     );
@@ -441,30 +442,97 @@ fn cmd_fmt(args: &[String]) -> i32 {
     }
 }
 
+/// A valid Maka module identifier derived from a crate name (`serde_json` stays,
+/// `some-crate` -> `some_crate`, a leading digit gets an `m_` prefix).
+fn module_ident(name: &str) -> String {
+    let mut s: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect();
+    if s.chars().next().map_or(true, |c| c.is_ascii_digit()) {
+        s.insert_str(0, "m_");
+    }
+    s
+}
+
 fn cmd_add(args: &[String]) -> i32 {
-    let name = args.first().map(String::as_str).unwrap_or("<name>");
-    let ver = args.get(1).map(String::as_str).unwrap_or("1");
-    // Maka declares dependencies IN SOURCE, next to the code that uses them, so
-    // the sidecar build sees exactly what each module needs.  Guide, don't guess.
-    eprintln!(
-        "\
-maka dependencies live in source, beside the code that uses them:
+    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+    let Some(name) = positional.first().map(|s| s.as_str()) else {
+        eprintln!("usage: maka add <crate> [version]");
+        return 2;
+    };
+    let ver = positional.get(1).map(|s| s.as_str()).unwrap_or("1");
 
-  Rust crate `{name}` - inside the `rblock` that uses it:
+    let (root, _man) = match load_manifest() {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("maka add: {} (run inside a project, or `maka new`)", e);
+            return 1;
+        }
+    };
+    let src = root.join("src");
 
-      rdep {name} = \"{ver}\";
-      rblock \"
-          use {name}::...;
-          pub fn ... {{ ... }}
-      \";
+    // A Rust `rdep` must live in a module that also has an `rblock` (the sidecar
+    // is built per module), so we add it beside one.
+    let rblock_files: Vec<PathBuf> = maka_sources(&src)
+        .into_iter()
+        .filter(|p| std::fs::read_to_string(p).map(|s| s.contains("rblock")).unwrap_or(false))
+        .collect();
 
-  C library - a link directive:
-
-      clink \"-l{name}\";          // a linker flag
-      clink \"vendor/{name}.c\";   // or a source/object/archive to link in
-
-See RUST_INTEROP.md and SPEC 5.2. A manifest-driven `add` that generates this
-plumbing is planned; for now add the two lines above to your module."
-    );
-    0
+    match rblock_files.as_slice() {
+        // Exactly one rblock module: insert the rdep there, before its first rblock.
+        [target] => {
+            let text = std::fs::read_to_string(target).unwrap_or_default();
+            if text.contains(&format!("rdep {} ", name)) || text.contains(&format!("rdep {}=", name)) {
+                println!("maka add: `{}` is already a dependency in {}", name, target.display());
+                return 0;
+            }
+            let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+            let at = lines.iter().position(|l| l.trim_start().starts_with("rblock")).unwrap_or(0);
+            lines.insert(at, format!("rdep {} = \"{}\";", name, ver));
+            let out = lines.join("\n") + "\n";
+            if let Err(e) = std::fs::write(target, out) {
+                eprintln!("maka add: cannot write {}: {}", target.display(), e);
+                return 1;
+            }
+            println!("added  rdep {} = \"{}\";  to {}", name, ver, target.display());
+            println!("use it in that file's rblock:  use {}::...;", name);
+            0
+        }
+        // No rblock yet: scaffold a compilable FFI module for the crate.
+        [] => {
+            let m = module_ident(name);
+            let file = src.join(format!("{}.maka", m));
+            if file.exists() {
+                eprintln!("maka add: {} already exists; add `rdep {} = \"{}\";` beside its rblock", file.display(), name, ver);
+                return 1;
+            }
+            let stub = format!(
+                "module {m};\n\nrdep {n} = \"{v}\";\n\n\
+                 rblock \"\n\
+                 \x20   // Bindings for `{n}`. Each `pub fn` here becomes a callable Maka\n\
+                 \x20   // function; replace this example with the API you need.\n\
+                 \x20   pub fn {m}_ready() -> i64 {{ 1 }}\n\
+                 \";\n",
+                m = m, n = name, v = ver
+            );
+            if let Err(e) = std::fs::write(&file, &stub) {
+                eprintln!("maka add: cannot write {}: {}", file.display(), e);
+                return 1;
+            }
+            println!("created {}", file.display());
+            println!("  - declares  rdep {} = \"{}\";", name, ver);
+            println!("  - fill the rblock with `pub fn`s that use `{}`, then `maka build`", name);
+            0
+        }
+        // Several rblock modules: we can't know which sidecar should own the dep.
+        many => {
+            eprintln!("maka add: several modules have an `rblock`; add the dep to the one whose rblock uses `{}`:", name);
+            for f in many {
+                eprintln!("    rdep {} = \"{}\";   in {}", name, ver, f.display());
+            }
+            eprintln!("(a C library instead? add  clink \"-l{}\";  beside the code that needs it.)", name);
+            1
+        }
+    }
 }

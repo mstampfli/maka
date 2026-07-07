@@ -61,7 +61,9 @@ are queued; check them off as they land.
       and installs both `maka` and `makac` to `~/.cargo/bin` (or `$BINDIR`), so
       `maka build/run/test/fmt/lint` work from any project directory. Documented
       in the README.
-- [ ] **`maka add`.** Real dependency management. Maka declares deps in source
-      (`rdep name = "ver";` for Rust crates, `cinclude`/`clink` for C), so `maka
-      add` currently only prints guidance. Decide whether to insert the directive
-      into a chosen source file / a deps hub, and do it.
+- [x] **`maka add`.** Now edits source instead of only guiding. Since a `rdep`
+      must sit in a module with an `rblock` (sidecars are per-module), `maka add
+      NAME [VER]` inserts `rdep NAME = "VER";` beside the project's rblock when
+      there is exactly one, scaffolds a compilable FFI module (`src/NAME.maka`
+      with module + rdep + rblock skeleton) when there is none, and lists the
+      candidates when there are several. Detects an already-present dep.
