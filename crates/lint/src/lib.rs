@@ -20,6 +20,42 @@ pub struct Finding {
     pub col: u32,
     pub rule: &'static str,
     pub msg: String,
+    /// The offending identifier itself, so a consumer with the source can anchor
+    /// the underline on the NAME rather than the declaration start (which is the
+    /// type or keyword the name follows).  See [`locate`].
+    pub name: String,
+}
+
+/// Refine a finding to the exact (line, col, width) of the offending NAME, using
+/// the source text.  The AST anchors a declaration at its start (the type or the
+/// keyword), so a naive underline lands on the type of `Point badName` rather
+/// than on `badName`; here we scan the finding's line from the declaration start
+/// for the first whole-word occurrence of the name and point there, spanning the
+/// whole identifier.  All columns are 1-based bytes (matching `Span`); falls back
+/// to the finding's own position (width 1) if the name is not found on the line.
+pub fn locate(src: &str, f: &Finding) -> (u32, u32, u32) {
+    if f.name.is_empty() {
+        return (f.line, f.col, 1);
+    }
+    let fallback = (f.line, f.col, 1);
+    let Some(line) = src.lines().nth(f.line.saturating_sub(1) as usize) else {
+        return fallback;
+    };
+    let bytes = line.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let start = (f.col.saturating_sub(1) as usize).min(line.len());
+    let mut i = start;
+    while let Some(rel) = line.get(i..).and_then(|s| s.find(f.name.as_str())) {
+        let s = i + rel;
+        let e = s + f.name.len();
+        let before_ok = s == 0 || !is_word(bytes[s - 1]);
+        let after_ok = e >= bytes.len() || !is_word(bytes[e]);
+        if before_ok && after_ok {
+            return (f.line, s as u32 + 1, f.name.len() as u32);
+        }
+        i = e.max(s + 1);
+    }
+    fallback
 }
 
 /// Lint every path; returns a process exit code (0 = all clean).
@@ -50,7 +86,9 @@ pub fn run(paths: &[String]) -> i32 {
         lint_module(&module, &mut found);
         found.sort_by(|a, b| (a.line, a.col).cmp(&(b.line, b.col)));
         for f in &found {
-            println!("{}:{}:{}: {}  [{}]", path, f.line, f.col, f.msg, f.rule);
+            // Point the report at the name itself, not the declaration's type.
+            let (line, col, _w) = locate(&src, f);
+            println!("{}:{}:{}: {}  [{}]", path, line, col, f.msg, f.rule);
         }
         issues += found.len();
     }
@@ -113,6 +151,7 @@ fn check(name: &str, span: Span, kind: NameKind, out: &mut Vec<Finding>) {
             col: span.col,
             rule,
             msg: format!("{} `{}` should be {}", kind.label(), name, want),
+            name: name.to_string(),
         });
     }
 }
@@ -265,6 +304,52 @@ fn lint_stmt(s: &Stmt, out: &mut Vec<Finding>) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn findings(src: &str) -> Vec<Finding> {
+        lint_module_findings(&maka_parser::parse(src).expect("parse"))
+    }
+
+    #[test]
+    fn locate_points_at_name_not_type() {
+        // `Point badLocal = ...`: the finding anchors at the decl start (`Point`),
+        // but `locate` must move it onto `badLocal` with the name's width.
+        let src = "unit f() {\n    Point badLocal = zero();\n}\n";
+        let fs = findings(src);
+        let bad = fs.iter().find(|f| f.name == "badLocal").expect("flagged");
+        let (line, col, width) = locate(src, bad);
+        assert_eq!(line, 2);
+        // 1-based byte col of `badLocal` in "    Point badLocal = ...".
+        assert_eq!(col, "    Point ".len() as u32 + 1);
+        assert_eq!(width, "badLocal".len() as u32);
+    }
+
+    #[test]
+    fn locate_handles_function_and_keyword_decls() {
+        let src = "int BadFunc() {\n    return 0;\n}\ndata badType { int x; }\n";
+        let fs = findings(src);
+        let f = fs.iter().find(|x| x.name == "BadFunc").unwrap();
+        assert_eq!(locate(src, f), (1, "int ".len() as u32 + 1, 7)); // on BadFunc, not `int`
+        let d = fs.iter().find(|x| x.name == "badType").unwrap();
+        assert_eq!(locate(src, d), (4, "data ".len() as u32 + 1, 7)); // on badType, not `data`
+    }
+
+    #[test]
+    fn locate_falls_back_when_name_absent() {
+        // A finding whose name isn't on the given line degrades to its own pos.
+        let f = Finding { line: 9, col: 3, rule: "naming/var", msg: String::new(), name: "ghost".into() };
+        assert_eq!(locate("only one line\n", &f), (9, 3, 1));
+    }
+
+    #[test]
+    fn does_not_flag_conforming_names() {
+        let src = "int add(int a, int b) {\n    int sum = a + b;\n    return sum;\n}\n";
+        assert!(findings(src).is_empty(), "clean code should have no findings");
     }
 }
 

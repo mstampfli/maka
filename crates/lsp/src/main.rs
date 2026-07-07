@@ -329,9 +329,12 @@ fn analyze_inner(this_path: Option<std::path::PathBuf>, this_text: String, open:
     // compiler diagnostics), from the same crate `makac lint` uses.
     if let Some(m) = &user_ast {
         for f in maka_lint::lint_module_findings(m) {
-            let start = Position { line: f.line.saturating_sub(1), character: f.col.saturating_sub(1) };
+            // Underline the offending NAME (full width), not the declaration's
+            // type/keyword that the raw finding points at.
+            let (line, col, width) = maka_lint::locate(&this_text, &f);
+            let start = Position { line: line.saturating_sub(1), character: col.saturating_sub(1) };
             diagnostics.push(Diagnostic {
-                range: Range { start, end: Position { line: start.line, character: start.character + 1 } },
+                range: Range { start, end: Position { line: start.line, character: start.character + width.max(1) } },
                 severity: Some(DiagnosticSeverity::INFORMATION),
                 source: Some("maka-lint".into()),
                 message: format!("{} [{}]", f.msg, f.rule),
