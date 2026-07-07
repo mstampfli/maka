@@ -457,6 +457,41 @@ fn analyze_inner(this_path: Option<std::path::PathBuf>, this_text: String, open:
 
 // ---------------------------------------------------------------- positions
 
+/// Refine a declaration position to the range of the NAME on that line (searched
+/// from the declaration start), so go-to-definition - and its Ctrl-hover source
+/// preview - land on the identifier rather than the type/keyword before it.
+/// Falls back to a name-width range at the given position.
+fn name_range(text: &str, line1: u32, col1: u32, name: &str) -> Range {
+    let l0 = line1.saturating_sub(1);
+    let fallback = Range {
+        start: Position { line: l0, character: col1.saturating_sub(1) },
+        end: Position { line: l0, character: col1.saturating_sub(1) + name.len().max(1) as u32 },
+    };
+    if name.is_empty() {
+        return fallback;
+    }
+    let Some(line) = text.lines().nth(l0 as usize) else {
+        return fallback;
+    };
+    let bytes = line.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = (col1.saturating_sub(1) as usize).min(line.len());
+    while let Some(rel) = line.get(i..).and_then(|s| s.find(name)) {
+        let s = i + rel;
+        let e = s + name.len();
+        let before = s == 0 || !is_word(bytes[s - 1]);
+        let after = e >= bytes.len() || !is_word(bytes[e]);
+        if before && after {
+            return Range {
+                start: Position { line: l0, character: s as u32 },
+                end: Position { line: l0, character: e as u32 },
+            };
+        }
+        i = e.max(s + 1);
+    }
+    fallback
+}
+
 fn span_to_range(sp: Span) -> Range {
     let line = sp.line.saturating_sub(1);
     let col = sp.col.saturating_sub(1);
@@ -999,6 +1034,31 @@ fn semantic_legend() -> SemanticTokensLegend {
     }
 }
 
+/// From the index of a `<`, is it a balanced `<...>` immediately followed by
+/// `(`?  Distinguishes a generic function `f<T>(` / `f<T>()` from a `<`
+/// comparison, so the name can be classified as a function.  Bounded so a stray
+/// `<` never scans far.
+fn generic_then_paren(tokens: &[maka_lexer::Token], lt: usize) -> bool {
+    let mut d = 0i32;
+    let end = (lt + 64).min(tokens.len());
+    for k in lt..end {
+        match tokens[k].kind {
+            TokKind::Lt => d += 1,
+            TokKind::Gt => {
+                d -= 1;
+                if d == 0 {
+                    return matches!(tokens.get(k + 1).map(|t| &t.kind), Some(TokKind::LParen));
+                }
+            }
+            // A terminator or an unbalanced bracket means this was not a
+            // type-argument list.
+            TokKind::Semicolon | TokKind::LBrace | TokKind::RBrace | TokKind::RParen => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Classify every identifier token into a semantic type, delta-encoded per the
 /// LSP protocol.  A member access (`.name`) is a property, or an enum member if
 /// PascalCase; a primitive name or any PascalCase name is a type; a name directly
@@ -1013,13 +1073,18 @@ fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
     for i in 0..tokens.len() {
         let TokKind::Ident(name) = &tokens[i].kind else { continue };
         let after_dot = i > 0 && matches!(tokens[i - 1].kind, TokKind::Dot);
-        let before_paren = matches!(tokens.get(i + 1).map(|t| &t.kind), Some(TokKind::LParen));
+        let next = tokens.get(i + 1).map(|t| &t.kind);
+        // A function call/decl: `name(`, a turbofish/qualified `name::`, or a
+        // generic `name<...>(` (a balanced `<...>` immediately followed by `(`,
+        // which distinguishes a generic function decl/call from a `<` comparison).
+        let is_func = matches!(next, Some(TokKind::LParen) | Some(TokKind::ColonColon))
+            || (matches!(next, Some(TokKind::Lt)) && generic_then_paren(&tokens, i + 1));
         let is_pascal = name.chars().next().map_or(false, |c| c.is_ascii_uppercase());
         let ttype = if after_dot {
             if is_pascal { ST_ENUM_MEMBER } else { ST_PROPERTY }
         } else if PRIMS.contains(&name.as_str()) {
             ST_TYPE
-        } else if before_paren {
+        } else if is_func {
             ST_FUNCTION
         } else if is_pascal {
             ST_TYPE
@@ -1196,20 +1261,28 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let a = self.analyze(&uri);
-        // A local / parameter, or a declaration in THIS file.
+        // A local / parameter, a declaration, or a field in THIS file.
         if let (Some(hir), Some(user)) = (&a.hir, &a.user_ast) {
-            if let Some((_, Some(sp))) = resolve(user, hir, &name, pos.line) {
+            let hit = resolve(user, hir, &name, pos.line)
+                .and_then(|(_, sp)| sp)
+                .or_else(|| resolve_field(user, hir, &text, pos, &name).and_then(|(_, sp)| sp));
+            if let Some(sp) = hit {
                 return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                     uri: uri.clone(),
-                    range: span_to_range(sp),
+                    range: name_range(&text, sp.line, sp.col, &name),
                 })));
             }
         }
-        // A top-level definition in another project file (jump to that file).
+        // A top-level definition in another project file (jump to that file);
+        // refine the target to the name using that file's source.
         if let Some(d) = a.symbol_index.iter().find(|d| d.name == name) {
+            let range = self
+                .source_of(&d.uri)
+                .map(|src| name_range(&src, d.range.start.line + 1, d.range.start.character + 1, &name))
+                .unwrap_or(d.range);
             return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                 uri: d.uri.clone(),
-                range: d.range,
+                range,
             })));
         }
         Ok(None)
