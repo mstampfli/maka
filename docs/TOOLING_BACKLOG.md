@@ -29,9 +29,11 @@ are queued; check them off as they land.
 - [x] **Enum variants navigable.** Each variant is indexed, so `Color.Red` hovers
       (as `Color.Red`, with payload field names) and goes to its declaration.
       Hovering the enum already lists the variants (`enum_signature`).
-- [ ] **General polish pass.** Make the linter + LSP "perfect": tighten hover
-      output for every symbol kind, scope-aware references/rename, semantic
-      tokens, quick-fixes for lint findings, etc.
+- [x] **Semantic tokens.** Token-accurate identifier classification (type /
+      function / variable / property / enumMember) that the TextMate grammar
+      cannot infer; keywords/strings/numbers/comments stay TextMate-highlighted.
+- [ ] **General polish pass.** Remaining: scope-aware references/rename,
+      quick-fixes for lint findings, richer field-declaration semantic tokens.
 
 ## Language
 

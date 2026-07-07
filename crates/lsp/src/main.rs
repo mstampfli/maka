@@ -823,6 +823,77 @@ const BUILTINS: &[(&str, bool, &str)] = &[
     ("select", false, "select(a, b, ...) - wait for the first of several fibers to complete."),
 ];
 
+// Semantic-token classification.  We only classify IDENTIFIERS - which the
+// TextMate grammar cannot tell apart - and leave keywords / strings / numbers /
+// comments to it.  Indices must match `semantic_legend`.
+const ST_TYPE: u32 = 0;
+const ST_FUNCTION: u32 = 1;
+const ST_VARIABLE: u32 = 2;
+const ST_PROPERTY: u32 = 3;
+const ST_ENUM_MEMBER: u32 = 4;
+
+fn semantic_legend() -> SemanticTokensLegend {
+    SemanticTokensLegend {
+        token_types: vec![
+            SemanticTokenType::TYPE,
+            SemanticTokenType::FUNCTION,
+            SemanticTokenType::VARIABLE,
+            SemanticTokenType::PROPERTY,
+            SemanticTokenType::ENUM_MEMBER,
+        ],
+        token_modifiers: vec![],
+    }
+}
+
+/// Classify every identifier token into a semantic type, delta-encoded per the
+/// LSP protocol.  A member access (`.name`) is a property, or an enum member if
+/// PascalCase; a primitive name or any PascalCase name is a type; a name directly
+/// before `(` is a function; anything else is a variable.
+fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
+    let Ok(tokens) = maka_lexer::Lexer::new(text).tokenize() else {
+        return Vec::new();
+    };
+    let mut data = Vec::new();
+    let mut prev_line = 0u32;
+    let mut prev_start = 0u32;
+    for i in 0..tokens.len() {
+        let TokKind::Ident(name) = &tokens[i].kind else { continue };
+        let after_dot = i > 0 && matches!(tokens[i - 1].kind, TokKind::Dot);
+        let before_paren = matches!(tokens.get(i + 1).map(|t| &t.kind), Some(TokKind::LParen));
+        let is_pascal = name.chars().next().map_or(false, |c| c.is_ascii_uppercase());
+        let ttype = if after_dot {
+            if is_pascal { ST_ENUM_MEMBER } else { ST_PROPERTY }
+        } else if PRIMS.contains(&name.as_str()) {
+            ST_TYPE
+        } else if before_paren {
+            ST_FUNCTION
+        } else if is_pascal {
+            ST_TYPE
+        } else {
+            ST_VARIABLE
+        };
+        let sp = tokens[i].span;
+        let line = sp.line.saturating_sub(1);
+        let start = sp.col.saturating_sub(1);
+        let length = sp.end.saturating_sub(sp.start) as u32;
+        if length == 0 {
+            continue;
+        }
+        let delta_line = line.saturating_sub(prev_line);
+        let delta_start = if delta_line == 0 { start.saturating_sub(prev_start) } else { start };
+        data.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type: ttype,
+            token_modifiers_bitset: 0,
+        });
+        prev_line = line;
+        prev_start = start;
+    }
+    data
+}
+
 // ---------------------------------------------------------------- server
 
 #[tower_lsp::async_trait]
@@ -847,6 +918,14 @@ impl LanguageServer for Backend {
                 document_highlight_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                        legend: semantic_legend(),
+                        full: Some(SemanticTokensFullOptions::Bool(true)),
+                        range: Some(false),
+                        work_done_progress_options: Default::default(),
+                    }),
+                ),
                 ..Default::default()
             },
         })
@@ -986,6 +1065,22 @@ impl LanguageServer for Backend {
             return Ok(Some(DocumentSymbolResponse::Nested(document_symbols(m))));
         }
         Ok(None)
+    }
+
+    /// Semantic tokens: token-accurate identifier classification (types /
+    /// functions / variables / members) that the TextMate grammar cannot infer.
+    async fn semantic_tokens_full(
+        &self,
+        p: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = p.text_document.uri;
+        let Some(text) = self.docs.get(&uri).map(|t| t.clone()) else {
+            return Ok(None);
+        };
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: semantic_tokens(&text),
+        })))
     }
 
     /// Signature help: while typing a call's arguments, show the callee's
