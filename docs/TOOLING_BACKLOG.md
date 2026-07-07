@@ -28,7 +28,7 @@ are queued; check them off as they land.
 
 ## CLI
 
-- [ ] **`maka` not found in the terminal.** The `maka` front-end binary is not on
-      PATH after a normal build. Provide an install path (a `maka install` /
-      documented `cargo install --path crates/cli`, or a symlink target) so
-      `maka build/run/test/fmt/lint` work from any project directory.
+- [x] **`maka` not found in the terminal.** Fixed: `install.sh` builds release
+      and installs both `maka` and `makac` to `~/.cargo/bin` (or `$BINDIR`), so
+      `maka build/run/test/fmt/lint` work from any project directory. Documented
+      in the README.

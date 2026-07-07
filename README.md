@@ -156,6 +156,26 @@ cargo build --release
 ./target/release/makac hello.maka -o hello --run
 ```
 
+## Installing (put `maka` and `makac` on PATH)
+
+```sh
+./install.sh                    # builds release, installs both to ~/.cargo/bin
+BINDIR=~/.local/bin ./install.sh   # or choose the directory
+```
+
+`maka` locates `makac` as a sibling, so both go in the same directory. After
+installing, use the project tool from any project:
+
+```sh
+maka new hello && cd hello
+maka run                        # build + run src/main.maka
+maka fmt                        # format src/*.maka
+maka lint                       # check naming/style
+```
+
+The idiomatic Cargo alternative is `cargo install --path crates/driver` and
+`cargo install --path crates/cli`.
+
 ## Driver flags
 
 ```
