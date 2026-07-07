@@ -208,7 +208,7 @@ bash tests/run_neg.sh        # negative suite, every neg_*.maka must reject
 
 ## Status
 
-Early but real. Positive suite passes 443 programs; negative suite passes 133.
+Early but real. Positive suite passes 445 programs; negative suite passes 134.
 The language is implemented in Rust as a workspace; the generated C builds
 cleanly with modern gcc/clang (including gcc 14, which treats implicit
 declarations and void value-returns as hard errors), and the whole test corpus
