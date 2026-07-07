@@ -154,6 +154,53 @@ fn gather_maka(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, depth: 
     }
 }
 
+/// Render a source-level `ast::Type` as written (before resolution), so a
+/// generic signature shows its type parameters (`T`, `Vec<T>`) rather than a
+/// monomorphized instance's concrete types.
+fn ast_type_str(t: &maka_ast::Type) -> String {
+    use maka_ast::Type::*;
+    let m = |mn: &maka_ast::Mutness| if matches!(mn, maka_ast::Mutness::Mut) { "mut " } else { "" };
+    match t {
+        Named(n, _) => n.clone(),
+        AssocPath { base, segment, .. } => format!("{}::{}", ast_type_str(base), segment),
+        Ref { mutness, inner, .. } => format!("&{}{}", m(mutness), ast_type_str(inner)),
+        Ptr { mutness, inner, .. } => format!("*{}{}", m(mutness), ast_type_str(inner)),
+        RawPtr { mutness, inner, .. } => format!("raw *{}{}", m(mutness), ast_type_str(inner)),
+        OwnPtr { mutness, inner, .. } => format!("own *{}{}", m(mutness), ast_type_str(inner)),
+        Heap { inner, .. } => format!("own &{}", ast_type_str(inner)),
+        Array { len, elem, .. } => format!("[{}]{}", len, ast_type_str(elem)),
+        Slice { mutness, elem, .. } => format!("[]{}{}", m(mutness), ast_type_str(elem)),
+        Vec { elem, .. } => format!("[*]{}", ast_type_str(elem)),
+        Unit(_) => "unit".to_string(),
+        Dyn { traits, locked, .. } => {
+            format!("{} {}", if *locked { "some" } else { "dyn" }, traits.join(" + "))
+        }
+        Generic { name, args, .. } => {
+            format!("{}<{}>", name, args.iter().map(ast_type_str).collect::<std::vec::Vec<_>>().join(", "))
+        }
+        FnPtr { ret, params, .. } => {
+            format!("{}({})", ast_type_str(ret), params.iter().map(ast_type_str).collect::<std::vec::Vec<_>>().join(", "))
+        }
+    }
+}
+
+/// The full source signature of a function declaration, with type parameters:
+/// `T identity<T>(T x)`.
+fn func_signature_ast(f: &maka_ast::FuncDecl) -> String {
+    let tp = if f.type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", f.type_params.join(", "))
+    };
+    let params = f
+        .params
+        .iter()
+        .map(|p| format!("{} {}", ast_type_str(&p.ty), p.name))
+        .collect::<std::vec::Vec<_>>()
+        .join(", ");
+    format!("{} {}{}({})", ast_type_str(&f.ret), f.name, tp, params)
+}
+
 /// Render an enum for hover: a multi-line body listing each variant with its
 /// payload field names, if any (matching the `data` hover style).  Shared by the
 /// in-file resolver and the cross-file symbol index so both show the same detail.
@@ -574,9 +621,33 @@ fn enclosing_call(text: &str, pos: Position) -> Option<(String, u32)> {
         match &toks[i].kind {
             TokKind::RParen | TokKind::RBracket | TokKind::RBrace => depth += 1,
             TokKind::LParen if depth == 0 => {
-                // The enclosing open paren: a call iff the previous token names it.
-                if i > 0 {
-                    if let TokKind::Ident(name) = &toks[i - 1].kind {
+                // The enclosing open paren: the callee is the token before it, or,
+                // for a turbofish call `name::<...>(`, the ident before the
+                // balanced `<...>` and its `::`.
+                let mut ci = i;
+                if ci > 0 && matches!(toks[ci - 1].kind, TokKind::Gt) {
+                    let mut d = 0i32;
+                    let mut k = ci - 1;
+                    loop {
+                        match toks[k].kind {
+                            TokKind::Gt => d += 1,
+                            TokKind::Lt => d -= 1,
+                            _ => {}
+                        }
+                        if d == 0 || k == 0 {
+                            break;
+                        }
+                        k -= 1;
+                    }
+                    // toks[k] is the opening `<`; a turbofish has `::` before it.
+                    if d == 0 && k >= 2 && matches!(toks[k - 1].kind, TokKind::ColonColon) {
+                        ci = k - 1;
+                    } else {
+                        return None;
+                    }
+                }
+                if ci > 0 {
+                    if let TokKind::Ident(name) = &toks[ci - 1].kind {
                         return Some((name.clone(), commas));
                     }
                 }
@@ -624,15 +695,10 @@ fn resolve(user: &Module, hir: &HirModule, name: &str, line: u32) -> Option<(Str
     for it in &user.items {
         match it {
             Item::Func(f) if f.name == name => {
-                // Build the signature from the HIR twin matched by start line, so
-                // a same-named stdlib function can't shadow it.
-                let md = sym
-                    .funcs
-                    .iter()
-                    .find(|hf| hf.name == name && hf.span.line == f.span.line)
-                    .map(|hf| hfunc_signature(hf, sym))
-                    .unwrap_or_else(|| format!("{}(...)", name));
-                return Some((code_md(&md), Some(f.span)));
+                // Render the declared signature from the AST, so a generic
+                // function shows its type parameters and `T`-typed params
+                // (`T identity<T>(T x)`) rather than a monomorphized instance.
+                return Some((code_md(&func_signature_ast(f)), Some(f.span)));
             }
             Item::Data(d) if d.name == name => {
                 let md = sym
@@ -675,19 +741,6 @@ fn resolve(user: &Module, hir: &HirModule, name: &str, line: u32) -> Option<(Str
         return Some((code_md(&fn_signature(sig, sym)), None));
     }
     None
-}
-
-fn hfunc_signature(hf: &maka_sema::hir::HFunc, sym: &SymTab) -> String {
-    let params = hf
-        .params
-        .iter()
-        .map(|lid| {
-            let l = &hf.locals[lid.0 as usize];
-            format!("{} {}", render_type(&l.ty, sym), l.name)
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{} {}({})", render_type(&hf.ret, sym), hf.name, params)
 }
 
 fn fn_signature(sig: &maka_sema::hir::FuncSig, sym: &SymTab) -> String {
@@ -1105,20 +1158,11 @@ impl LanguageServer for Backend {
                 Item::Func(f) if f.name == name => Some(f),
                 _ => None,
             }) {
-                if let Some(hf) =
-                    sym.funcs.iter().find(|hf| hf.name == name && hf.span.line == f.span.line)
-                {
-                    let params: Vec<String> = hf
-                        .params
-                        .iter()
-                        .map(|lid| {
-                            let l = &hf.locals[lid.0 as usize];
-                            format!("{} {}", render_type(&l.ty, sym), l.name)
-                        })
-                        .collect();
-                    let label = format!("{} {}({})", render_type(&hf.ret, sym), hf.name, params.join(", "));
-                    found = Some((label, params));
-                }
+                // Render from the AST so a generic function shows its type
+                // parameters and `T`-typed params, consistent with hover.
+                let params: Vec<String> =
+                    f.params.iter().map(|p| format!("{} {}", ast_type_str(&p.ty), p.name)).collect();
+                found = Some((func_signature_ast(f), params));
             }
         }
         // Otherwise any signature of that name (stdlib / builtin extern).
