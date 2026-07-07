@@ -997,7 +997,7 @@ impl SymTab {
             }
         }
 
-        // Pass 3: function signatures (top-level `fn`, `extern`, and `logic`-block funcs)
+        // Pass 3: function signatures (top-level `fn` and `extern`)
         for (idx, item) in m.items.iter().enumerate() {
             let item_module: Vec<String> = m.item_modules.get(idx).cloned().unwrap_or_default();
             let item_imports: Vec<(Vec<String>, String)> = m.item_imports.get(idx).cloned().unwrap_or_default();
@@ -1034,7 +1034,7 @@ impl SymTab {
                         // An `export` fn's C symbol is EXACTLY its declared name (the
                         // reverse-FFI contract); a normal fn dodges stdlib C clashes.
                         c_name: if f.is_export { f.name.clone() } else { mangle_c_stdlib_clash(&f.name) },
-                        logic: None,
+                        trait_name: None,
                         type_params: f.type_params.clone(),
                         is_inline: f.is_inline,
                         is_gate: f.is_gate,
@@ -1066,7 +1066,7 @@ impl SymTab {
                         param_tys, param_names, ret,
                         is_extern: true,
                         c_name: e.c_name.clone(),
-                        logic: None,
+                        trait_name: None,
                         type_params: Vec::new(),
                         is_inline: false,
                         is_gate: e.is_gate,
@@ -1411,7 +1411,7 @@ impl SymTab {
                             param_tys, param_names, ret,
                             is_extern: false,
                             c_name,
-                            logic: Some(h.attr_name.clone()),
+                            trait_name: Some(h.attr_name.clone()),
                             type_params: f_subst.type_params.clone(),
                             is_inline: f_subst.is_inline,
                             is_gate: f_subst.is_gate,
@@ -1432,7 +1432,7 @@ impl SymTab {
         }
 
         // Pass 4: enforce data-decl `where` bounds at every concrete instantiation.
-        // Must run after pass 3 so `trait_impls` (populated by Item::Has / Item::Logic
+        // Must run after pass 3 so `trait_impls` (populated by Item::Has
         // arms) is up to date — the bound check otherwise sees an empty impl table.
         for (req_name, req_args) in &struct_inst_requests {
             let Some((_, tinfo)) = sym.struct_by_name(req_name) else { continue; };

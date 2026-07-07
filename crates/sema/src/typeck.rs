@@ -76,8 +76,8 @@ pub struct TypeChecker<'a> {
     cur_where_bounds: Vec<(String, Vec<HType>, Vec<(String, HType)>)>,
     /// Are we inside an `unsafe` block? (Currently unused except as a flag.)
     in_unsafe: u32,
-    /// If we're checking a function in a `logic` block, this is the logic's name.
-    cur_logic: Option<String>,
+    /// If we're checking a trait method (a `has` impl), this is the owning attr's name.
+    cur_trait: Option<String>,
     /// >0 if we're inside a Call's argument expression — allows `transfer`/`share`.
     call_arg_depth: u32,
     /// True when the immediate enclosing call's callee is a `gate` function.
@@ -135,7 +135,7 @@ struct Scope {
 
 impl<'a> TypeChecker<'a> {
     pub fn new(sym: &'a SymTab) -> Self {
-        Self::new_with_logic(sym, None)
+        Self::new_with_trait(sym, None)
     }
 
     /// Reject `*unit` (the untyped opaque pointer) anywhere it would surface
@@ -313,7 +313,7 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    pub fn new_with_logic(sym: &'a SymTab, logic: Option<&str>) -> Self {
+    pub fn new_with_trait(sym: &'a SymTab, trait_name: Option<&str>) -> Self {
         Self {
             sym,
             locals: Vec::new(),
@@ -335,7 +335,7 @@ impl<'a> TypeChecker<'a> {
             cur_has_imports: Vec::new(),
             cur_where_bounds: Vec::new(),
             in_unsafe: 0,
-            cur_logic: logic.map(|s| s.to_string()),
+            cur_trait: trait_name.map(|s| s.to_string()),
             call_arg_depth: 0,
             cur_call_is_gate: false,
             force_qualifier: None,
@@ -375,7 +375,7 @@ impl<'a> TypeChecker<'a> {
         let fid = if let Some(id) = forced_fid {
             id
         } else {
-            match &self.cur_logic {
+            match &self.cur_trait {
                 Some(l) => self.sym.func_by_qualified(l, &f.name).expect("sig collected").0,
                 None => self.sym.func_by_name(&f.name).expect("sig collected").0,
             }
@@ -1578,7 +1578,7 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Try to dispatch `op` as a call to a user-defined logic block.
+    /// Try to dispatch `op` as a call to a user-defined operator trait impl.
     /// Returns Some(hir) on success.
     /// Coerce an operator operand to the overload's parameter type, auto-borrowing
     /// a value into a `&T` parameter (the temp-hoisting pass makes `&<rvalue>` a
@@ -1615,12 +1615,12 @@ impl<'a> TypeChecker<'a> {
             And | Or => return None,
         };
         // Candidates: any impl method named `fn_name` registered under the operator's
-        // attr/logic name.  Both `logic` blocks and `attr` + `has` impls tag their
-        // methods with `logic = Some(<name>)`, so a single sig scan covers both.
+        // attr name.  `attr` + `has` impls tag their
+        // methods with `trait_name = Some(<name>)`, so a single sig scan covers both.
         // Operands auto-borrow (`op_arg_ok`), so a `&Self` receiver is non-consuming.
         let cand = self.sym.sigs.iter().enumerate()
             .filter(|(_, s)| s.name == fn_name
-                && s.logic.as_deref() == Some(logic_name)
+                && s.trait_name.as_deref() == Some(logic_name)
                 && s.param_tys.len() == 2)
             .map(|(i, s)| (FuncId(i as u32), s.clone()))
             .find(|(_, sig)| op_arg_ok(&sig.param_tys[0], &l.ty, &sig.type_params)
@@ -1727,11 +1727,11 @@ impl<'a> TypeChecker<'a> {
 
     fn try_unary_overload(&mut self, trait_name: &str, fn_name: &str, h: &HExpr, sp: Span) -> Option<HExpr> {
         // Any impl method named `fn_name` under the operator's trait name - both
-        // `logic` blocks and `attr` + `has` impls tag their methods with
-        // `logic = Some(<name>)`, so one sig scan covers both sources.
+        // `attr` + `has` impls tag their methods with
+        // `trait_name = Some(<name>)`, so one sig scan covers both sources.
         let cand = self.sym.sigs.iter().enumerate()
             .filter(|(_, s)| s.name == fn_name
-                && s.logic.as_deref() == Some(trait_name)
+                && s.trait_name.as_deref() == Some(trait_name)
                 && s.param_tys.len() == 1)
             .map(|(i, s)| (FuncId(i as u32), s.clone()))
             .find(|(_, sig)| op_arg_ok(&sig.param_tys[0], &h.ty, &sig.type_params))?;
@@ -2166,11 +2166,11 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn try_index_overload_or_err(&mut self, bh: HExpr, ih: HExpr, sp: Span) -> HExpr {
-        // `index` impls under the `Index` trait, from a `logic` block or an
-        // `attr` + `has` impl (both tag the sig with `logic = Some("Index")`).
+        // `index` impls under the `Index` trait, from an
+        // `attr` + `has` impl (both tag the sig with `trait_name = Some("Index")`).
         let cand = self.sym.sigs.iter().enumerate()
             .filter(|(_, s)| s.name == "index"
-                && s.logic.as_deref() == Some("Index")
+                && s.trait_name.as_deref() == Some("Index")
                 && s.param_tys.len() == 2)
             .map(|(i, s)| (FuncId(i as u32), s.clone()))
             .find(|(_, sig)| op_arg_ok(&sig.param_tys[0], &bh.ty, &sig.type_params)
@@ -2290,7 +2290,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// The `(FuncId, FuncSig)` implementing method `method` of trait `trait_name`
-    /// for concrete struct `sid` (a `logic` overload or a `has X for T` method).
+    /// for concrete struct `sid` (a `has X for T` method).
     fn trait_method_for_struct(
         &self,
         trait_name: &str,
@@ -2381,7 +2381,7 @@ impl<'a> TypeChecker<'a> {
             // ONLY when the base is a value projection rooted in a real local
             // (ident / index / field chain bottoming out at a local variable).
             // This lets `ops[i].cb(x)` and `a.b.cb(x)` work, not just a bare-local
-            // base, while NOT probing namespace bases like `Logic.fn(args)` or
+            // base, while NOT probing namespace bases like `Trait.fn(args)` or
             // `module.Type.method(...)` (whose root ident is not a local) - those
             // must fall through to the qualified-call path, and probing them would
             // raise a spurious unknown-identifier error.
@@ -2424,7 +2424,7 @@ impl<'a> TypeChecker<'a> {
         }
         // Decide the call kind based on the callee shape.
         // 1. `name(args)`                  — top-level or in-scope call
-        // 2. `Logic.fn(args)`              — qualified call to a logic / attr block
+        // 2. `Trait.fn(args)`            — qualified call into an attr's has-impls
         // 3. `module.fn(args)`             — module-qualified call (NEW)
         // 4. `receiver.fn(args)`           — postfix call: rewrite as `fn(receiver, args)`
         let mut module_qualifier: Option<String> = None;
@@ -2448,13 +2448,13 @@ impl<'a> TypeChecker<'a> {
                         (name.clone(), Some(q), None)
                     }
                 } else if let ast::Expr::Ident(qual, _) = base.as_ref() {
-                    // Locals shadow `logic`/`attr` names: when `qual` resolves
+                    // Locals shadow `attr` names: when `qual` resolves
                     // to a value in scope, `qual.method(args)` is a postfix
                     // call on the instance, NOT an attr-qualified call.  This
                     // matches Maka's normal scoping rule and removes the
                     // ambiguity between `LogicName.fn(args)` (legacy qualified
                     // call) and `instance.fn(args)` when `instance` happens to
-                    // share its name with a registered attr/logic.  Users who
+                    // share its name with a registered attr.  Users who
                     // need the unambiguous qualified form can write
                     // `Attr::fn(args)` (§10.5).
                     if let Some(id) = self.lookup(qual) {
@@ -3823,23 +3823,23 @@ impl<'a> TypeChecker<'a> {
             // path segment matches the qualifier.
             self.sym.sigs.iter().enumerate()
                 .filter(|(_, s)| s.name == name
-                    && s.logic.is_none()
+                    && s.trait_name.is_none()
                     && s.module_path.last().map(|p| p == modq).unwrap_or(false))
                 .map(|(i, s)| (FuncId(i as u32), s.clone()))
                 .collect()
         } else { match &qualifier {
-            Some(logic) => self.sym.funcs_by_qualified(Some(logic), &name)
+            Some(qual) => self.sym.funcs_by_qualified(Some(qual), &name)
                 .into_iter().map(|(f, s)| (f, s.clone())).collect(),
             None => {
                 let mut v: Vec<(FuncId, FuncSig)> = self.sym.funcs_by_qualified(None, &name)
                     .into_iter().map(|(f, s)| (f, s.clone())).collect();
                 if v.is_empty() {
-                    if let Some(l) = self.cur_logic.clone() {
+                    if let Some(l) = self.cur_trait.clone() {
                         v = self.sym.funcs_by_qualified(Some(&l), &name)
                             .into_iter().map(|(f, s)| (f, s.clone())).collect();
                     }
                 }
-                // Open dispatch for method calls into the attr / logic (has-impl)
+                // Open dispatch for method calls into the attr (has-impl)
                 // namespace.  For a postfix call `receiver.method(args)` we MERGE
                 // every same-named attr method with the free candidates, so a method
                 // that shares a free function's name (e.g. `String.push` vs a user
@@ -3849,14 +3849,14 @@ impl<'a> TypeChecker<'a> {
                 // plain free-call resolution).
                 if is_postfix {
                     for (i, s) in self.sym.sigs.iter().enumerate() {
-                        if s.name == name && s.logic.is_some()
+                        if s.name == name && s.trait_name.is_some()
                             && !v.iter().any(|(f, _)| f.0 == i as u32) {
                             v.push((FuncId(i as u32), s.clone()));
                         }
                     }
                 } else if v.is_empty() {
                     v = self.sym.sigs.iter().enumerate()
-                        .filter(|(_, s)| s.name == name && s.logic.is_some())
+                        .filter(|(_, s)| s.name == name && s.trait_name.is_some())
                         .map(|(i, s)| (FuncId(i as u32), s.clone()))
                         .collect();
                 }
@@ -3899,7 +3899,7 @@ impl<'a> TypeChecker<'a> {
         if !probed.is_empty() {
             let is_dyn = matches!(strip_to_dyn(&probed[0].ty), Some(_));
             if is_dyn {
-                // Find a signature in the trait logic with matching name and arity.
+                // Find a signature in the trait with matching name and arity.
                 let trait_name = match strip_to_dyn(&probed[0].ty) { Some(traits) => traits[0].clone(), None => String::new() };
                 if !self.sym.is_trait(&trait_name) {
                     self.err(format!("unknown trait `{}`", trait_name), sp);
@@ -4286,7 +4286,7 @@ impl<'a> TypeChecker<'a> {
                     // `use Mod.Type.Attr;` also authorizes any method call on that
                     // attr-namespaced impl — the impl is explicitly propagated, so its
                     // methods come along.
-                    let authorized_by_use = callee_sig.logic.as_ref().is_some_and(|attr|
+                    let authorized_by_use = callee_sig.trait_name.as_ref().is_some_and(|attr|
                         self.cur_has_imports.iter().any(|imp|
                             imp.module_path == callee_sig.module_path && imp.attr_name == *attr
                         )
@@ -4294,7 +4294,7 @@ impl<'a> TypeChecker<'a> {
                     // Importing the attr itself by name (`import std.StringOps;`) also
                     // authorizes calling its methods — bringing a trait into scope brings
                     // its method set, so `s.push(..)` works without importing each method.
-                    let authorized_by_attr_import = callee_sig.logic.as_ref().is_some_and(|attr|
+                    let authorized_by_attr_import = callee_sig.trait_name.as_ref().is_some_and(|attr|
                         self.cur_imports.iter().any(|(m, n)|
                             m == &callee_sig.module_path && (n == attr || n == "*")
                         )
@@ -4305,7 +4305,7 @@ impl<'a> TypeChecker<'a> {
                         // A trait method resolves once its TRAIT is in scope - you
                         // don't import each method by name.  Point at that instead of
                         // the (misleading) free-function import form.
-                        let msg = if let Some(attr) = &callee_sig.logic {
+                        let msg = if let Some(attr) = &callee_sig.trait_name {
                             format!(
                                 "`{}` is a method of trait `{}` in module `{}`; bring the trait into scope to call it from `{}` - `import {}.{};` (or `use {}.<Type>.{};`)",
                                 callee_sig.name, attr, modpath, curmod, modpath, attr, modpath, attr,
@@ -4490,8 +4490,8 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Handle `expr as dyn Trait`. The source must be a reference or a value whose underlying
-    /// Does concrete struct `struct_id` satisfy trait/logic `trait_name` - i.e. does
-    /// every distinct method name in the logic have an overload taking that struct
+    /// Does concrete struct `struct_id` satisfy trait `trait_name` - i.e. does
+    /// every distinct method name in the trait have an overload taking that struct
     /// (by `&`-ref) as its receiver?  Same rule check_to_dyn enforces.
     fn struct_satisfies_trait(&self, struct_id: StructId, trait_name: &str) -> bool {
         if !self.sym.is_trait(trait_name) {
@@ -4527,7 +4527,7 @@ impl<'a> TypeChecker<'a> {
         };
 
         // For each trait in `traits`, verify the concrete type satisfies it: every function
-        // in the logic must have a matching overload for the concrete struct as receiver.
+        // in the trait must have a matching overload for the concrete struct as receiver.
         for tn in &traits {
             if !self.sym.is_trait(tn) {
                 self.err(format!("unknown trait `{}`", tn), sp);
@@ -4868,7 +4868,7 @@ impl<'a> TypeChecker<'a> {
             ret: resolved_ret.clone(),
             is_extern: false,
             c_name: lifted_name.clone(),
-            logic: None,
+            trait_name: None,
             type_params: Vec::new(),
             is_inline: false,
             is_gate: false,
@@ -4891,7 +4891,7 @@ impl<'a> TypeChecker<'a> {
             span: sp,
         });
 
-        let mut sub = TypeChecker::new_with_logic(self.sym, None);
+        let mut sub = TypeChecker::new_with_trait(self.sym, None);
         // Inherit the enclosing function's imports / has-imports / module path
         // so closure bodies can call the same names that worked in the outer
         // scope (e.g. `sleep_ms` imported from std).

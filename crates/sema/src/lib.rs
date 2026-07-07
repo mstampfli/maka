@@ -223,7 +223,7 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
     for (idx, item) in m.items.iter().enumerate() {
         let maka_ast::Item::Global(g) = item else { continue; };
         let item_module: Vec<String> = m.item_modules.get(idx).cloned().unwrap_or_default();
-        let tc = TypeChecker::new_with_logic(&sym, None);
+        let tc = TypeChecker::new_with_trait(&sym, None);
         let resolved_ty = resolve::resolve_type(&sym, &g.ty, &mut errors);
         let init_h = match tc.check_global_init(&g.init, &resolved_ty) {
             Ok(h) => h,
@@ -251,13 +251,13 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
     // own.  We rewrite them alongside their parent instead.
     let mut synth_of_parent: std::collections::HashMap<usize, std::ops::Range<usize>> = std::collections::HashMap::new();
 
-    // First pass: non-generic top-level + logic funcs.
+    // First pass: non-generic top-level functions.
     let mut seen_has_pairs: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
     for item in &m.items {
         match item {
             maka_ast::Item::Func(f) => {
                 if !f.type_params.is_empty() { continue; }
-                let tc = TypeChecker::new_with_logic(&sym, None);
+                let tc = TypeChecker::new_with_trait(&sym, None);
                 match tc.check_func_with_id(f, None) {
                     Ok((hfunc, reqs, synth)) => {
                         for s in synth.structs { sym.structs.push(s); }
@@ -298,7 +298,7 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                         None => continue,
                     };
                     if !f_decl.type_params.is_empty() { continue; }
-                    let tc = TypeChecker::new_with_logic(&sym, Some(&h.attr_name));
+                    let tc = TypeChecker::new_with_trait(&sym, Some(&h.attr_name));
                     match tc.check_func_with_id(&f_decl, Some(fid)) {
                         Ok((hfunc, reqs, synth)) => {
                             for s in synth.structs { sym.structs.push(s); }
@@ -466,7 +466,7 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                     ret: new_ret,
                     is_extern: false,
                     c_name,
-                    logic: template_sig.logic.clone(),
+                    trait_name: template_sig.trait_name.clone(),
                     type_params: Vec::new(),
                     is_inline: template_sig.is_inline,
                     is_gate: template_sig.is_gate,
@@ -505,7 +505,7 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                 for (tp, t) in template_sig.type_params.iter().zip(req.args.iter()) {
                     env.insert(tp.clone(), t.clone());
                 }
-                let tc = TypeChecker::new_with_logic(&sym, template_sig.logic.as_deref()).with_subst(env);
+                let tc = TypeChecker::new_with_trait(&sym, template_sig.trait_name.as_deref()).with_subst(env);
                 match tc.check_func_with_id(&f_ast, Some(new_fid)) {
                     Ok((hf, reqs2, synth)) => {
                         for s in synth.structs { sym.structs.push(s); }

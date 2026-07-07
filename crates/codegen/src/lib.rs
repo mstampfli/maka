@@ -5486,8 +5486,8 @@ impl<'a> Cx<'a> {
         // separately AFTER function forward declarations (via emit_dyn_vtable_instances).
         let traits: Vec<String> = self.dyn_traits.iter().cloned().collect();
         for tn in &traits {
-            // A trait's methods are the sigs tagged with its name - covers both a
-            // `logic` block's overloads and an `attr`'s `has`-impl methods.
+            // A trait's methods are the sigs tagged with its name -
+            // an `attr`'s `has`-impl methods.
             let funcs = self.sym.trait_method_funcs(tn);
             if funcs.is_empty() {
                 continue;
@@ -5568,7 +5568,7 @@ impl<'a> Cx<'a> {
             // Skip extern: their type signatures may differ; trampolines for them defer to
             // the user-declared signature.
             let target_name = if sig.is_extern { sig.c_name.clone() }
-                else if sig.name == "main" && sig.logic.is_none() { "maka_main".to_string() }
+                else if sig.name == "main" && sig.trait_name.is_none() { "maka_main".to_string() }
                 else { c_ident(&sig.c_name) };
             let ret_c = self.c_ret_type(&sig.ret);
             let mut decl_parts: Vec<String> = vec!["void* __env".to_string()];
@@ -5661,7 +5661,7 @@ impl<'a> Cx<'a> {
                 continue;
             }
             // For each distinct method name, find the matching impl for this struct
-            // (a `logic` overload or the `has X for T` method).
+            // (the `has X for T` method).
             let mut name_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             for fid in &funcs {
                 let s = self.sym.func_sig(*fid);
@@ -5908,7 +5908,7 @@ impl<'a> Cx<'a> {
     fn func_signature(&self, f: &HFunc) -> String {
         let ret = self.c_ret_type(&f.ret);
         let sig = self.sym.func_sig(f.id);
-        let is_main = sig.name == "main" && sig.logic.is_none();
+        let is_main = sig.name == "main" && sig.trait_name.is_none();
         let mangled = if is_main {
             "maka_main".to_string()
         } else {
@@ -8929,7 +8929,7 @@ impl<'a> Cx<'a> {
                 }
                 let sig = self.sym.func_sig(*callee);
                 let name = if sig.is_extern { sig.c_name.clone() }
-                    else if sig.name == "main" && sig.logic.is_none() { "maka_main".to_string() }
+                    else if sig.name == "main" && sig.trait_name.is_none() { "maka_main".to_string() }
                     else { c_ident(&sig.c_name) };
                 let arg_s: Vec<String> = args.iter().map(|a| self.emit_inline_expr(inline_f, a, tag)).collect();
                 let call = format!("{}({})", name, arg_s.join(", "));
@@ -10279,7 +10279,7 @@ impl<'a> Cx<'a> {
             HExprKind::FnRef(fid) => {
                 let sig = self.sym.func_sig(*fid);
                 let target_name = if sig.is_extern { sig.c_name.clone() }
-                    else if sig.name == "main" && sig.logic.is_none() { "maka_main".to_string() }
+                    else if sig.name == "main" && sig.trait_name.is_none() { "maka_main".to_string() }
                     else { c_ident(&sig.c_name) };
                 let key = fn_sig_key(&sig.ret, &sig.param_tys);
                 let tram_name = format!("__tramp_{}", target_name);
@@ -10375,9 +10375,9 @@ impl<'a> Cx<'a> {
 
                 // Dynamic-dispatch: a TRAIT-METHOD call whose receiver is a dyn (or
                 // a reference to one) goes through the vtable.  A free function that
-                // merely takes a dyn first argument (sig.logic is None) is a normal
+                // merely takes a dyn first argument (sig.trait_name is None) is a normal
                 // call - mirrors the method-first/free-fn-fallback resolution in sema.
-                if !args.is_empty() && sig.logic.is_some() {
+                if !args.is_empty() && sig.trait_name.is_some() {
                     if let Some(_traits) = strip_to_dyn(&args[0].ty) {
                         // We want the underlying Dyn value, not its address. If the expression is
                         // `&mut x`/AddrOfRef of a dyn place, skip the `&`.
@@ -10397,7 +10397,7 @@ impl<'a> Cx<'a> {
                 }
                 let name = if sig.is_extern {
                     sig.c_name.clone()
-                } else if sig.name == "main" && sig.logic.is_none() {
+                } else if sig.name == "main" && sig.trait_name.is_none() {
                     "maka_main".to_string()
                 } else { c_ident(&sig.c_name) };
                 // Owning field/element args are moved by value: emit_move_consuming
@@ -10413,7 +10413,7 @@ impl<'a> Cx<'a> {
                             if let HExprKind::FnRef(fid) = &a.kind {
                                 let fs = self.sym.func_sig(*fid);
                                 return if fs.is_extern { fs.c_name.clone() }
-                                    else if fs.name == "main" && fs.logic.is_none() { "maka_main".to_string() }
+                                    else if fs.name == "main" && fs.trait_name.is_none() { "maka_main".to_string() }
                                     else { c_ident(&fs.c_name) };
                             }
                             // `fn_code(f)` yields a bare env-first code pointer; cast

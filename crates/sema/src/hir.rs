@@ -512,8 +512,9 @@ pub struct FuncSig {
     /// If true, this is an `extern` declaration; do not emit a body, and call by `c_name`.
     pub is_extern: bool,
     pub c_name: String,
-    /// If part of a logic block, the logic's name (for namespacing/mangling).
-    pub logic: Option<String>,
+    /// For a trait method (an `attr` + `has` impl), the owning attr's name (used
+    /// for namespacing/mangling and trait dispatch); `None` for a free function.
+    pub trait_name: Option<String>,
     /// Generic type parameters declared on this function (`<T, U>`).
     pub type_params: Vec<String>,
     /// True if declared with the `inline` modifier.
@@ -883,9 +884,9 @@ pub struct SymTab {
     /// like generic structs — each concrete `Option<int>`, `Option<string>` etc.
     /// gets its own EnumInfo with substituted variant payloads.
     pub enum_instantiations: std::collections::HashMap<(String, String), u32>,
-    /// Trait impl table: trait name → set of HType keys that have an entry in the
-    /// `logic Trait { method(Self, ...) }` block.  Each method's first parameter's
-    /// underlying struct counts as one implementation of the trait.
+    /// Trait impl table: trait name → set of HType keys that implement it via a
+    /// `Type has Attr { ... }` impl.  Each impl's receiver struct counts as one
+    /// implementation of the trait.
     pub trait_impls: std::collections::HashMap<String, std::collections::HashSet<String>>,
     /// Full `Type has Attr` impl records with visibility metadata.  The flat
     /// `trait_impls` map above is a fast-path index; this list is what bound
@@ -961,20 +962,20 @@ impl SymTab {
         self.enums.iter().enumerate().find(|(_, e)| e.name == n).map(|(i, e)| (EnumId(i as u32), e))
     }
     pub fn func_by_name(&self, n: &str) -> Option<(FuncId, &FuncSig)> {
-        // Match by logic-prefix-free name first (top-level), else by mangled name.
+        // Match by trait-prefix-free name first (top-level), else by mangled name.
         self.sigs.iter().enumerate()
-            .find(|(_, s)| s.logic.is_none() && s.name == n)
+            .find(|(_, s)| s.trait_name.is_none() && s.name == n)
             .map(|(i, s)| (FuncId(i as u32), s))
     }
-    pub fn func_by_qualified(&self, logic: &str, name: &str) -> Option<(FuncId, &FuncSig)> {
+    pub fn func_by_qualified(&self, trait_name: &str, name: &str) -> Option<(FuncId, &FuncSig)> {
         self.sigs.iter().enumerate()
-            .find(|(_, s)| s.logic.as_deref() == Some(logic) && s.name == name)
+            .find(|(_, s)| s.trait_name.as_deref() == Some(trait_name) && s.name == name)
             .map(|(i, s)| (FuncId(i as u32), s))
     }
-    /// All overload candidates for a name (top-level or logic-qualified).
-    pub fn funcs_by_qualified(&self, logic: Option<&str>, name: &str) -> Vec<(FuncId, &FuncSig)> {
+    /// All overload candidates for a name (top-level or trait-qualified).
+    pub fn funcs_by_qualified(&self, trait_name: Option<&str>, name: &str) -> Vec<(FuncId, &FuncSig)> {
         self.sigs.iter().enumerate()
-            .filter(|(_, s)| s.logic.as_deref() == logic && s.name == name)
+            .filter(|(_, s)| s.trait_name.as_deref() == trait_name && s.name == name)
             .map(|(i, s)| (FuncId(i as u32), s))
             .collect()
     }
@@ -990,16 +991,15 @@ impl SymTab {
         self.attr_by_name(name).is_some()
     }
 
-    /// Every method-impl `FuncId` tagged with trait `name`.  For a `logic` these
-    /// are its concrete-receiver overloads; for an `attr` these are the `has`-impl
-    /// methods (one set per implementing type, with inherited defaults already
-    /// materialized).  Both are stored identically (`FuncSig.logic == Some(name)`),
-    /// so `dyn X` / `some X` dispatch and vtable-building work the same for either.
+    /// Every method-impl `FuncId` tagged with trait `name` - the `has`-impl
+    /// methods for an `attr` (one set per implementing type, with inherited
+    /// defaults already materialized), stored as `FuncSig.trait_name == Some(name)`.
+    /// This is what `dyn X` / `some X` dispatch and vtable-building scan.
     pub fn trait_method_funcs(&self, name: &str) -> Vec<FuncId> {
         self.sigs
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.logic.as_deref() == Some(name))
+            .filter(|(_, s)| s.trait_name.as_deref() == Some(name))
             .map(|(i, _)| FuncId(i as u32))
             .collect()
     }
