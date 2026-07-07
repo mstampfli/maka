@@ -1,4 +1,4 @@
-// §10.5 ambiguity rule: locals shadow attr/logic names.  When a binding
+// §10.1 ambiguity rule: locals shadow attr names.  When a binding
 // `A` is in scope, `A.run(args)` is a postfix call on the instance, NOT
 // an attr-qualified call.  For the unambiguous qualifier, use `::`.
 

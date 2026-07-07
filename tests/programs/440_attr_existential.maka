@@ -1,4 +1,4 @@
-// `dyn X` and `some X` work with an `attr`+`has` trait, not only a `logic`.
+// `dyn X` and `some X` work with an `attr`+`has` trait and qualified dispatch.
 attr Weigh { int weight(&_ self); }
 data Gram { int g; }
 data Kilo { int k; }

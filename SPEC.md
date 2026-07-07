@@ -20,8 +20,8 @@ A `.maka` source file consists of:
 1. An optional `module path.name;` declaration.
 2. Zero or more `import path.name;` declarations.
 3. Zero or more module-scope `constexpr T NAME = expr;` declarations.
-4. Zero or more top-level items (functions, data, enums, externs, logic blocks,
-   `cinclude` / `cblock` directives).
+4. Zero or more top-level items (functions, data, enums, externs, `attr` /
+   `has` impls, braced `module` blocks, `cinclude` / `cblock` directives).
 
 ### 1.2 Comments
 
@@ -42,7 +42,7 @@ A `.maka` source file consists of:
 ```
 mut const constexpr unsafe inline propagate
 extern cinclude cblock clink rblock rdep raw own alloc free
-data enum logic attr has where dyn some type
+data enum attr has where dyn some type
 if else while for in break continue match yield return
 gate transfer share thread_local module import use pub
 spawn thread job spawn_pool join detach cancel select
@@ -235,7 +235,8 @@ methods are promoted onto the outer struct:
 data Base { mut int x = 0; }
 data Outer { embed Base b; int label; }
 
-logic Tickable { unit tick(&mut Base self) { self.x = self.x + 1; } }
+attr Tickable { unit tick(&mut _ self); }
+Base has Tickable { unit tick(&mut Base self) { self.x = self.x + 1; } }
 
 unit pass_base(&Base x) { log(x.x); }
 
@@ -265,9 +266,8 @@ disambiguate by writing the qualified path explicitly (e.g. `outer.a.common`).
 
 Two existential forms hide a concrete type behind a trait's interface. Both
 allow calling only the trait's methods (`Trait.method(&x)` qualified dispatch);
-field access is rejected because the concrete type is unknown. The trait may be a
-`logic` block or an `attr` with `has` impls (see the note at the end of this
-section) - the vtable is built from either.
+field access is rejected because the concrete type is unknown. The trait is an
+`attr` with `has` impls; the vtable is built from its method impls.
 
 **`dyn Trait`** (and `dyn (T1 + T2)`) is a **per-value** existential: a fat
 pointer `{ data, vtbl }`, each value independently typed. `x as dyn Trait` packs
@@ -308,9 +308,9 @@ inside" shape with no `dyn`-per-element and no runtime type map.
   `Vec<Vec<some X>>`, a `mut` column, a parameter) keeps the vtable - so it is a
   pure optimization layered on the runtime mechanism, never a change in meaning.
 
-Existentials work with either trait form: `logic` (concrete-receiver overloads)
-or `attr` + `has` (the `_`-placeholder contract with default bodies). A `has X for
-T` method backs the vtable exactly like a `logic` overload.
+Existentials use an `attr` + `has` trait: the `_`-placeholder contract (with
+optional default bodies) plus one `has X for T` impl per hidden type, whose
+method backs the vtable.
 
 ---
 
@@ -440,7 +440,6 @@ func_decl    := [pub]? [inline]? [gate]? [export]? RetType name [<TyParams>] (pa
 extern_decl  := extern [gate]? ["c_link_name"]? RetType name (params [, ...]?);
 data_decl    := [pub]? data Name [<TyParams>] [where ...] { field_decl* }
 enum_decl    := [pub]? enum Name [<TyParams>] { variant_decl* }
-logic_decl   := logic Name { func_decl* }
 attr_decl    := [pub]? attr Name { attr_method* }
 has_decl     := [pub]? Name has Name { func_decl* }
 attr_method  := RetType name (params) [where ...]  ";" | block
@@ -1239,14 +1238,13 @@ The bare `run(&f)` form errors as `ambiguous call to \`run\`: N candidates`;
 the qualified forms filter candidates to a specific attr's impl before
 overload resolution.
 
-**Dot-form vs. `::` form.** `Attr.method(args)` (dot) is still accepted
-for legacy reasons (it was the original `Logic.fn(args)` qualified-call
-spelling).  But the dot form is **shadowed by locals**: when a binding
-of the same name is in scope, `name.method(args)` is a postfix call on
-the local, not an attr-qualified call.  The `::` form is **never
-shadowed** — it always names the attr.  Prefer `::` for new code; the
-dot form remains for compatibility with the legacy `logic` block call
-style (§10.2).
+**Dot-form vs. `::` form.** `Attr.method(args)` (dot) qualified dispatch is
+accepted and is the form used to call a trait method on an existential whose
+concrete type is hidden (`dyn X` / `some X`, §2.5).  But the dot form is
+**shadowed by locals**: when a binding of the same name is in scope,
+`name.method(args)` is a postfix call on the local, not an attr-qualified
+call.  The `::` form is **never shadowed** — it always names the attr.  Prefer
+`::` when a local might shadow the attr name (§10.2).
 
 See `181_attr_qualified_call.maka` (the qualified forms) and
 `182_local_shadows_attr.maka` (shadowing rule) for worked examples.
@@ -1306,37 +1304,27 @@ Without the `use`, the bound check fails with a hint naming the exact `use`
 declaration needed. There is no implicit propagation - `pub has` impls are
 opt-in at every consumer.
 
-### 10.2 `logic` blocks as legacy trait shape
+### 10.2 Qualified trait dispatch
+
+A trait method is normally called method-style — `x.method()` or `method(&x)` —
+resolved by the receiver's type.  When the receiver's concrete type is hidden
+behind an existential (`dyn X` / `some X`, §2.5), that resolution is impossible,
+so the method is called **qualified** by the trait name:
 
 ```maka
-logic Drawable {
-    unit draw(&Color self) { /* ... */ }
-}
+attr Speak { int sound(&_ self); }
+data Cat { int n; }  data Dog { int n; }
+Cat has Speak { int sound(&Cat self) { return self.n; } }
+Dog has Speak { int sound(&Dog self) { return self.n * 10; } }
 
-unit render<T>(&T x) where Drawable<T> { /* ... */ }
-
-render(&color);    // OK: Color implements Drawable (via the logic block)
+&dyn Speak a = &c as dyn Speak;
+log(Speak.sound(&a));      // dispatched through the vtable
 ```
 
-The older `logic Trait { method(&Receiver self) }` pattern is still accepted
-and registers an impl just like `has`: the first param's underlying nominal
-type becomes the implementer. The new `attr`/`has` form is preferred - it
-makes contract and impl explicit, supports default bodies, and is the only
-form that contract-matches.
-
-A `logic` block may be marked `pub`: the trait registration and every method
-inside it become exported.  Visibility composes with the same `use Mod.Type.Trait;`
-machinery as `has` impls - a `pub logic` is reachable cross-module only when
-the consumer explicitly opts in.  Per-method `pub` on a logic-block method is
-not part of the grammar; visibility flows from the block.
-
-**`logic` is frozen at its current shape.**  The new features from
-§10.4 (parametric receivers) and §10.5 (associated types) are exclusive
-to `attr`/`has`.  `logic` blocks are subject to the §10.4 coherence
-rule against overlapping impls but cannot themselves use generic
-receivers or declare associated types.  When the trait extensions
-stabilize, `logic` is expected to be deprecated in favor of `attr`/`has`;
-no further features will be added to the `logic` form.
+`Speak.sound(&x)` (dot) and `Speak::sound(&x)` (`::`) both name the trait
+explicitly; the `::` form is never shadowed by a local of the same name (§10.1).
+Grouping plain (non-trait) functions under a name is done with a `module` block
+(§11), not a trait.
 
 ### 10.3 Monomorphization
 
@@ -1452,14 +1440,6 @@ In an `attr` it stands for "the implementing type, whatever it is"; in
 a `has` impl it is substituted with the impl's receiver pattern
 (post-type-variable-binding at monomorphization).  There is no separate
 `Self` keyword — `_` covers both jobs.
-
-**Interaction with `logic` blocks.**  `logic` blocks (§10.2) are subject
-to the same coherence rule — a `logic` block whose first-parameter
-receiver type duplicates an existing `has` (or `logic`) impl of the same
-attr is rejected with the same overlap diagnostic.  However, `logic`
-blocks **do not** gain the new features: parametric receivers (§10.4) and
-associated types (§10.5) are exclusive to the `attr`/`has` form.  See
-§10.2 for the deprecation stance.
 
 ### 10.5 Associated types on `attr`
 
@@ -2179,10 +2159,8 @@ These are real limitations the implementation is honest about:
   arguments, then the expected type); when neither pins them down, give them
   explicitly with a `::<>` turbofish — `f::<int>(x)` (§10.1). The `::` is required
   because a bare `f<T>(x)` parses as a comparison.
-- **Existentials accept `logic` OR `attr`+`has`.** A `Vec<some X>` / `dyn X`
-  dispatches through a vtable built from the trait's method impls, which are
-  stored uniformly whether the trait is a `logic` (concrete-receiver overloads) or
-  an `attr` with `has` impls (§2.5).
+- **Existentials use `attr` + `has`.** A `Vec<some X>` / `dyn X` dispatches
+  through a vtable built from the trait's `has`-impl method(s) (§2.5).
 - **Non-null narrowing of a projected place is `if`-only and owning-only.**
   `if (P != null) { P! }` now narrows an indexed or field OWNING place - an
   `own *T` element `xs[0]` or field `s.p`, keyed on a normalized place path - not

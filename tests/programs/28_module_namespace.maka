@@ -1,4 +1,4 @@
-// Intra-file modules as function namespaces (the role `logic` used to serve).
+// Intra-file modules as function namespaces: several modules in one file.
 module math {
     pub int square(int x) { return x * x; }
     pub int cube(int x) { return x * x * x; }

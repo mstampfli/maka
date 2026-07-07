@@ -81,7 +81,8 @@ User iterators:
 ```maka
 data Counter { mut int cur; int end; }
 
-logic CounterIter {
+attr CounterIter { Option<int> next(&mut _ self); }
+Counter has CounterIter {
     Option<int> next(&mut Counter self) {
         if (self.cur >= self.end) { return Option.None; }
         int v = self.cur;

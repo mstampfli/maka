@@ -19,7 +19,7 @@ or a value. Keep that signal intact.
 | Kind                        | Convention             | Examples                          |
 |-----------------------------|------------------------|-----------------------------------|
 | Type (`data`/`enum`)        | `PascalCase`           | `Point`, `JsonValue`, `HashMap`   |
-| Trait (`attr`/`logic`)      | `PascalCase`           | `Show`, `Weigh`, `StringOps`      |
+| Trait (`attr`)              | `PascalCase`           | `Show`, `Weigh`, `StringOps`      |
 | Enum variant                | `PascalCase`           | `Some`, `None`, `Circle`, `JNull` |
 | Function / method           | `snake_case`           | `string_from`, `push_str`, `len`  |
 | Local variable / parameter  | `snake_case`           | `head`, `next_frame`, `total`     |
@@ -69,7 +69,7 @@ naming and the editor's Rename applies a fix you choose.
   ```
 
   Not on its own line (no Allman). This applies to functions, `if`/`else`,
-  `while`, `for`, `match`, `data`/`enum`/`attr`/`has`/`logic` bodies, and
+  `while`, `for`, `match`, `data`/`enum`/`attr`/`has` bodies, and
   `unsafe`/`rblock` blocks.
 - One statement per line; one declaration per line.
 - A trailing comment is two spaces off the code (`x = 1;  // why`). A
@@ -173,10 +173,10 @@ job; reach for `raw` only at an FFI boundary.
 - Model a closed set of shapes as an `enum` and consume it with an exhaustive
   `match`; the compiler enforces exhaustiveness, so a new variant surfaces every
   site that must handle it.
-- **Prefer `attr` + `has`** for traits: declare the contract in `attr`,
-  implement per type in `has`, and call by method name (`x.method()`, receiver
-  auto-borrowed). Reach for `logic` only when you need qualified dispatch
-  `Trait.method(&x)` on a `dyn`/`some` value whose concrete type is hidden.
+- **Use `attr` + `has`** for traits: declare the contract in `attr`, implement
+  per type in `has`, and call by method name (`x.method()`, receiver
+  auto-borrowed). Call a trait method on a `dyn`/`some` value whose concrete
+  type is hidden with qualified dispatch `Trait.method(&x)`.
 - Cross-module trait use needs both `pub has` on the impl and `use
   Mod.Type.Attr;` in the consumer. Export the impl deliberately, not by reflex.
 
@@ -254,8 +254,6 @@ Pick the narrowest mechanism for the job:
 - Deep call chains that thread a nullable pointer without narrowing; guard once
   and bind a non-null local.
 - Manual `free` of Maka-managed memory (double-free); let scope exit drop it.
-- A `logic` trait where `attr`+`has` would do, forcing qualified dispatch on
-  callers for no reason.
 - Encoding type or ownership in a name (`ptr_`, `_owned`) instead of the type.
 - Duplicated field access (`t.f0`, `t.f1`) where a destructuring bind reads
   clearer.
