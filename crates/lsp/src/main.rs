@@ -10,7 +10,7 @@
 //! analysis.  `cblock` functions resolve via their `extern` declaration as usual.
 
 use dashmap::DashMap;
-use maka_ast::{Item, Module};
+use maka_ast::{EnumDecl, Item, Module};
 use maka_lexer::Span;
 use maka_sema::hir::{HType, HirModule, SymTab};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -154,6 +154,26 @@ fn gather_maka(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, depth: 
     }
 }
 
+/// Render an enum for hover: a multi-line body listing each variant with its
+/// payload field names, if any (matching the `data` hover style).  Shared by the
+/// in-file resolver and the cross-file symbol index so both show the same detail.
+fn enum_signature(e: &EnumDecl) -> String {
+    let vs = e
+        .variants
+        .iter()
+        .map(|v| {
+            if v.fields.is_empty() {
+                format!("    {},", v.name)
+            } else {
+                let fs = v.fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(", ");
+                format!("    {} {{ {} }},", v.name, fs)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("enum {} {{\n{}\n}}", e.name, vs)
+}
+
 /// Index every top-level definition in a module for cross-file go-to-def/hover.
 fn collect_symbols(m: &Module, uri: &Url, out: &mut Vec<SymDef>) {
     let mut add = |name: &str, span: Span, detail: String| {
@@ -163,7 +183,7 @@ fn collect_symbols(m: &Module, uri: &Url, out: &mut Vec<SymDef>) {
         match it {
             Item::Func(f) => add(&f.name, f.span, format!("{}(...)", f.name)),
             Item::Data(d) => add(&d.name, d.span, format!("data {}", d.name)),
-            Item::Enum(e) => add(&e.name, e.span, format!("enum {}", e.name)),
+            Item::Enum(e) => add(&e.name, e.span, enum_signature(e)),
             Item::Attr(a) => add(&a.name, a.span, format!("attr {}", a.name)),
             Item::Logic(l) => add(&l.name, l.span, format!("logic {}", l.name)),
             Item::Global(g) => {
@@ -503,8 +523,7 @@ fn resolve(user: &Module, hir: &HirModule, name: &str, line: u32) -> Option<(Str
                 return Some((code_md(&md), Some(d.span)));
             }
             Item::Enum(e) if e.name == name => {
-                let vs = e.variants.iter().map(|v| v.name.clone()).collect::<Vec<_>>().join(", ");
-                return Some((code_md(&format!("enum {} {{ {} }}", name, vs)), Some(e.span)));
+                return Some((code_md(&enum_signature(e)), Some(e.span)));
             }
             Item::Global(g) if g.name == name => {
                 let kw = if g.is_mut { "mut " } else { "" };
