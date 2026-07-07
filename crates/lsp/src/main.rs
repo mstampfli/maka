@@ -174,6 +174,30 @@ fn enum_signature(e: &EnumDecl) -> String {
     format!("enum {} {{\n{}\n}}", e.name, vs)
 }
 
+/// The stdlib's top-level symbols, indexed once against a materialized copy of
+/// the embedded source so hover and go-to-definition work for `Vec`, `String`,
+/// `Option`, `push`, `str_len`, ... just like user code.  The embedded stdlib is
+/// written to a stable cache file (the real source isn't guaranteed on disk at
+/// runtime), and definitions point into it.  Compiler-internal `__` names are
+/// skipped.
+fn stdlib_symbols() -> &'static Vec<SymDef> {
+    static CELL: OnceLock<Vec<SymDef>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let path = std::env::temp_dir().join("maka-lsp").join("std.maka");
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&path, STDLIB);
+        let Some(uri) = path_uri(&path) else { return Vec::new() };
+        let mut out = Vec::new();
+        if let Ok(m) = maka_parser::parse(STDLIB) {
+            collect_symbols(&m, &uri, &mut out);
+        }
+        out.retain(|d| !d.name.starts_with("__"));
+        out
+    })
+}
+
 /// Index every top-level definition in a module for cross-file go-to-def/hover.
 fn collect_symbols(m: &Module, uri: &Url, out: &mut Vec<SymDef>) {
     let mut add = |name: &str, span: Span, detail: String| {
@@ -181,7 +205,10 @@ fn collect_symbols(m: &Module, uri: &Url, out: &mut Vec<SymDef>) {
     };
     for it in &m.items {
         match it {
-            Item::Func(f) => add(&f.name, f.span, format!("{}(...)", f.name)),
+            Item::Func(f) => {
+                let params = f.params.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ");
+                add(&f.name, f.span, format!("{}({})", f.name, params))
+            }
             Item::Data(d) => add(&d.name, d.span, format!("data {}", d.name)),
             Item::Enum(e) => add(&e.name, e.span, enum_signature(e)),
             Item::Attr(a) => add(&a.name, a.span, format!("attr {}", a.name)),
@@ -362,6 +389,11 @@ fn analyze_inner(this_path: Option<std::path::PathBuf>, this_text: String, open:
             });
         }
     }
+
+    // Append the stdlib's symbols last, so a project symbol of the same name
+    // still wins the first-match lookup while stdlib names (Vec, String, push,
+    // ...) resolve and navigate into the materialized stdlib source.
+    symbol_index.extend(stdlib_symbols().iter().cloned());
 
     Analysis { user_ast, diagnostics, hir, symbol_index }
 }
@@ -668,6 +700,32 @@ const PRIMS: &[&str] = &[
     "u8", "u16", "u32", "u64", "usize", "f32", "f64",
 ];
 
+/// Compiler builtins - special-cased types and functions with no source location
+/// to navigate to.  Hover shows a short description and they appear in completion,
+/// so they resolve like the source-defined stdlib.  `(name, is_type, doc)`.
+const BUILTINS: &[(&str, bool, &str)] = &[
+    ("Vec", true, "Vec<T> - a growable, heap-owned vector. Construct with the `[]` literal; grow with `push`. Frees its buffer (and owning elements) on drop."),
+    ("push", false, "push(vec, x) - append `x` to a `Vec<T>`, growing the buffer as needed."),
+    ("pop", false, "pop(vec) - remove the last element of a `Vec<T>` and return it as `Option<T>` (`None` if empty)."),
+    ("len", false, "v.len - the element count of a `Vec`, array, or slice (a field access)."),
+    ("length", false, "s.length() - the character length of a `String` (excludes the trailing NUL)."),
+    ("log", false, "log(x) - print a value followed by a newline to stdout."),
+    ("panic", false, "panic(msg) - abort the program with a message."),
+    ("format", false, "format(fmt, args...) - build an owned `string` from a `{}`-style template."),
+    ("tag", false, "value.tag - the discriminant of an enum value, as `int` (the variant index for tagged enums)."),
+    ("fields", false, "fields(value) - a compile-time list of a struct's fields, for `inline for (f in fields(v))`."),
+    ("alloc", true, "alloc value - the sole heap allocator; the result must land in an `own *T` / `own &T` slot."),
+    ("thread", false, "thread(unit() {...}) - spawn a true OS thread (blocking-safe, parallel); returns `*Thread`."),
+    ("spawn", false, "spawn(unit() {...}) - spawn a cooperative fiber (concurrent IO on one OS thread); returns `*Thread`."),
+    ("job", false, "job(unit() {...}) - run on the work-stealing pool (parallel compute); returns `*Thread`."),
+    ("spawn_pool", false, "spawn_pool(unit() {...}) - spawn a fiber onto a background pool; returns `*Thread`."),
+    ("join", false, "join(t) - block until the thread/fiber/job finishes; consumes the handle."),
+    ("try_join", false, "try_join(t) - non-blocking join; returns whether the handle had finished."),
+    ("detach", false, "detach(t) - let a thread run to completion without being joined."),
+    ("cancel", false, "cancel(t) - request cancellation of a fiber/job."),
+    ("select", false, "select(a, b, ...) - wait for the first of several fibers to complete."),
+];
+
 // ---------------------------------------------------------------- server
 
 #[tower_lsp::async_trait]
@@ -748,6 +806,10 @@ impl LanguageServer for Backend {
         if let Some(d) = a.symbol_index.iter().find(|d| d.name == name) {
             return Ok(Some(hover_md(code_md(&d.detail))));
         }
+        // A compiler builtin (Vec, push, thread, ...): a description, no location.
+        if let Some((_, _, doc)) = BUILTINS.iter().find(|(n, _, _)| *n == name.as_str()) {
+            return Ok(Some(hover_md(doc.to_string())));
+        }
         Ok(None)
     }
 
@@ -815,6 +877,10 @@ impl LanguageServer for Backend {
         }
         for t in PRIMS {
             add(t, CompletionItemKind::STRUCT, Some("built-in type".into()));
+        }
+        for (name, is_type, _doc) in BUILTINS {
+            let kind = if *is_type { CompletionItemKind::STRUCT } else { CompletionItemKind::FUNCTION };
+            add(name, kind, Some("built-in".into()));
         }
         if has_doc {
             let a = self.analyze(&uri);

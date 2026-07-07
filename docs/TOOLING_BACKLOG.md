@@ -5,11 +5,12 @@ are queued; check them off as they land.
 
 ## Editor / LSP
 
-- [ ] **Stdlib symbols resolve.** Hover and go-to-definition should work for
-      stdlib types and functions (Vec, String, Option, push, str_len, ...), not
-      just user code. Today stdlib names get hover-only or nothing; index the
-      parsed stdlib into the symbol index (with a synthetic URI into the embedded
-      source, or a real path) so they resolve and navigate.
+- [x] **Stdlib symbols resolve.** The embedded stdlib is materialized to a cache
+      file and its top-level symbols are indexed, so source-defined names
+      (`String`, `Option`, `str_len`, `string_new`, ...) hover and go-to-definition
+      into the stdlib source. Compiler builtins with no source (`Vec`, `push`,
+      `pop`, `log`, `format`, `thread`/`spawn`/`job`/`join`, `tag`, `fields`, ...)
+      resolve via a `BUILTINS` hover/completion table.
 - [ ] **Doc comments.** A standard way to document functions (and types) that the
       server shows on hover. Pick a syntax (e.g. `///` doc lines above the decl,
       or `//!` for module docs), have the lexer/parser retain them attached to the
@@ -17,11 +18,10 @@ are queued; check them off as they land.
 - [ ] **Signature help.** While typing a call's arguments, show the callee's
       parameter list and highlight the parameter currently being entered
       (`textDocument/signatureHelp`, trigger on `(` and `,`).
-- [~] **Enum hover polish.** The reported "enum X enum" (a second `enum` on its
-      own line) no longer reproduces - likely fixed alongside the resolve panic.
-      Still open: cross-file enum hover shows only `enum Color` without its
-      variants (the user-file path already lists them); unify so both show
-      `enum Color { Red, Green, Blue }`.
+- [x] **Enum hover polish.** The "enum X enum" duplicate no longer reproduces.
+      Cross-file enum hover now shows the full variant list (with payload field
+      names) via a shared `enum_signature`, matching the in-file path, and the
+      enum name is go-to-definition navigable.
 - [ ] **Enum variants navigable.** Variants (subtypes) should be go-to-definition
       targets and hoverable, and hovering the enum should surface them.
 - [ ] **General polish pass.** Make the linter + LSP "perfect": tighten hover
