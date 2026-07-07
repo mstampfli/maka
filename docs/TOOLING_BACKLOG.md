@@ -17,14 +17,28 @@ are queued; check them off as they land.
 - [ ] **Signature help.** While typing a call's arguments, show the callee's
       parameter list and highlight the parameter currently being entered
       (`textDocument/signatureHelp`, trigger on `(` and `,`).
-- [ ] **Enum hover polish.** Hover on an enum currently prints "enum X enum"
-      (duplicated keyword) - fix the formatting. Hover should also list the
-      enum's variants.
+- [~] **Enum hover polish.** The reported "enum X enum" (a second `enum` on its
+      own line) no longer reproduces - likely fixed alongside the resolve panic.
+      Still open: cross-file enum hover shows only `enum Color` without its
+      variants (the user-file path already lists them); unify so both show
+      `enum Color { Red, Green, Blue }`.
 - [ ] **Enum variants navigable.** Variants (subtypes) should be go-to-definition
       targets and hoverable, and hovering the enum should surface them.
 - [ ] **General polish pass.** Make the linter + LSP "perfect": tighten hover
       output for every symbol kind, scope-aware references/rename, semantic
       tokens, quick-fixes for lint findings, etc.
+
+## Language
+
+- [ ] **Explicit generic type arguments at call sites.** Inference from arguments
+      is the default and works well (`total(&table)`, `render(&p)` bind `T` from
+      the argument's concrete type). But when `T` appears only in the return type
+      or nowhere in the parameters (a constructor like `empty<int>()`), inference
+      has nothing to work from and there is no escape hatch. Verified today:
+      `id<int>(5)` does NOT parse - `<` is read as less-than ("ordering on
+      non-numeric types"), exactly the grammar ambiguity to design around. Add an
+      explicit form (a `::<>` turbofish, `id::<int>(5)`, avoids the ambiguity)
+      as an optional override; keep argument inference as the default.
 
 ## CLI
 
