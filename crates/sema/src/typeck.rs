@@ -51,6 +51,13 @@ pub struct TypeChecker<'a> {
     /// ordinary call; when present they bind the callee's type parameters
     /// directly instead of inferring them.
     call_type_args: Vec<ast::Type>,
+    /// Devirtualization: a `some X` local whose hidden concrete type is statically
+    /// proven (an immutable `Vec<some X>` packed from a concrete `Vec<T>`, or a
+    /// loop var iterating such a column) maps to that `StructId`.  A method call on
+    /// such a value dispatches directly to `T`'s method instead of the vtable.
+    /// Cleared on any reassignment of the local, so a re-bound value is never
+    /// devirtualized to a stale type.
+    some_concrete: std::collections::HashMap<u32, StructId>,
     /// Whether the current function is `inline` (governs `propagate` legality).
     cur_is_inline: bool,
     /// Dotted module path of the function currently being checked.  Used to enforce
@@ -321,6 +328,7 @@ impl<'a> TypeChecker<'a> {
             in_arm_body: 0,
             call_ret_expected: None,
             call_type_args: Vec::new(),
+            some_concrete: std::collections::HashMap::new(),
             cur_is_inline: false,
             cur_module: Vec::new(),
             cur_imports: Vec::new(),
@@ -636,6 +644,14 @@ impl<'a> TypeChecker<'a> {
         let init_h = self.check_expr_coerce(init, &declared);
         let id = self.fresh_local_with_tls(name.to_string(), declared, storage, mut_payload, reassignable, thread_local, span);
         self.bind_name(name, id);
+        // Devirtualization: an IMMUTABLE `Vec<some X>` initialized by packing a
+        // concrete `Vec<T>` has a statically-known, permanently-fixed element type
+        // (immutable => never reassigned, and `some X` columns are monomorphic).
+        if !reassignable {
+            if let HExprKind::Cast { kind: CastKind::PackSomeVec { struct_id, .. }, .. } = &init_h.kind {
+                self.some_concrete.insert(id.0, *struct_id);
+            }
+        }
         HStmt::Let { local: id, init: init_h, span }
     }
 
@@ -758,6 +774,11 @@ impl<'a> TypeChecker<'a> {
             if n == "_" {
                 let v = self.check_expr(value, None);
                 return HStmt::ExprStmt(v);
+            }
+            // Devirt soundness: once a local is reassigned, its previously-proven
+            // concrete type no longer holds, so stop devirtualizing it.
+            if let Some(lid) = self.lookup(n) {
+                self.some_concrete.remove(&lid.0);
             }
         }
         // Determine the place's type and check it is mutable.
@@ -2256,6 +2277,56 @@ impl<'a> TypeChecker<'a> {
         };
         self.sym.funcs_by_qualified(qualifier.as_deref(), &name)
             .iter().any(|(_, sig)| sig.is_gate)
+    }
+
+    /// The proven concrete `StructId` of a dispatch receiver, if the receiver is
+    /// (a reference to) a local whose `some X` element type was tracked.
+    fn receiver_known_concrete(&self, recv: &HExpr) -> Option<StructId> {
+        let lid = match &recv.kind {
+            HExprKind::Local(id) => *id,
+            HExprKind::AddrOfRef { place, .. } => match &place.kind {
+                HExprKind::Local(id) => *id,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.some_concrete.get(&lid.0).copied()
+    }
+
+    /// The fat-pointer VALUE behind a dispatch receiver: `&item` unwraps to the
+    /// `item` local (the `dyn`/`some` value), else the receiver as-is.
+    fn dyn_value_of(&self, recv: &HExpr) -> HExpr {
+        if let HExprKind::AddrOfRef { place, .. } = &recv.kind {
+            if matches!(place.kind, HExprKind::Local(_)) {
+                return (**place).clone();
+            }
+        }
+        recv.clone()
+    }
+
+    /// The `(FuncId, FuncSig)` implementing method `method` of trait `trait_name`
+    /// for concrete struct `sid` (a `logic` overload or a `has X for T` method).
+    fn trait_method_for_struct(
+        &self,
+        trait_name: &str,
+        method: &str,
+        sid: StructId,
+        arity: usize,
+    ) -> Option<(FuncId, FuncSig)> {
+        self.sym.trait_method_funcs(trait_name).into_iter().find_map(|fid| {
+            let s = self.sym.func_sig(fid).clone();
+            if s.name != method || s.param_tys.len() != arity {
+                return None;
+            }
+            if let Some(HType::Ref { inner, .. }) = s.param_tys.first() {
+                if let HType::Struct(id) = inner.as_ref() {
+                    if *id == sid {
+                        return Some((fid, s));
+                    }
+                }
+            }
+            None
+        })
     }
 
     fn check_call_inner(&mut self, callee: &ast::Expr, args: &[ast::Expr], sp: Span) -> HExpr {
@@ -3862,6 +3933,40 @@ impl<'a> TypeChecker<'a> {
                 // method dispatch) - fall through to normal overload resolution.
                 // Only error when neither a trait method nor a free function exists.
                 if let Some((fid, sig)) = chosen {
+                    // Devirtualization: when the receiver's hidden type is statically
+                    // proven (an immutable homogeneous `some X` column), call that
+                    // type's method directly - extracting `&T` from the fat pointer's
+                    // data - instead of dispatching through the vtable.
+                    if let Some(sid) = self.receiver_known_concrete(&probed[0]) {
+                        if let Some((t_fid, t_sig)) =
+                            self.trait_method_for_struct(&trait_name, &name, sid, probed.len())
+                        {
+                            // Match the method's receiver mutability (both are `T*`
+                            // in C, but keep the HIR types consistent).
+                            let recv_mut =
+                                matches!(t_sig.param_tys.first(), Some(HType::Ref { mutable: true, .. }));
+                            let ref_ty = HType::Ref { mutable: recv_mut, inner: Box::new(HType::Struct(sid)) };
+                            let recv = HExpr {
+                                kind: HExprKind::Cast {
+                                    expr: Box::new(self.dyn_value_of(&probed[0])),
+                                    kind: CastKind::DynDataRef { struct_id: sid },
+                                    to: ref_ty.clone(),
+                                },
+                                ty: ref_ty,
+                                span: sp,
+                            };
+                            let mut hargs = vec![recv];
+                            for (i, a) in args.iter().enumerate().skip(1) {
+                                let want = t_sig.param_tys.get(i).cloned().unwrap_or(HType::Unit);
+                                hargs.push(self.check_expr_coerce(a, &want));
+                            }
+                            return HExpr {
+                                kind: HExprKind::Call { callee: t_fid, args: hargs },
+                                ty: t_sig.ret.clone(),
+                                span: sp,
+                            };
+                        }
+                    }
                     // Type-check args (no coercion needed for arg 0 since dyn).
                     let mut hargs = Vec::new();
                     for (i, a) in args.iter().enumerate() {
@@ -4965,6 +5070,17 @@ impl<'a> TypeChecker<'a> {
         self.enter_scope();
         let id_var = self.fresh_local_with_tls(var_name.to_string(), declared.clone(), StorageClass::Stack, true, true, false, sp);
         self.bind_name(var_name, id_var);
+        // Devirt: iterating a `some X` column whose concrete type is known carries
+        // that type to the element binding, so its method calls dispatch directly.
+        if matches!(&declared, HType::Dyn { locked: true, .. }) {
+            if let ast::Expr::Ident(sname, _) = src {
+                if let Some(col_lid) = self.lookup(sname) {
+                    if let Some(&sid) = self.some_concrete.get(&col_lid.0) {
+                        self.some_concrete.insert(id_var.0, sid);
+                    }
+                }
+            }
+        }
         let body_h = self.check_block(body);
         self.leave_scope();
         HStmt::ForEach { var: id_var, src: src_probe, body: body_h, span: sp }

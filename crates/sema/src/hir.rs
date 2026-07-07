@@ -603,6 +603,12 @@ pub enum CastKind {
     /// `Vec<some X> as *Vec<T>`: witness-checked downcast.  Yields a nullable
     /// `*Vec<T>` aliasing the column iff its hidden type is `T`, else null.
     DowncastSomeVec { trait_name: String, struct_id: StructId },
+    /// Devirtualization: extract a `dyn X` / `some X` fat pointer's `.data` as a
+    /// `&T`, when the concrete type `T` was statically proven (an immutable
+    /// homogeneous `some X` column).  Lets a `X.method(&item)` lower to a direct
+    /// `T`-method call instead of a vtable dispatch.  Never emitted unless the
+    /// element type is known, so it can only alias a real `T`.
+    DynDataRef { struct_id: StructId },
     /// Reinterpret cast: `*T` ↔ `*U`, `*T` ↔ `usize`/`isize`. The user takes responsibility.
     /// For `*T ↔ *U` the lifetime pass still propagates dep edges (both sides alias the
     /// same memory).  For `*T → usize → *T` round-trips the integer step breaks the chain,

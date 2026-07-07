@@ -11308,6 +11308,11 @@ impl<'a> Cx<'a> {
                 format!("((({src}).__vtbl == &{tr}_vtbl_for_{st}) ? ({tc})&({src}) : ({tc})0)",
                     src = s, tr = c_ident(&trait_name), st = c_ident(&sname), tc = to_c)
             }
+            // Devirtualization: the receiver's concrete type is statically proven,
+            // so view the fat pointer's `.data` as `&T` (`T*`) for a direct call.
+            CastKind::DynDataRef { struct_id: _ } => {
+                format!("(({})({}).data)", to_c, s)
+            }
             _ => format!("(({}){})", to_c, s),
         }
     }

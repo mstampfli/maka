@@ -1,0 +1,25 @@
+// Devirtualization: an immutable `some X` column dispatches directly to the
+// concrete method; a heterogeneous `Vec<Vec<some X>>` keeps the vtable. Both
+// must produce the same result the vtable path would.
+attr Weigh { int weight(&_ self); }
+data Gram { int g; }
+data Kilo { int k; }
+Gram has Weigh { int weight(&Gram self) { return self.g; } }
+Kilo has Weigh { int weight(&Kilo self) { return self.k * 1000; } }
+unit main() {
+    Vec<Gram> grams = []; push(grams, Gram{g=2}); push(grams, Gram{g=3});
+    Vec<some Weigh> col = grams;
+    mut int a = 0;
+    for (some Weigh item in col) { a = a + Weigh.weight(&item); }
+    log(a);
+    Vec<Kilo> kilos = []; push(kilos, Kilo{k=1});
+    Vec<Gram> more = []; push(more, Gram{g=4});
+    Vec<Vec<some Weigh>> cols = [];
+    push(cols, more);
+    push(cols, kilos);
+    mut int b = 0;
+    for (Vec<some Weigh> c in cols) {
+        for (some Weigh item in c) { b = b + Weigh.weight(&item); }
+    }
+    log(b);
+}

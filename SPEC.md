@@ -297,6 +297,19 @@ inside" shape with no `dyn`-per-element and no runtime type map.
 - **Drop** frees the column's buffer and runs a per-element drop (via the witness
   drop-fn) when the element type owns heap, so an owning-element column is
   leak-free and double-free-free.
+- **Devirtualization.** Because a column is monomorphic per instantiation, the
+  compiler specializes the cases where the hidden type is statically visible: an
+  IMMUTABLE `Vec<some X>` local packed from a concrete `Vec<T>` (and a loop
+  variable iterating such a column) has a provably-single element type, so a
+  `X.method(&item)` on it lowers to a direct `T`-method call instead of a vtable
+  dispatch. The analysis is conservative - the tracked type is cleared on any
+  reassignment, and anything not provably single-type (a column drawn out of a
+  `Vec<Vec<some X>>`, a `mut` column, a parameter) keeps the vtable - so it is a
+  pure optimization layered on the runtime mechanism, never a change in meaning.
+
+Existentials work with either trait form: `logic` (concrete-receiver overloads)
+or `attr` + `has` (the `_`-placeholder contract with default bodies). A `has X for
+T` method backs the vtable exactly like a `logic` overload.
 
 ---
 
