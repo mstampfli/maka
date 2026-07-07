@@ -13,6 +13,8 @@ use dashmap::DashMap;
 use maka_ast::{Item, Module};
 use maka_lexer::Span;
 use maka_sema::hir::{HType, HirModule, SymTab};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -20,6 +22,40 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 /// The Maka standard library, embedded like the compiler does, so name
 /// resolution (Vec, String, Option, ...) works during analysis.
 const STDLIB: &str = include_str!("../../../stdlib/std.maka");
+
+/// The parsed stdlib, built exactly once for the process (it never changes), so
+/// a cache-miss re-analysis clones it instead of re-lexing the whole file.
+fn stdlib_module() -> Module {
+    static CELL: OnceLock<Module> = OnceLock::new();
+    CELL.get_or_init(|| maka_parser::parse(STDLIB).unwrap_or_default()).clone()
+}
+
+/// Parse a source string, memoized by its content hash.  A cache-miss project
+/// re-analysis parses many files, but only the file the user just edited has a
+/// new hash, so every unchanged file (and the double-parse of the open buffer)
+/// is a clone, not a re-parse.  Bounded so a long editing session (each keystroke
+/// mints a fresh key) can never grow without limit.
+fn parse_cached(text: &str) -> std::result::Result<Module, String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+    const CAP: usize = 512;
+    static CACHE: OnceLock<Mutex<HashMap<u64, Module>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut h = DefaultHasher::new();
+    text.hash(&mut h);
+    let key = h.finish();
+    if let Some(m) = cache.lock().unwrap().get(&key) {
+        return Ok(m.clone());
+    }
+    let parsed = maka_parser::parse(text)?;
+    let mut g = cache.lock().unwrap();
+    if g.len() >= CAP {
+        g.clear(); // crude bound: drop everything and re-warm; correctness unaffected
+    }
+    g.insert(key, parsed.clone());
+    Ok(parsed)
+}
 
 /// A cross-file top-level definition, for go-to-definition and hover of symbols
 /// declared in another project file.
@@ -46,6 +82,16 @@ struct Analysis {
 struct Backend {
     client: Client,
     docs: DashMap<Url, String>,
+    /// Monotonic snapshot version: bumped on every open/change/close.  A cached
+    /// `Analysis` is valid only while it matches, so any edit to any buffer (which
+    /// can affect any file cross-file) invalidates every cached analysis at once.
+    version: AtomicU64,
+    /// Per-document cached analysis, tagged with the version it was computed at.
+    /// This is the fix for repeated hover / go-to-definition being slow: without
+    /// it, *every* request re-parsed the stdlib and the whole project and re-ran
+    /// sema on a fresh thread.  Now that work runs once per edit; every subsequent
+    /// lookup at the same state is a clone of the shared `Arc<Analysis>`.
+    cache: DashMap<Url, (u64, Arc<Analysis>)>,
 }
 
 // ---------------------------------------------------------------- analysis
@@ -150,7 +196,7 @@ fn analyze_doc(this_path: Option<std::path::PathBuf>, this_text: String, open: s
 }
 
 fn analyze_inner(this_path: Option<std::path::PathBuf>, this_text: String, open: std::collections::HashMap<std::path::PathBuf, String>) -> Analysis {
-    let user_ast = maka_parser::parse(&this_text).ok();
+    let user_ast = parse_cached(&this_text).ok();
 
     // Discover project files.  With a `maka.toml` root, every `.maka` under it
     // (bounded); otherwise ONLY the open file's own directory (one readdir, no
@@ -198,9 +244,7 @@ fn analyze_inner(this_path: Option<std::path::PathBuf>, this_text: String, open:
         merged.items.extend(m.items);
     };
 
-    if let Ok(std_m) = maka_parser::parse(STDLIB) {
-        append(&mut merged, std_m);
-    }
+    append(&mut merged, stdlib_module());
 
     for f in &files {
         // Prefer an open buffer (unsaved edits) over the on-disk file.
@@ -212,7 +256,7 @@ fn analyze_inner(this_path: Option<std::path::PathBuf>, this_text: String, open:
             },
         };
         let is_open_file = this_path.as_ref() == Some(f);
-        match maka_parser::parse(&text) {
+        match parse_cached(&text) {
             Ok(m) => {
                 if let Some(uri) = path_uri(f) {
                     collect_symbols(&m, &uri, &mut symbol_index);
@@ -230,7 +274,7 @@ fn analyze_inner(this_path: Option<std::path::PathBuf>, this_text: String, open:
     }
     // If the open file is not on disk yet (never saved), still analyze its buffer.
     if this_path.is_none() {
-        match maka_parser::parse(&this_text) {
+        match parse_cached(&this_text) {
             Ok(m) => append(&mut merged, m),
             Err(msg) => {
                 diagnostics.push(parse_error_diagnostic(&msg));
@@ -620,6 +664,7 @@ impl LanguageServer for Backend {
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
         })
@@ -638,6 +683,7 @@ impl LanguageServer for Backend {
     async fn did_open(&self, p: DidOpenTextDocumentParams) {
         let uri = p.text_document.uri.clone();
         self.docs.insert(uri.clone(), p.text_document.text);
+        self.bump_version();
         self.publish(uri).await;
     }
 
@@ -645,12 +691,15 @@ impl LanguageServer for Backend {
         if let Some(change) = p.content_changes.pop() {
             let uri = p.text_document.uri.clone();
             self.docs.insert(uri.clone(), change.text);
+            self.bump_version();
             self.publish(uri).await;
         }
     }
 
     async fn did_close(&self, p: DidCloseTextDocumentParams) {
         self.docs.remove(&p.text_document.uri);
+        self.cache.remove(&p.text_document.uri);
+        self.bump_version();
     }
 
     async fn hover(&self, p: HoverParams) -> Result<Option<Hover>> {
@@ -717,9 +766,9 @@ impl LanguageServer for Backend {
         p: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = p.text_document.uri;
-        let Some(text) = self.docs.get(&uri).map(|t| t.clone()) else {
+        if !self.docs.contains_key(&uri) {
             return Ok(None);
-        };
+        }
         let a = self.analyze(&uri);
         if let Some(m) = &a.user_ast {
             return Ok(Some(DocumentSymbolResponse::Nested(document_symbols(m))));
@@ -729,7 +778,7 @@ impl LanguageServer for Backend {
 
     async fn completion(&self, p: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = p.text_document_position.text_document.uri;
-        let text = self.docs.get(&uri).map(|t| t.clone());
+        let has_doc = self.docs.contains_key(&uri);
         let mut items: Vec<CompletionItem> = Vec::new();
         let mut add = |label: &str, kind: CompletionItemKind, detail: Option<String>| {
             items.push(CompletionItem {
@@ -745,7 +794,7 @@ impl LanguageServer for Backend {
         for t in PRIMS {
             add(t, CompletionItemKind::STRUCT, Some("built-in type".into()));
         }
-        if let Some(text) = text {
+        if has_doc {
             let a = self.analyze(&uri);
             if let Some(hir) = &a.hir {
                 for f in &hir.sym.funcs {
@@ -822,13 +871,55 @@ impl LanguageServer for Backend {
         changes.insert(uri, edits);
         Ok(Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }))
     }
+
+    /// Format Document / format-on-save: layout-only, comment- and
+    /// string-preserving (see `maka_fmt`).  Emits a single whole-document edit;
+    /// `format_checked` refuses (and we emit no edit) if formatting would ever
+    /// change the token stream, so this is safe to run on every save.
+    async fn formatting(&self, p: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let uri = p.text_document.uri;
+        let Some(text) = self.docs.get(&uri).map(|t| t.clone()) else {
+            return Ok(None);
+        };
+        match maka_fmt::format_checked(&text) {
+            Ok(out) if out != text => Ok(Some(vec![TextEdit {
+                range: Range { start: Position { line: 0, character: 0 }, end: doc_end(&text) },
+                new_text: out,
+            }])),
+            _ => Ok(None), // already formatted, or a safety-check refusal: no edit
+        }
+    }
+}
+
+/// The end position of a document (line = newline count, character = UTF-16
+/// length of the final line), so a whole-document replacement range is exact.
+fn doc_end(text: &str) -> Position {
+    let mut line = 0u32;
+    let mut col = 0u32;
+    for ch in text.chars() {
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += ch.len_utf16() as u32;
+        }
+    }
+    Position { line, character: col }
 }
 
 impl Backend {
     /// Analyze the document at `uri` in the context of its whole project,
     /// snapshotting every OTHER open buffer so unsaved edits across files are
-    /// reflected.
-    fn analyze(&self, uri: &Url) -> Analysis {
+    /// reflected.  Cached per document at the current snapshot version: a repeat
+    /// call at the same state (the common case for hover / definition / outline)
+    /// returns the shared result without re-analyzing.
+    fn analyze(&self, uri: &Url) -> Arc<Analysis> {
+        let ver = self.version.load(Ordering::Acquire);
+        if let Some(hit) = self.cache.get(uri) {
+            if hit.0 == ver {
+                return hit.1.clone();
+            }
+        }
         let this_text = self.docs.get(uri).map(|t| t.clone()).unwrap_or_default();
         let this_path = to_path(uri);
         let mut open: std::collections::HashMap<std::path::PathBuf, String> =
@@ -838,12 +929,19 @@ impl Backend {
                 open.insert(p, e.value().clone());
             }
         }
-        analyze_doc(this_path, this_text, open)
+        let a = Arc::new(analyze_doc(this_path, this_text, open));
+        self.cache.insert(uri.clone(), (ver, a.clone()));
+        a
+    }
+
+    /// Invalidate all cached analyses (any edit can change any file cross-file).
+    fn bump_version(&self) {
+        self.version.fetch_add(1, Ordering::AcqRel);
     }
 
     async fn publish(&self, uri: Url) {
         let a = self.analyze(&uri);
-        self.client.publish_diagnostics(uri, a.diagnostics, None).await;
+        self.client.publish_diagnostics(uri, a.diagnostics.clone(), None).await;
     }
 }
 
@@ -864,6 +962,8 @@ async fn main() {
     let (service, socket) = LspService::new(|client| Backend {
         client,
         docs: DashMap::new(),
+        version: AtomicU64::new(0),
+        cache: DashMap::new(),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

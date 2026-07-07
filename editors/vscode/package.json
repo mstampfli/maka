@@ -1,8 +1,8 @@
 {
   "name": "maka",
   "displayName": "Maka",
-  "description": "Language support for Maka: syntax highlighting (embedded Rust/C) plus a language server (diagnostics, hover, go-to-definition, outline, completion).",
-  "version": "0.2.2",
+  "description": "Language support for Maka: syntax highlighting (embedded Rust/C) plus a language server (diagnostics, hover, go-to-definition, outline, completion, formatting).",
+  "version": "0.3.0",
   "publisher": "mstampfli",
   "license": "MIT",
   "repository": {

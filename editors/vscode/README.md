@@ -6,9 +6,11 @@ Language support for [Maka](https://github.com/mstampfli/maka):
   flavors, strings/chars/numbers, comments, function names; `rblock "..."` bodies
   highlight as **Rust** and `cblock "..."` bodies as **C**. Works with no server.
 - **Language server** (`maka-lsp`) — live **diagnostics** (parse + type errors),
-  **hover** types/signatures, **go-to-definition**, **document outline**, and
-  **completion**. It links the compiler crates, so it reflects what the compiler
-  actually sees.
+  **hover** types/signatures, **go-to-definition**, **document outline**,
+  **completion**, references/rename, and **Format Document** (layout formatter,
+  works with format-on-save). It links the compiler crates, so it reflects what
+  the compiler actually sees, and it caches project analysis so hover and
+  go-to-definition stay fast on repeat lookups.
 
 ## Install (GUI, recommended)
 
@@ -29,7 +31,16 @@ In VS Code:
 
 Open any `.maka` file: highlighting is instant and the language server (bundled)
 provides diagnostics, hover, go-to-definition, the outline, completion,
-references/rename, and style lints - no PATH or settings needed.
+references/rename, formatting, and style lints - no PATH or settings needed.
+
+**Formatting.** Run **Format Document** (Shift+Alt+F), or enable format-on-save
+(`"editor.formatOnSave": true`).  It is a layout formatter: it fixes indentation
+(4-space, by brace depth), strips trailing whitespace, and normalizes blank
+lines, while leaving comments and strings untouched.  It never reflows code and
+verifies its own output is token-identical before applying, so it is safe on
+save.  Naming conventions stay a lint (with an LSP Rename to fix them
+deliberately), not a silent rewrite.  The same formatter is on the CLI as
+`maka fmt` / `makac fmt [--check]`.
 
 ## Install (developer symlink)
 
