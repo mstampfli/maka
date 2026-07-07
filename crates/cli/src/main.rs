@@ -8,6 +8,7 @@
 //!   maka run   [--release] [-- args...]   build, then run with args
 //!   maka test  [--release]        compile+run tests/*.maka, diff vs .expected
 //!   maka lint                     run `makac lint` over src/*.maka
+//!   maka fmt [--check] [FILE...]  reformat (layout) src/*.maka in place
 //!   maka add NAME [VERSION]       guidance for adding a dependency
 //!
 //! A project is a directory with a `maka.toml`:
@@ -33,6 +34,7 @@ fn main() {
         "run" => cmd_run(&rest),
         "test" => cmd_test(&rest),
         "lint" => cmd_lint(&rest),
+        "fmt" => cmd_fmt(&rest),
         "add" => cmd_add(&rest),
         "help" | "--help" | "-h" => {
             print_help();
@@ -63,6 +65,7 @@ usage:
   maka run   [--release] [-- <args>]   build, then run (args pass to the program)
   maka test  [--release]       compile+run tests/*.maka, diff stdout vs .expected
   maka lint                    check style/naming with `makac lint` over src/
+  maka fmt [--check] [file...] reformat (layout) src/ in place, or the given files
   maka add <name> [version]    how to add a Rust crate / C library dependency
   maka version                 print the version
 "
@@ -384,6 +387,58 @@ fn cmd_lint(_args: &[String]) -> i32 {
         Ok(s) => s.code().unwrap_or(1),
         Err(e) => {
             eprintln!("maka lint: failed to run makac: {}", e);
+            1
+        }
+    }
+}
+
+fn cmd_fmt(args: &[String]) -> i32 {
+    // Split flags from explicit file arguments.  With no files given, format the
+    // project's `src/*.maka`; with files, format exactly those (so `maka fmt a.maka`
+    // works outside a project too).
+    let mut flags: Vec<String> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    for a in args {
+        if a.starts_with('-') {
+            flags.push(a.clone());
+        } else {
+            files.push(a.clone());
+        }
+    }
+
+    let mut cmd = Command::new(makac());
+    cmd.arg("fmt");
+    for f in &flags {
+        cmd.arg(f);
+    }
+
+    if files.is_empty() {
+        let (root, _man) = match load_manifest() {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("maka fmt: {} (or pass files explicitly)", e);
+                return 1;
+            }
+        };
+        let sources = maka_sources(&root.join("src"));
+        if sources.is_empty() {
+            eprintln!("maka fmt: no `.maka` sources under `src/`");
+            return 0;
+        }
+        cmd.current_dir(&root);
+        for s in &sources {
+            cmd.arg(s);
+        }
+    } else {
+        for f in &files {
+            cmd.arg(f);
+        }
+    }
+
+    match cmd.status() {
+        Ok(s) => s.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("maka fmt: failed to run makac: {}", e);
             1
         }
     }

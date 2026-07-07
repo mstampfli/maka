@@ -16,3 +16,4 @@ maka_sema = { workspace = true }
 maka_codegen = { workspace = true }
 maka_bridge = { workspace = true }
 maka_lint = { workspace = true }
+maka_fmt = { workspace = true }

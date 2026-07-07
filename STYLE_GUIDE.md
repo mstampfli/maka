@@ -43,6 +43,15 @@ or a value. Keep that signal intact.
 
 ## 2. Layout and formatting
 
+Run `maka fmt` (or `makac fmt`, or Format Document in the editor) to apply the
+indentation and blank-line rules below automatically. It is a layout-only
+formatter: it re-indents, strips trailing whitespace, and collapses blank runs,
+but it never reflows your code and never touches comments or strings, so it is
+safe to run on save. `maka fmt --check` reports unformatted files without
+writing (use it in CI). Naming (section 1) is deliberately *not* auto-fixed by
+the formatter, since a rename can be cross-file and semantic; `makac lint` flags
+naming and the editor's Rename applies a fix you choose.
+
 - **Four spaces** per indent level. Never tabs.
 - **Opening brace on the same line** as the construct it belongs to, one space
   before it (K&R):

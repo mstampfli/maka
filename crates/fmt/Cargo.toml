@@ -1,0 +1,13 @@
+[package]
+name = "maka_fmt"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# `maka_fmt` — the Maka layout formatter.  A comment- and string-preserving
+# re-indenter: it normalizes indentation (4-space, by bracket depth), strips
+# trailing whitespace, collapses blank-line runs, and ensures a final newline,
+# WITHOUT reflowing code, so it can never change program meaning.  Shared by
+# `makac fmt`, `maka fmt`, and the language server's Format-Document.
+[dependencies]
+maka_lexer = { workspace = true }
