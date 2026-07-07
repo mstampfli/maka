@@ -1,0 +1,18 @@
+// `dyn X` and `some X` work with an `attr`+`has` trait, not only a `logic`.
+attr Weigh { int weight(&_ self); }
+data Gram { int g; }
+data Kilo { int k; }
+Gram has Weigh { int weight(&Gram self) { return self.g; } }
+Kilo has Weigh { int weight(&Kilo self) { return self.k * 1000; } }
+unit main() {
+    Vec<Gram> grams = []; push(grams, Gram{g=2});
+    Vec<Kilo> kilos = []; push(kilos, Kilo{k=1});
+    Vec<Vec<some Weigh>> cols = [];
+    push(cols, grams);
+    push(cols, kilos);
+    mut int total = 0;
+    for (Vec<some Weigh> col in cols) {
+        for (some Weigh item in col) { total = total + Weigh.weight(&item); }
+    }
+    log(total);
+}

@@ -3845,15 +3845,13 @@ impl<'a> TypeChecker<'a> {
             if is_dyn {
                 // Find a signature in the trait logic with matching name and arity.
                 let trait_name = match strip_to_dyn(&probed[0].ty) { Some(traits) => traits[0].clone(), None => String::new() };
-                let linfo = match self.sym.logic_by_name(&trait_name) {
-                    Some(li) => li.clone(),
-                    None => {
-                        self.err(format!("unknown trait `{}`", trait_name), sp);
-                        return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
-                    }
-                };
+                if !self.sym.is_trait(&trait_name) {
+                    self.err(format!("unknown trait `{}`", trait_name), sp);
+                    return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
+                }
+                let trait_funcs = self.sym.trait_method_funcs(&trait_name);
                 // Pick the first overload by name and arity.
-                let chosen = linfo.funcs.iter().find_map(|fid| {
+                let chosen = trait_funcs.iter().find_map(|fid| {
                     let s = self.sym.func_sig(*fid).clone();
                     if s.name == name && s.param_tys.len() == probed.len() { Some((*fid, s)) } else { None }
                 });
@@ -4406,10 +4404,13 @@ impl<'a> TypeChecker<'a> {
     /// every distinct method name in the logic have an overload taking that struct
     /// (by `&`-ref) as its receiver?  Same rule check_to_dyn enforces.
     fn struct_satisfies_trait(&self, struct_id: StructId, trait_name: &str) -> bool {
-        let Some(linfo) = self.sym.logic_by_name(trait_name) else { return false; };
+        if !self.sym.is_trait(trait_name) {
+            return false;
+        }
+        let funcs = self.sym.trait_method_funcs(trait_name);
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut ok: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for fid in &linfo.funcs {
+        for fid in &funcs {
             let sig = self.sym.func_sig(*fid);
             seen.insert(sig.name.clone());
             if let Some(HType::Ref { inner, .. }) = sig.param_tys.first() {
@@ -4438,15 +4439,16 @@ impl<'a> TypeChecker<'a> {
         // For each trait in `traits`, verify the concrete type satisfies it: every function
         // in the logic must have a matching overload for the concrete struct as receiver.
         for tn in &traits {
-            let Some(linfo) = self.sym.logic_by_name(tn) else {
-                self.err(format!("unknown trait/logic `{}`", tn), sp);
+            if !self.sym.is_trait(tn) {
+                self.err(format!("unknown trait `{}`", tn), sp);
                 continue;
-            };
+            }
+            let funcs = self.sym.trait_method_funcs(tn);
             // Group by name; we only require that each *distinct* name has at least one overload
             // accepting the concrete type as its first parameter.
             let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut satisfied_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for fid in &linfo.funcs {
+            for fid in &funcs {
                 let sig = self.sym.func_sig(*fid);
                 seen_names.insert(sig.name.clone());
                 if sig.param_tys.is_empty() { continue; }

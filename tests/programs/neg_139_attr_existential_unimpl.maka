@@ -1,0 +1,10 @@
+// A type that does not implement the attr cannot pack into `some X`.
+attr Weigh { int weight(&_ self); }
+data Gram { int g; }
+Gram has Weigh { int weight(&Gram self) { return self.g; } }
+data Blob { int b; }
+unit main() {
+    Vec<Blob> blobs = []; push(blobs, Blob{b=1});
+    Vec<some Weigh> col = blobs;
+    log(1);
+}

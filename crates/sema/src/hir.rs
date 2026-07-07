@@ -991,4 +991,23 @@ impl SymTab {
     pub fn struct_info(&self, id: StructId) -> &StructInfo { &self.structs[id.0 as usize] }
     pub fn enum_info(&self, id: EnumId) -> &EnumInfo { &self.enums[id.0 as usize] }
     pub fn func_sig(&self, id: FuncId) -> &FuncSig { &self.sigs[id.0 as usize] }
+
+    /// True if `name` names a trait - a `logic` block OR an `attr`.
+    pub fn is_trait(&self, name: &str) -> bool {
+        self.logic_by_name(name).is_some() || self.attr_by_name(name).is_some()
+    }
+
+    /// Every method-impl `FuncId` tagged with trait `name`.  For a `logic` these
+    /// are its concrete-receiver overloads; for an `attr` these are the `has`-impl
+    /// methods (one set per implementing type, with inherited defaults already
+    /// materialized).  Both are stored identically (`FuncSig.logic == Some(name)`),
+    /// so `dyn X` / `some X` dispatch and vtable-building work the same for either.
+    pub fn trait_method_funcs(&self, name: &str) -> Vec<FuncId> {
+        self.sigs
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.logic.as_deref() == Some(name))
+            .map(|(i, _)| FuncId(i as u32))
+            .collect()
+    }
 }

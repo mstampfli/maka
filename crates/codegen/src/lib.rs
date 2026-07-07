@@ -5486,10 +5486,15 @@ impl<'a> Cx<'a> {
         // separately AFTER function forward declarations (via emit_dyn_vtable_instances).
         let traits: Vec<String> = self.dyn_traits.iter().cloned().collect();
         for tn in &traits {
-            let Some(linfo) = self.sym.logic_by_name(tn) else { continue; };
-            // Take *unique* function names declared in the logic.
+            // A trait's methods are the sigs tagged with its name - covers both a
+            // `logic` block's overloads and an `attr`'s `has`-impl methods.
+            let funcs = self.sym.trait_method_funcs(tn);
+            if funcs.is_empty() {
+                continue;
+            }
+            // Take *unique* method names of the trait.
             let mut name_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-            for fid in &linfo.funcs {
+            for fid in &funcs {
                 let s = self.sym.func_sig(*fid);
                 name_set.insert(s.name.clone());
             }
@@ -5498,7 +5503,7 @@ impl<'a> Cx<'a> {
             self.open();
             for n in &name_set {
                 // For each declared name, find one signature to derive the function-pointer shape.
-                let sig = linfo.funcs.iter().filter_map(|fid| {
+                let sig = funcs.iter().filter_map(|fid| {
                     let s = self.sym.func_sig(*fid);
                     if s.name == *n { Some(s.clone()) } else { None }
                 }).next();
@@ -5651,10 +5656,14 @@ impl<'a> Cx<'a> {
         for (tn, sid_n) in &insts {
             let sid = StructId(*sid_n);
             let sname = self.sym.struct_info(sid).name.clone();
-            let Some(linfo) = self.sym.logic_by_name(tn) else { continue; };
-            // For each distinct function name, find the matching overload for this struct.
+            let funcs = self.sym.trait_method_funcs(tn);
+            if funcs.is_empty() {
+                continue;
+            }
+            // For each distinct method name, find the matching impl for this struct
+            // (a `logic` overload or the `has X for T` method).
             let mut name_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-            for fid in &linfo.funcs {
+            for fid in &funcs {
                 let s = self.sym.func_sig(*fid);
                 name_set.insert(s.name.clone());
             }
@@ -5662,7 +5671,7 @@ impl<'a> Cx<'a> {
             self.open();
             for n in &name_set {
                 // Find the FuncSig for this T.
-                let chosen = linfo.funcs.iter().find_map(|fid| {
+                let chosen = funcs.iter().find_map(|fid| {
                     let s = self.sym.func_sig(*fid);
                     if s.name != *n { return None; }
                     if s.param_tys.is_empty() { return None; }
