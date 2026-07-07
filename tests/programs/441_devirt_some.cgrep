@@ -1,0 +1,4 @@
+# Devirtualization fired for the immutable Gram column (direct data-extraction).
+((Gram*)
+# The heterogeneous Vec<Vec<some Weigh>> loop still dispatches through the vtable.
+vtbl->weight

@@ -265,8 +265,9 @@ disambiguate by writing the qualified path explicitly (e.g. `outer.a.common`).
 
 Two existential forms hide a concrete type behind a trait's interface. Both
 allow calling only the trait's methods (`Trait.method(&x)` qualified dispatch);
-field access is rejected because the concrete type is unknown. Trait
-implementations live in `logic Name { ... }` blocks (concrete-receiver methods).
+field access is rejected because the concrete type is unknown. The trait may be a
+`logic` block or an `attr` with `has` impls (see the note at the end of this
+section) - the vtable is built from either.
 
 **`dyn Trait`** (and `dyn (T1 + T2)`) is a **per-value** existential: a fat
 pointer `{ data, vtbl }`, each value independently typed. `x as dyn Trait` packs
@@ -2141,13 +2142,14 @@ These are real limitations the implementation is honest about:
   a parameter is rejected, since the compiler can't prove the borrow's source
   outlives the struct.  Lifetime annotations would let this loosen; v1 takes
   the safe-by-default rejection.
-- **No turbofish.** A return-only generic type parameter is pinned by the
-  expected type (§10.1), not by `f<T>(x)` — `<` at a call site parses as a
-  comparison operator.
-- **`some X` traits must be `logic`.** A `Vec<some X>` existential column
-  dispatches through a vtable, which is generated for `logic`-shaped traits
-  (concrete-receiver methods); `attr` + `has` is not (yet) a valid `some`/`dyn`
-  bound.
+- **Explicit type arguments use `::<>`.** Type parameters are inferred (from the
+  arguments, then the expected type); when neither pins them down, give them
+  explicitly with a `::<>` turbofish — `f::<int>(x)` (§10.1). The `::` is required
+  because a bare `f<T>(x)` parses as a comparison.
+- **Existentials accept `logic` OR `attr`+`has`.** A `Vec<some X>` / `dyn X`
+  dispatches through a vtable built from the trait's method impls, which are
+  stored uniformly whether the trait is a `logic` (concrete-receiver overloads) or
+  an `attr` with `has` impls (§2.5).
 - **Non-null narrowing of a projected place is `if`-only and owning-only.**
   `if (P != null) { P! }` now narrows an indexed or field OWNING place - an
   `own *T` element `xs[0]` or field `s.p`, keyed on a normalized place path - not
