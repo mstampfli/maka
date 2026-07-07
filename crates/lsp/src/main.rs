@@ -252,10 +252,7 @@ fn collect_symbols(m: &Module, uri: &Url, out: &mut Vec<SymDef>) {
     };
     for it in &m.items {
         match it {
-            Item::Func(f) => {
-                let params = f.params.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ");
-                add(&f.name, f.span, format!("{}({})", f.name, params))
-            }
+            Item::Func(f) => add(&f.name, f.span, func_signature_ast(f)),
             Item::Data(d) => add(&d.name, d.span, format!("data {}", d.name)),
             Item::Enum(e) => {
                 add(&e.name, e.span, enum_signature(e));
@@ -743,6 +740,110 @@ fn resolve(user: &Module, hir: &HirModule, name: &str, line: u32) -> Option<(Str
     None
 }
 
+/// Peel references / pointers to the struct they ultimately point at.
+fn struct_id_of(t: &HType) -> Option<maka_sema::hir::StructId> {
+    match t {
+        HType::Struct(id) => Some(*id),
+        HType::Ref { inner, .. }
+        | HType::Ptr { inner, .. }
+        | HType::OwnPtr { inner, .. }
+        | HType::RawPtr { inner, .. }
+        | HType::Heap { inner } => struct_id_of(inner),
+        _ => None,
+    }
+}
+
+/// The struct a base identifier resolves to (a local in the enclosing function,
+/// or a global), for field-access hover.
+fn base_struct_id(user: &Module, hir: &HirModule, base: &str, line: u32) -> Option<maka_sema::hir::StructId> {
+    let sym = &hir.sym;
+    let enclosing = user
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Func(f) if f.span.line <= line + 1 => Some(f.span.line),
+            _ => None,
+        })
+        .max();
+    if let Some(fl) = enclosing {
+        if let Some(hf) = sym.funcs.iter().find(|f| f.span.line == fl) {
+            if let Some(l) = hf.locals.iter().find(|l| l.name == base) {
+                return struct_id_of(&l.ty);
+            }
+        }
+    }
+    sym.globals.iter().find(|g| g.name == base).and_then(|g| struct_id_of(&g.ty))
+}
+
+/// Hover for a struct/enum field: a field access `base.name` (resolve the base's
+/// type and look up the field, so it works for stdlib types too), or a field
+/// declaration inside a user `data`/`enum`.  Returns (markdown, def span).
+fn resolve_field(
+    user: &Module,
+    hir: &HirModule,
+    text: &str,
+    pos: Position,
+    name: &str,
+) -> Option<(String, Option<Span>)> {
+    let sym = &hir.sym;
+    // Field access `base.name`: is the hovered word preceded (past spaces) by `.`?
+    if let Some(line) = text.lines().nth(pos.line as usize) {
+        let bytes = line.as_bytes();
+        let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut start = (pos.character as usize).min(bytes.len());
+        while start > 0 && is_word(bytes[start - 1]) {
+            start -= 1;
+        }
+        let mut d = start;
+        while d > 0 && bytes[d - 1] == b' ' {
+            d -= 1;
+        }
+        if d > 0 && bytes[d - 1] == b'.' {
+            let mut e = d - 1;
+            while e > 0 && bytes[e - 1] == b' ' {
+                e -= 1;
+            }
+            let mut bs = e;
+            while bs > 0 && is_word(bytes[bs - 1]) {
+                bs -= 1;
+            }
+            let base = &line[bs..e];
+            if let Some(sid) = base_struct_id(user, hir, base, pos.line) {
+                let sinfo = sym.struct_info(sid);
+                if let Some(fl) = sinfo.fields.iter().find(|fl| fl.name == name) {
+                    let kw = if fl.mut_payload { "mut " } else { "" };
+                    let md = format!("{}{} {}", kw, render_type(&fl.ty, sym), name);
+                    return Some((code_md(&md), Some(fl.span)));
+                }
+            }
+        }
+    }
+    // Field declaration inside a user `data` or `enum` variant.
+    for it in &user.items {
+        match it {
+            Item::Data(d) => {
+                for fl in &d.fields {
+                    if fl.name == name && fl.span.line == pos.line + 1 {
+                        let kw = if matches!(fl.mutness, maka_ast::Mutness::Mut) { "mut " } else { "" };
+                        return Some((code_md(&format!("{}{} {}", kw, ast_type_str(&fl.ty), name)), Some(fl.span)));
+                    }
+                }
+            }
+            Item::Enum(e) => {
+                for v in &e.variants {
+                    for fl in &v.fields {
+                        if fl.name == name && fl.span.line == pos.line + 1 {
+                            return Some((code_md(&format!("{} {}", ast_type_str(&fl.ty), name)), Some(fl.span)));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn fn_signature(sig: &maka_sema::hir::FuncSig, sym: &SymTab) -> String {
     let params = sig
         .param_names
@@ -1039,6 +1140,15 @@ impl LanguageServer for Backend {
                 base = Some(md);
                 if let Some(sp) = sp {
                     def = Some((uri.clone(), sp.line));
+                }
+            }
+            // A struct/enum field (access `base.field` or a `data`/`enum` field decl).
+            if base.is_none() {
+                if let Some((md, sp)) = resolve_field(user, hir, &text, pos, &name) {
+                    base = Some(md);
+                    if let Some(sp) = sp {
+                        def = Some((uri.clone(), sp.line));
+                    }
                 }
             }
         }
