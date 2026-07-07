@@ -1,0 +1,5 @@
+// A duplicate enum must be a clean error, not a panic (the second decl carries
+// more variants than the first, which used to index out of bounds in resolve).
+enum E { A, B }
+enum E { X, Y, Z }
+unit main() { log(1); }

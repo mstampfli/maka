@@ -792,7 +792,16 @@ impl SymTab {
                             span: f.span,
                         });
                     }
-                    sym.enums[eid.0 as usize].variants[vi].fields = fields;
+                    // `enum_by_name` returns the FIRST enum of this name, so a
+                    // duplicate enum (already reported in Pass 1) can carry more
+                    // variants than the one we resolve into; guard the per-index
+                    // write so the clean "duplicate enum" error surfaces instead
+                    // of an index-out-of-bounds panic.
+                    if let Some(info) = sym.enums.get_mut(eid.0 as usize) {
+                        if let Some(variant) = info.variants.get_mut(vi) {
+                            variant.fields = fields;
+                        }
+                    }
                 }
             }
         }
