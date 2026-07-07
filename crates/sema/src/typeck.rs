@@ -925,82 +925,6 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn is_place_mutable(&self, e: &HExpr) -> bool {
-        match &e.kind {
-            HExprKind::GlobalRef(gid) => self.sym.globals[gid.0 as usize].is_mut,
-            HExprKind::Local(id) => {
-                let li = self.local(*id);
-                // For pointer bindings: handle is always reassignable.
-                // For other types: must be mut binding.
-                match &li.ty {
-                    HType::Ptr { .. } | HType::RawPtr { .. } | HType::OwnPtr { .. } => true,
-                    HType::Ref { .. } => false,
-                    HType::Heap { .. } => true, // heap binding reassignment allowed (replaces value in place)
-                    _ => li.mut_payload && li.reassignable,
-                }
-            }
-            HExprKind::Field { base, field } => {
-                let base_mut = self.deref_target_mut(base);
-                let sid = match struct_id_of(&base.ty) {
-                    Some(id) => id,
-                    None => return false,
-                };
-                let f = &self.sym.struct_info(sid).fields[*field];
-                // Pointer (`*T`) fields are always reassignable per §15.1 (handles).
-                // The pointee mutability matters at deref time, not at field reassignment.
-                if let HType::Ptr { .. } = &f.ty { return base_mut; }
-                base_mut && f.mut_payload
-            }
-            HExprKind::Index { base, .. } => match &base.ty {
-                HType::RawPtr { mutable, .. } => *mutable,
-                _ => self.deref_target_mut(base),
-            },
-            HExprKind::Unwrap { expr, .. } => match &expr.ty {
-                HType::Ptr { mutable, .. } => *mutable,
-                HType::RawPtr { mutable, .. } => *mutable,
-                HType::OwnPtr { mutable, .. } => *mutable,
-                _ => false,
-            },
-            _ => false,
-        }
-    }
-
-    /// Is the *underlying storage* through this expression mutable?
-    fn deref_target_mut(&self, e: &HExpr) -> bool {
-        match &e.kind {
-            HExprKind::Local(id) => {
-                let li = self.local(*id);
-                match &li.ty {
-                    HType::Ref { mutable, .. } => *mutable,
-                    HType::Ptr { mutable, .. } => *mutable,
-                    HType::RawPtr { mutable, .. } => *mutable,
-                    HType::OwnPtr { mutable, .. } => *mutable,
-                    HType::Slice { mutable, .. } => *mutable,
-                    HType::Array { .. } => li.mut_payload,
-                    HType::Heap { .. } => li.mut_payload,
-                    _ => li.mut_payload,
-                }
-            }
-            HExprKind::Unwrap { expr, .. } => matches!(
-                expr.ty,
-                HType::Ptr { mutable: true, .. }
-                | HType::RawPtr { mutable: true, .. }
-                | HType::OwnPtr { mutable: true, .. }
-            ),
-            HExprKind::Field { base, field } => {
-                let base_mut = self.deref_target_mut(base);
-                let sid = match struct_id_of(&base.ty) {
-                    Some(id) => id,
-                    None => return false,
-                };
-                let f = &self.sym.struct_info(sid).fields[*field];
-                base_mut && f.mut_payload
-            }
-            HExprKind::Index { base, .. } => self.deref_target_mut(base),
-            _ => false,
-        }
-    }
-
     // ---- expressions ----
 
     fn check_expr_coerce(&mut self, e: &ast::Expr, target: &HType) -> HExpr {
@@ -1626,14 +1550,6 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn local_mut_invalidate(&mut self, id: LocalId) {
-        // We mark the local as "moved" for downstream uses. We piggy-back on the
-        // existing `mut_payload`/`reassignable` flags by setting both to false.
-        let li = &mut self.locals[id.0 as usize];
-        li.mut_payload = false;
-        li.reassignable = false;
-    }
-
     /// Try to dispatch `op` as a call to a user-defined logic block.
     /// Returns Some(hir) on success.
     /// Coerce an operator operand to the overload's parameter type, auto-borrowing
@@ -2083,14 +1999,8 @@ impl<'a> TypeChecker<'a> {
     /// If the name is reachable through more than one distinct embed chain,
     /// returns `Err(N)` where N is the number of distinct chains found — the
     /// caller raises an ambiguity diagnostic instead of silently picking one.
-    fn find_promoted_field(&self, start: StructId, name: &str) -> Option<(Vec<usize>, HType)> {
-        match self.find_promoted_field_count(start, name) {
-            Ok(hit) => hit,
-            Err(_) => None,   // ambiguous → caller falls through to the "no field" error
-        }
-    }
-
-    /// Like `find_promoted_field` but counts every matching chain so ambiguity
+    /// Find a field by name, following `embed` promotion chains; counts every
+    /// matching chain so ambiguity
     /// can be reported.  Returns `Ok(Some(...))` for a single hit, `Ok(None)`
     /// for no hits, and `Err(n)` for n>1 hits.
     fn find_promoted_field_count(&self, start: StructId, name: &str) -> Result<Option<(Vec<usize>, HType)>, usize> {
@@ -3598,7 +3508,7 @@ impl<'a> TypeChecker<'a> {
                     span: sp,
                 };
             }
-            let mut hargs: Vec<HExpr> = hargs_pre;
+            let hargs: Vec<HExpr> = hargs_pre;
             if hargs.len() != 4 {
                 self.err("par_reduce_int expects (int start, int end, int init, int(int, int) combine) or ([]int slice, int init, int(int, int) combine)", sp);
             } else {
@@ -3703,7 +3613,7 @@ impl<'a> TypeChecker<'a> {
         // for every i in [start, end), chunked across the job-pool's
         // workers.  Body must be a `unit(int)` closure.
         if name == "par_for_range" && qualifier.is_none() {
-            let mut hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+            let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
             if hargs.len() != 3 {
                 self.err("par_for_range expects (int start, int end, unit(int) body)", sp);
             } else {

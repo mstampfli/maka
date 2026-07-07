@@ -17,8 +17,7 @@
 //!   name = "myapp"
 //!   version = "0.1.0"
 //!
-//!   [build]
-//!   entry = "src/main.maka"     # optional; default is src/main.maka
+//! `maka build` compiles every `.maka` file under `src/` together.
 
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
@@ -76,7 +75,6 @@ usage:
 
 struct Manifest {
     name: String,
-    entry: String,
 }
 
 /// Walk up from the current directory to the project root (the dir with a
@@ -89,8 +87,7 @@ fn load_manifest() -> Result<(PathBuf, Manifest), String> {
             let text = std::fs::read_to_string(&man).map_err(|e| e.to_string())?;
             let name = toml_value(&text, "name")
                 .unwrap_or_else(|| dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "app".into()));
-            let entry = toml_value(&text, "entry").unwrap_or_else(|| "src/main.maka".to_string());
-            return Ok((dir, Manifest { name, entry }));
+            return Ok((dir, Manifest { name }));
         }
         if !dir.pop() {
             return Err("no `maka.toml` found in this or any parent directory (run `maka new`/`maka init`)".to_string());
@@ -219,7 +216,7 @@ fn scaffold(root: &Path, name: &str) -> Result<(), String> {
     };
     w(
         "maka.toml",
-        &format!("[package]\nname = \"{}\"\nversion = \"0.1.0\"\n\n[build]\nentry = \"src/main.maka\"\n", name),
+        &format!("[package]\nname = \"{}\"\nversion = \"0.1.0\"\n", name),
     )?;
     w(
         "src/main.maka",

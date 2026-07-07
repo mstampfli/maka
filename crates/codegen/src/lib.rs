@@ -11691,13 +11691,6 @@ fn binop_c(op: HBinOp) -> &'static str {
         BitAnd => "&", BitOr => "|", BitXor => "^", Shl => "<<", Shr => ">>",
     }
 }
-fn assign_op_c(op: HAssignOp) -> &'static str {
-    match op {
-        HAssignOp::Assign => "=", HAssignOp::Add => "+=", HAssignOp::Sub => "-=",
-        HAssignOp::Mul => "*=", HAssignOp::Div => "/=", HAssignOp::Mod => "%=",
-    }
-}
-
 fn c_escape(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
@@ -11756,7 +11749,6 @@ fn hstmt_line(s: &HStmt) -> Option<u32> {
         HStmt::Unsafe(_, span) => *span,
         HStmt::ExprStmt(e) => e.span,
         HStmt::Block(b) => b.span,
-        _ => return None,
     };
     if sp.line == 0 { None } else { Some(sp.line) }
 }

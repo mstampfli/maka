@@ -285,29 +285,6 @@ fn sidecar_crate_name(module_path: &[String]) -> String {
 // ------------------------------------------------------------------------
 // Sidecar emission
 
-/// Convenience wrapper: invoke `build_sidecar_with_probes` with empty probe
-/// lists.  Used by the legacy one-shot `process` entry point.
-fn build_sidecar(
-    dir: &Path,
-    crate_name: &str,
-    rust_src: &str,
-    surface: &RustSurface,
-    rdeps: &[(String, String)],
-    profile: &str,
-) -> Result<(), String> {
-    let no_probes: Vec<&String> = Vec::new();
-    build_sidecar_with_probes(
-        dir,
-        crate_name,
-        rust_src,
-        surface,
-        rdeps,
-        profile,
-        &no_probes,
-        &no_probes,
-    )
-}
-
 fn build_sidecar_with_probes(
     dir: &Path,
     crate_name: &str,
@@ -1066,16 +1043,6 @@ fn rust_to_maka_ty(ty: &RustType, sp: Span, is_return: bool) -> Type {
 
 /// Rust type names (which may be Vec<T>, HashMap<String,i32>, etc.) need to
 /// become Maka identifiers for the `Rust<...>` phantom argument.  We sanitise:
-/// drop generic args, strip path qualifiers.  This is purely a label for the
-/// Maka surface — the actual data is opaque.
-fn opaque_label(rust_name: &str) -> String {
-    // Take up to the first `<` (generic args), then take just the last `::` segment.
-    let base = rust_name.split_once('<').map(|(a, _)| a).unwrap_or(rust_name);
-    let tail = base.rsplit_once("::").map(|(_, t)| t).unwrap_or(base);
-    let cleaned: String = tail.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-    if cleaned.is_empty() { "T".to_string() } else { cleaned }
-}
-
 fn rust_prim_to_maka(s: &str) -> &'static str {
     // Rust int widths normalise to Maka `int` (= int64) at the boundary, with
     // narrowing inside the shim.  Floats normalise to Maka `float` (= f64).
@@ -1621,10 +1588,6 @@ fn lower_impl_method(
         syn::ReturnType::Default => RustType::Unit,
         syn::ReturnType::Type(_, t) => map_syn_type(t, known_repr_c)?,
     };
-    let rust_call = format!("<{} as ::std::default::Default>::default; {}::{}", recv, recv, method);
-    // The leading `<T as Default>::default;` is a parser-friendly no-op to keep
-    // rustc honest about T being in scope, then the real call uses `T::method`.
-    // Simpler: just emit the path.  Replace with the clean form:
     let rust_call = format!("{}::{}", recv, method);
     Ok(Some(RustFn {
         name: mangled,
@@ -2000,17 +1963,6 @@ fn rust_name_of(ty: &RustType) -> String {
     }
 }
 
-/// Maka-side name component for a container instantiation.  Sanitised so
-/// it's a valid Maka identifier (e.g. `int`, `bool`, `V2`).
-fn maka_label_of(ty: &RustType) -> String {
-    match ty {
-        RustType::Prim(_) => "int".to_string(),
-        RustType::Bool => "bool".to_string(),
-        RustType::ReprC(n) => n.clone(),
-        _ => "opaque".to_string(),
-    }
-}
-
 /// Emit the `#[repr(C)]` Rust struct definition for one container shape.
 /// Same layout is mirrored on the Maka side via `inject_container_data`.
 fn emit_container_struct(c: &ContainerInst) -> String {
@@ -2120,28 +2072,6 @@ fn rust_name_to_maka_ty(name: &str, sp: Span) -> Type {
         "f32" | "f64" => Type::Named("float".to_string(), sp),
         "bool" => Type::Named("bool".to_string(), sp),
         _ => Type::Named("int".to_string(), sp),
-    }
-}
-
-/// Collect the unique Rust type names that appear opaquely in any of the
-/// surface's signatures.  These are the candidates for `Send` assertions.
-fn collect_send_probes(surface: &RustSurface) -> Vec<String> {
-    let mut seen = std::collections::BTreeSet::new();
-    for f in &surface.fns {
-        for p in &f.params {
-            collect_one(&p.ty, &mut seen);
-        }
-        collect_one(&f.ret, &mut seen);
-    }
-    seen.into_iter().collect()
-}
-
-fn collect_one(ty: &RustType, out: &mut std::collections::BTreeSet<String>) {
-    match ty {
-        RustType::Opaque(n) | RustType::RefOpaque(n) | RustType::RefMutOpaque(n) => {
-            out.insert(n.clone());
-        }
-        _ => {}
     }
 }
 

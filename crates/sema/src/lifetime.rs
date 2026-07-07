@@ -64,11 +64,6 @@ impl LocalState {
 /// Result of one function's lifetime/null-proof analysis.
 pub struct AnalyzeOk {
     pub warnings: Vec<SemaWarning>,
-    /// `(lifted FuncId, LocalId inside lifted body)` pairs harvested from
-    /// `Closure` expressions in this function whose env_value was provably
-    /// non-null at the capture site.  The driver applies these to the
-    /// corresponding lifted closure's initial state before its own pass runs.
-    pub capture_nonnull: Vec<(FuncId, LocalId)>,
 }
 
 pub fn analyze_func(
@@ -89,7 +84,6 @@ pub fn analyze_func(
     a.analyze_block(&mut Vec::new(), 0)?;
     let mut errors = std::mem::take(&mut a.errors);
     let warnings = std::mem::take(&mut a.warnings);
-    let capture_nonnull = std::mem::take(&mut a.capture_nonnull);
     // Materialize the per-statement `*T` auto-nulls the analysis recorded into
     // real `alias = NULL;` statements (in every block, incl. match-arm bodies),
     // BEFORE hoisting shifts statement indices.  A `*T` alias whose owner was
@@ -104,7 +98,7 @@ pub fn analyze_func(
     // only if its handle is provably joined before scope exit.
     check_scoped_thread_borrows(f, &mut errors);
     if errors.is_empty() {
-        Ok(AnalyzeOk { warnings, capture_nonnull })
+        Ok(AnalyzeOk { warnings })
     } else {
         Err(std::mem::take(&mut errors))
     }
@@ -686,13 +680,6 @@ struct Analyzer<'a> {
     /// `compute_return_borrows`.  The escape walk consults this to follow a
     /// borrowed return back across a call to the argument it aliases.
     ret_borrows: &'a [Vec<bool>],
-    /// Capture-site non-null facts harvested while walking `Closure` exprs:
-    /// `(lifted FuncId, LocalId inside the lifted body)` pairs whose
-    /// corresponding `env_value` was provably non-null at the capture site.
-    /// The driver applies these as the lifted function's initial state before
-    /// running its per-func pass — bridges (§6.3) capture flow into the
-    /// synthesized closure body.
-    capture_nonnull: Vec<(FuncId, LocalId)>,
     /// Closure locals (`let f = ...[caps]...;`) that transitively borrow-capture
     /// a local owning value the function frees on exit.  Returning or storing
     /// such a closure beyond the function would dangle (the captured owner is
@@ -726,7 +713,6 @@ impl<'a> Analyzer<'a> {
             warnings: Vec::new(),
             summaries,
             ret_borrows,
-            capture_nonnull: Vec::new(),
             closure_holds_dying,
             cur_depth: 0,
             pending_stmt_nulls: Vec::new(),
@@ -839,7 +825,6 @@ impl<'a> Analyzer<'a> {
         if let Some(r) = rebound { self.state[r.0 as usize] = LocalState::fresh(); }
         let pre = self.snapshot();
         let err_mark = self.errors.len();
-        let cap_mark = self.capture_nonnull.len();
         if let Some(p) = narrow { self.state[p.0 as usize].narrowed_until = Some(depth); }
         self.walk_block(body, live_outer, depth);
         if let Some(p) = narrow { self.state[p.0 as usize].narrowed_until = None; }
@@ -862,7 +847,6 @@ impl<'a> Analyzer<'a> {
             || (post[i].holds_dying_borrow && !pre[i].holds_dying_borrow)));
         if new_invalidation {
             self.errors.truncate(err_mark);
-            self.capture_nonnull.truncate(cap_mark);
             let mut entry = pre;
             for i in 0..entry.len() {
                 // The rebound loop variable is re-assigned at iteration top, so it
@@ -1094,7 +1078,7 @@ impl<'a> Analyzer<'a> {
                 }
                 let _ = heap_drops;
             }
-            HStmt::If { cond, then_b, else_b, span } => {
+            HStmt::If { cond, then_b, else_b, .. } => {
                 self.walk_expr(cond);
                 // narrowing: detect `p != null` / `null != p` for an immediate
                 // Local(p), and `P != null` for a projected place P (`xs[0]`, `s.p`).
@@ -1159,7 +1143,7 @@ impl<'a> Analyzer<'a> {
                 } else {
                     let in_scope: std::collections::HashSet<u32> = live_outer.iter()
                         .chain(declared_here.iter()).map(|l| l.0).collect();
-                    self.join_branches(&then_state, &else_state, *span, &in_scope);
+                    self.join_branches(&then_state, &else_state, &in_scope);
                 }
             }
             HStmt::While { cond, body, span } => {
@@ -1369,17 +1353,9 @@ impl<'a> Analyzer<'a> {
                 }
                 self.place_facts.clear();
             }
-            HExprKind::Closure { env_values, lifted, capture_lids, .. } => {
-                for (i, v) in env_values.iter_mut().enumerate() {
+            HExprKind::Closure { env_values, .. } => {
+                for v in env_values.iter_mut() {
                     self.walk_expr(v);
-                    // Propagate capture-site non-null facts into the lifted body
-                    // so its per-func pass starts with `state[capture_lid]` proven
-                    // when the captured expression is provably non-null here.
-                    if let Some(lid) = capture_lids.get(i) {
-                        if self.expr_nonnull(v) {
-                            self.capture_nonnull.push((*lifted, *lid));
-                        }
-                    }
                 }
             }
             HExprKind::Transfer(inner) => {
@@ -2024,7 +2000,7 @@ impl<'a> Analyzer<'a> {
     fn snapshot(&self) -> Vec<LocalState> { self.state.clone() }
     fn restore(&mut self, s: Vec<LocalState>) { self.state = s; }
 
-    fn join_branches(&mut self, then_s: &[LocalState], else_s: &[LocalState], span: Span, in_scope: &std::collections::HashSet<u32>) {
+    fn join_branches(&mut self, then_s: &[LocalState], else_s: &[LocalState], in_scope: &std::collections::HashSet<u32>) {
         let n = self.state.len();
         for i in 0..n {
             // Classify the local up front so `li`'s borrow ends before we mutate

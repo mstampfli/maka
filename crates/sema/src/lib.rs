@@ -264,7 +264,7 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                 if !f.type_params.is_empty() { continue; }
                 let tc = TypeChecker::new_with_logic(&sym, None);
                 match tc.check_func_with_id(f, None) {
-                    Ok((mut hfunc, reqs, synth)) => {
+                    Ok((hfunc, reqs, synth)) => {
                         for s in synth.structs { sym.structs.push(s); }
                         for s in synth.sigs { sym.sigs.push(s); }
                         let __ss = funcs.len();

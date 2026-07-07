@@ -1384,7 +1384,7 @@ impl Parser {
         false
     }
 
-    fn skim_type(kinds: &[&TokKind], mut p: usize) -> Option<usize> {
+    fn skim_type(kinds: &[&TokKind], p: usize) -> Option<usize> {
         let after_base = Self::skim_type_base(kinds, p)?;
         // Function pointer postfix: `BaseType(P1, P2, ...)`.
         if matches!(kinds.get(after_base), Some(TokKind::LParen)) {
@@ -1400,7 +1400,6 @@ impl Parser {
             }
             if depth == 0 { return Some(q); }
         }
-        let _ = p;
         Some(after_base)
     }
 
