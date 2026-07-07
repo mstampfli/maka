@@ -2,13 +2,12 @@
 data Color { int rgb; }
 data Number { int n; }
 
-logic Drawable {
-    unit draw(&Color self) { log(self.rgb); }
-}
+attr Drawable { unit draw(&_ self); }
+Color has Drawable { unit draw(&Color self) { log(self.rgb); } }
 
-unit render<T>(&T x) where Drawable<T> { }
+unit render<T>(&T x) where T has Drawable { }
 
 unit main() {
     Number n = { n = 5 };
-    render(&n);    // ❌ Number doesn't implement Drawable
+    render(&n);    // Number doesn't implement Drawable
 }

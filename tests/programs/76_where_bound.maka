@@ -1,17 +1,16 @@
-// `where Trait<T>` is now enforced — `T` must have an impl in `logic Trait { ... }`.
+// `where T has Trait` is enforced - `T` must have a matching `has` impl.
 data Color { int rgb; }
 
-logic Drawable {
-    unit draw(&Color self) { log(self.rgb); }
-}
+attr Drawable { unit draw(&_ self); }
+Color has Drawable { unit draw(&Color self) { log(self.rgb); } }
 
 // Generic function constrained to Drawable types.
-unit render<T>(&T x) where Drawable<T> {
+unit render<T>(&T x) where T has Drawable {
     // body intentionally empty; the bound check happens at instantiation.
 }
 
 unit main() {
     Color c = { rgb = 255 };
-    render(&c);    // Color implements Drawable — OK
+    render(&c);    // Color implements Drawable - OK
     log(0);
 }

@@ -1,15 +1,18 @@
-// §10.2 — Generic functions, type inferred from args.
+// Generic functions, type inferred from args - including a generic function
+// namespaced inside an intra-file module.
 int twice<T>(T x) {
     return 7 + 7;
 }
 
-logic Box {
-    int identity<T>(T x) {
+module boxns {
+    pub int identity<T>(T x) {
         return 42;
     }
 }
 
+import boxns.identity;
+
 unit main() {
-    log(twice(1));              // 14, T inferred = int
-    log(Box.identity(99));      // 42
+    log(twice(1));               // 14, T inferred = int
+    log(boxns.identity(99));     // 42
 }

@@ -1,28 +1,29 @@
-// §10.3 — Overloading inside a logic; concrete beats generic.
-data Player {
-    mut int hp = 100;
-}
-data Enemy {
-    mut int aggro = 0;
-}
+// Override beats default: an `attr` default method body is the fallback, and a
+// type's `has` impl overrides it (the attr+has analog of concrete-beats-generic).
+data Player { mut int hp = 100; }
+data Enemy  { mut int aggro = 0; }
+data Rock   { int mass; }
 
-logic Movement {
-    unit move<T>(&mut T x) {
-        log("generic move");
-    }
-    unit move(&mut Player p) {
+attr Movement {
+    unit move(&mut _ self) { log("generic move"); }   // default body = fallback
+}
+Player has Movement {
+    unit move(&mut Player self) {
         log("player move");
-        p.hp = p.hp - 1;
-    }
-    unit move(&mut Enemy e) {
-        log("enemy move");
+        self.hp = self.hp - 1;
     }
 }
+Enemy has Movement {
+    unit move(&mut Enemy self) { log("enemy move"); }
+}
+Rock has Movement { }   // no override -> inherits the default
 
 unit main() {
     mut Player p = { hp = 5 };
-    mut Enemy e = { aggro = 7 };
+    mut Enemy  e = { aggro = 7 };
+    mut Rock   r = { mass = 100 };
     Movement.move(&mut p);
     log(p.hp);             // 4
     Movement.move(&mut e); // enemy move
+    Movement.move(&mut r); // generic move (default)
 }

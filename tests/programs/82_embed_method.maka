@@ -4,9 +4,8 @@
 data Base { mut int x = 0; }
 data Outer { embed Base b; int label; }
 
-logic Tickable {
-    unit tick(&mut Base self) { self.x = self.x + 1; }
-}
+attr Tickable { unit tick(&mut _ self); }
+Base has Tickable { unit tick(&mut Base self) { self.x = self.x + 1; } }
 
 unit pass_base(&Base x) { log(x.x); }
 
@@ -15,5 +14,5 @@ unit main() {
     o.tick();        // promoted method call: ticks o.b.x via embed
     log(o.x);        // 11 (promoted field)
     log(o.b.x);      // 11 (same storage)
-    pass_base(&o);   // direct upcast: o : Outer → &Base via embed
+    pass_base(&o);   // direct upcast: o : Outer -> &Base via embed
 }

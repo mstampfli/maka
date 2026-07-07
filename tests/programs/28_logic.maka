@@ -1,17 +1,21 @@
-// §10 — Logic blocks as namespaces.
-logic Math {
-    int square(int x) { return x * x; }
-    int cube(int x) { return x * x * x; }
+// Intra-file modules as function namespaces (the role `logic` used to serve).
+module math {
+    pub int square(int x) { return x * x; }
+    pub int cube(int x) { return x * x * x; }
 }
 
-logic Greet {
-    unit hello() { log("hi from greet"); }
+module greet {
+    pub unit hello() { log("hi from greet"); }
 }
+
+import math.square;
+import math.cube;
+import greet.hello;
 
 unit main() {
-    int s = Math.square(5);
+    int s = math.square(5);
     log(s);                  // 25
-    int c = Math.cube(3);
+    int c = math.cube(3);
     log(c);                  // 27
-    Greet.hello();           // hi from greet
+    greet.hello();           // hi from greet
 }

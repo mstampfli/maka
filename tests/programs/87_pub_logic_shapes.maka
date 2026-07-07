@@ -1,9 +1,10 @@
-// `pub logic` exports the trait registration AND the methods inside,
-// so cross-module bound-checks and method calls both work.
+// `pub attr` + `pub has` exports the trait and its impl across modules, so a
+// consumer's `use shapes.Color.Drawable;` brings the impl into bound-check scope.
 module shapes;
 
 pub data Color { int rgb; }
 
-pub logic Drawable {
+pub attr Drawable { unit draw(&_ self); }
+pub Color has Drawable {
     unit draw(&Color self) { log(self.rgb); }
 }

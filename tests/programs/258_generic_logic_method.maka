@@ -1,10 +1,16 @@
+// A generic free function namespaced inside an intra-file module, monomorphized
+// per call: T inferred from the `Box<T>` argument.
 data Box<T> { T inner; }
-logic Peek {
-    T peek<T>(&Box<T> b) { return b.inner; }
+
+module peekns {
+    pub T peek<T>(&Box<T> b) { return b.inner; }
 }
+
+import peekns.peek;
+
 unit main() {
     Box<int>  bi = { inner = 42 };
     Box<char> bc = { inner = 'k' };
-    log(Peek.peek(&bi));    // 42
-    log(Peek.peek(&bc));    // k
+    log(peekns.peek(&bi));    // 42
+    log(peekns.peek(&bc));    // k
 }
