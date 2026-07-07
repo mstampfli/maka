@@ -210,7 +210,20 @@ fn collect_symbols(m: &Module, uri: &Url, out: &mut Vec<SymDef>) {
                 add(&f.name, f.span, format!("{}({})", f.name, params))
             }
             Item::Data(d) => add(&d.name, d.span, format!("data {}", d.name)),
-            Item::Enum(e) => add(&e.name, e.span, enum_signature(e)),
+            Item::Enum(e) => {
+                add(&e.name, e.span, enum_signature(e));
+                // Index each variant too, so `Color.Red` hovers and goes to the
+                // variant declaration (first match when a name like `None` recurs).
+                for v in &e.variants {
+                    let detail = if v.fields.is_empty() {
+                        format!("{}.{}", e.name, v.name)
+                    } else {
+                        let fs = v.fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(", ");
+                        format!("{}.{} {{ {} }}", e.name, v.name, fs)
+                    };
+                    add(&v.name, v.span, detail);
+                }
+            }
             Item::Attr(a) => add(&a.name, a.span, format!("attr {}", a.name)),
             Item::Logic(l) => add(&l.name, l.span, format!("logic {}", l.name)),
             Item::Global(g) => {

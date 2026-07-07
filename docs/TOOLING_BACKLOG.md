@@ -26,8 +26,9 @@ are queued; check them off as they land.
       Cross-file enum hover now shows the full variant list (with payload field
       names) via a shared `enum_signature`, matching the in-file path, and the
       enum name is go-to-definition navigable.
-- [ ] **Enum variants navigable.** Variants (subtypes) should be go-to-definition
-      targets and hoverable, and hovering the enum should surface them.
+- [x] **Enum variants navigable.** Each variant is indexed, so `Color.Red` hovers
+      (as `Color.Red`, with payload field names) and goes to its declaration.
+      Hovering the enum already lists the variants (`enum_signature`).
 - [ ] **General polish pass.** Make the linter + LSP "perfect": tighten hover
       output for every symbol kind, scope-aware references/rename, semantic
       tokens, quick-fixes for lint findings, etc.
