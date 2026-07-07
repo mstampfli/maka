@@ -1,0 +1,19 @@
+// A constexpr fn inside a braced module must still fold at compile time - the
+// pre-scan treats the module `{ }` as depth-transparent.
+module app;
+
+module geo {
+    constexpr int sides() { return 4; }
+    pub int perimeter() {
+        [sides()]int lens = [3; sides()];   // length folded to 4 at compile time
+        mut int n = 0;
+        for (int v in lens) { n = n + 1; }  // if the fold failed, the decl above would not compile
+        return n;                           // 4
+    }
+}
+
+import geo.perimeter;
+
+unit main() {
+    log(perimeter());   // 4
+}

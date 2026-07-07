@@ -1787,6 +1787,38 @@ int secret(int n) { return n * 7; }
 A file may declare its module name with `module path.name;` at the top.
 Without it, the file belongs to the implicit root module `<root>`.
 
+**Braced module blocks.** In addition to the single file-level `module X;`, a
+file may declare further modules with a braced block:
+
+```maka
+module app;                 // file-level default for items outside any block
+
+module math {               // a second module, declared in the same file
+    pub int square(int x) { return x * x; }
+    int helper(int x) { return x + 1; }        // private to `math`
+    pub int bump(int x) { return helper(x); }  // intra-module call, no import
+}
+
+import math.square;         // cross-module rules apply, even within one file
+import math.bump;
+
+unit main() {
+    log(square(5));         // 25  - imported free-fn call
+    log(math.bump(9));      // 10  - qualified call
+}
+```
+
+A braced `module Path { ... }` is a *real* module: its items resolve, import,
+and enforce `pub` exactly as a file-level module does, and it is called with the
+same `import`/qualified-call forms. A block's path is taken **exactly as
+written** - it is not prefixed by the enclosing file's `module` decl or by an
+outer block. To build a hierarchy, write the dotted path yourself
+(`module geo.shapes { ... }` declares `geo.shapes`). This makes modules the one
+namespacing mechanism at every granularity - across files and within a file -
+so freestanding functions are the default and a named group is just a module.
+A file still has at most one *file-level* `module X;`; a second bare
+`module Y;` is a parse error (in-file modules must be braced).
+
 ### 11.2 Per-item visibility
 
 The `pub` modifier on a top-level item makes it visible across module
@@ -1809,8 +1841,9 @@ The same `pub` rule applies to `data` and `enum` types: referencing a private
 `data Secret { ... }` from another module yields
 `` data type `Secret` is private to module `helper`; mark it `pub` to use from `caller` ``.
 
-The driver tags every parsed item with its source file's `module` declaration
-(or the implicit root if absent) and that file's import list. The resolver
+The driver tags every parsed item with its module path - the enclosing braced
+`module` block if any, otherwise the file's `module` declaration (or the
+implicit root if absent) - and that file's import list. The resolver
 stores the module path on every `FuncSig`/`StructInfo`/`EnumInfo`; the type
 checker enforces both rules at call and type-binding sites.
 

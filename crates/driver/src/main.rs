@@ -130,8 +130,9 @@ fn run() {
             .flat_map(|imp| imp.names.iter().map(|n| (imp.path.clone(), n.clone())))
             .collect();
         let file_has_imports = m.has_imports.clone();
-        for _ in &m.items {
-            merged.item_modules.push(path.clone());
+        for (idx, _) in m.items.iter().enumerate() {
+            // Braced `module Y { ... }` items carry `Y`; the rest carry the file path.
+            merged.item_modules.push(m.item_modules.get(idx).cloned().unwrap_or_else(|| path.clone()));
             merged.item_imports.push(flat_imports.clone());
             merged.item_has_imports.push(file_has_imports.clone());
         }
@@ -151,15 +152,21 @@ fn run() {
                 let abs = std::fs::canonicalize(f)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| f.clone());
-                module_files.insert(path.clone(), abs);
+                module_files.insert(path.clone(), abs.clone());
+                // Braced submodules declared inside this file share its source
+                // file for `#line` debug mapping.
+                for ip in &m.item_modules {
+                    module_files.entry(ip.clone()).or_insert_with(|| abs.clone());
+                }
                 // Flatten ImportDecl list into a Vec<(module_path, name)> the
                 // visibility checker can scan in O(n).
                 let flat_imports: Vec<(Vec<String>, String)> = m.imports.iter()
                     .flat_map(|imp| imp.names.iter().map(|n| (imp.path.clone(), n.clone())))
                     .collect();
                 let file_has_imports = m.has_imports.clone();
-                for _ in &m.items {
-                    merged.item_modules.push(path.clone());
+                for (idx, _) in m.items.iter().enumerate() {
+                    // Braced `module Y { ... }` items carry `Y`; the rest the file path.
+                    merged.item_modules.push(m.item_modules.get(idx).cloned().unwrap_or_else(|| path.clone()));
                     merged.item_imports.push(flat_imports.clone());
                     merged.item_has_imports.push(file_has_imports.clone());
                 }

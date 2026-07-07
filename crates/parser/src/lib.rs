@@ -112,9 +112,12 @@ impl Parser {
     }
 
     pub fn parse_module(mut self) -> Result<Module, ParseError> {
-        // Optional `module path.name;`
+        // Optional file-level `module path.name;`.  Only consume it here when the
+        // path is terminated by `;`; a leading `module path { ... }` is a braced
+        // block and is left for the item loop (`parse_items_into`) to handle.
         let mut module_path: Option<Vec<String>> = None;
-        if self.eat(&TokKind::Module) {
+        if self.at(&TokKind::Module) && self.module_decl_is_file_level() {
+            self.bump(); // `module`
             module_path = Some(self.parse_dotted_path()?);
             self.expect(&TokKind::Semicolon, "`;`")?;
         }
@@ -136,13 +139,79 @@ impl Parser {
         self.prescan_constexpr_fns();
         self.prescan_constexprs();
         let mut items = Vec::new();
-        while !self.at(&TokKind::Eof) {
+        // Per-item module path, parallel to `items`.  File-level items carry the
+        // file's `module X;` path; items inside a braced `module Y { ... }` block
+        // carry `Y` (see `parse_items_into`).
+        let mut item_modules: Vec<Vec<String>> = Vec::new();
+        let file_mod = module_path.clone().unwrap_or_default();
+        self.parse_items_into(&mut items, &mut item_modules, &mut imports, &mut has_imports, &file_mod, false)?;
+        Ok(Module {
+            items, module_path,
+            item_modules,
+            item_imports: Vec::new(),
+            imports,
+            has_imports,
+            item_has_imports: Vec::new(),
+        })
+    }
+
+    /// Peek: is the `module` at `self.pos` a file-level `module Path;` decl
+    /// (path terminated by `;`) rather than a braced `module Path { ... }` block?
+    fn module_decl_is_file_level(&self) -> bool {
+        let mut i = self.pos + 1; // past `module`
+        while i < self.toks.len()
+            && matches!(&self.toks[i].kind, TokKind::Ident(_) | TokKind::Dot)
+        { i += 1; }
+        i < self.toks.len() && matches!(&self.toks[i].kind, TokKind::Semicolon)
+    }
+
+    /// Parse a run of top-level items, tagging each with `cur_mod` as its module
+    /// path.  A braced `module Path { ... }` block recurses with `Path` as the
+    /// module context, so one file may declare several modules (in addition to
+    /// the file-level `module X;` default).  Such a block is a real module: its
+    /// items resolve, import, and enforce `pub` exactly as a file-level module
+    /// does.  `in_block` is true when parsing inside a `{ ... }` module body
+    /// (stop at the closing `}`); false at file scope (stop at EOF).
+    fn parse_items_into(
+        &mut self,
+        items: &mut Vec<Item>,
+        item_modules: &mut Vec<Vec<String>>,
+        imports: &mut Vec<ImportDecl>,
+        has_imports: &mut Vec<HasImport>,
+        cur_mod: &[String],
+        in_block: bool,
+    ) -> Result<(), ParseError> {
+        loop {
+            if self.at(&TokKind::Eof) {
+                // An unterminated `module { ... }` body: let `expect` name it.
+                if in_block { self.expect(&TokKind::RBrace, "`}` to close a `module` block")?; }
+                return Ok(());
+            }
+            if in_block && self.eat(&TokKind::RBrace) { return Ok(()); }
             // `import`/`use` apply module-wide regardless of position, so accept
             // them interleaved among items (not only in the prelude) - a stray
             // one used to hit the item parser and die with "expected type, got
             // Import/Use".
             if self.at(&TokKind::Import) { imports.push(self.parse_one_import()?); continue; }
             if self.at(&TokKind::Use) { has_imports.push(self.parse_one_use()?); continue; }
+            // Braced submodule: `module Path { ... }`.  Declares module `Path`
+            // (a flat path, exactly as written); the file's `module X;` decl was
+            // already consumed before this loop, so any `module` token here opens
+            // an in-file block.
+            if self.at(&TokKind::Module) {
+                self.bump(); // `module`
+                let path = self.parse_dotted_path()?;
+                if self.at(&TokKind::Semicolon) {
+                    return Err(ParseError {
+                        msg: "a file may declare only one file-level `module X;`; an in-file \
+                              module must be a braced block: `module X { ... }`".to_string(),
+                        span: self.peek_span(),
+                    });
+                }
+                self.expect(&TokKind::LBrace, "`{` to open a `module` block")?;
+                self.parse_items_into(items, item_modules, imports, has_imports, &path, true)?;
+                continue;
+            }
             // Optional `pub` modifier on top-level items.
             let is_pub = self.eat(&TokKind::Pub);
             // Module-scope constexpr decls.  The pre-scan already captured the
@@ -158,8 +227,10 @@ impl Parser {
                     let mut f = self.parse_func()?;
                     f.is_pub = is_pub;
                     items.push(Item::Func(f));
+                    item_modules.push(cur_mod.to_vec());
                 } else if let Some(decl) = self.parse_constexpr_decl(is_pub)? {
                     items.push(Item::Constexpr(decl));
+                    item_modules.push(cur_mod.to_vec());
                 }
                 continue;
             }
@@ -177,15 +248,8 @@ impl Parser {
                 _ => {}
             }
             items.push(item);
+            item_modules.push(cur_mod.to_vec());
         }
-        Ok(Module {
-            items, module_path,
-            item_modules: Vec::new(),
-            item_imports: Vec::new(),
-            imports,
-            has_imports,
-            item_has_imports: Vec::new(),
-        })
     }
 
     // Pre-scan: walk forward from `self.pos`, find every module-scope
@@ -196,6 +260,10 @@ impl Parser {
         let mut depth = 0i32;
         while self.pos < self.toks.len() && !matches!(self.toks[self.pos].kind, TokKind::Eof) {
             match &self.toks[self.pos].kind {
+                // A braced `module Path { ... }` is depth-transparent: its body
+                // stays module-scope (depth 0) so constexpr decls inside fold.
+                TokKind::Module if depth == 0 => { self.prescan_skip_module_header(); }
+                TokKind::RBrace if depth == 0 => { self.pos += 1; } // braced-module close
                 TokKind::LBrace | TokKind::LParen | TokKind::LBracket => { depth += 1; self.pos += 1; }
                 TokKind::RBrace | TokKind::RParen | TokKind::RBracket => { depth -= 1; self.pos += 1; }
                 TokKind::Constexpr if depth == 0 => {
@@ -326,11 +394,33 @@ impl Parser {
     // into `self.constexpr_fns` so the constant folder can call them.  Scans
     // forward from the current position and restores it.  Bracket-depth-aware so
     // only top-level functions are captured.
+    /// During a depth-0 prescan, consume a `module Path {` header (or a
+    /// `module Path;` file decl) so the braced body stays depth-transparent:
+    /// its module-scope constexprs are still seen at depth 0.  Leaves `self.pos`
+    /// just past the opening `{` (braced form) or the `;` (file-decl form).
+    fn prescan_skip_module_header(&mut self) {
+        self.pos += 1; // `module`
+        while self.pos < self.toks.len()
+            && matches!(&self.toks[self.pos].kind, TokKind::Ident(_) | TokKind::Dot)
+        { self.pos += 1; }
+        if self.pos < self.toks.len() && matches!(&self.toks[self.pos].kind, TokKind::LBrace) {
+            self.pos += 1; // open brace: depth-transparent
+        } else {
+            while self.pos < self.toks.len()
+                && !matches!(&self.toks[self.pos].kind, TokKind::Semicolon | TokKind::Eof)
+            { self.pos += 1; }
+        }
+    }
+
     fn prescan_constexpr_fns(&mut self) {
         let save = self.pos;
         let mut depth = 0i32;
         while self.pos < self.toks.len() && !matches!(self.toks[self.pos].kind, TokKind::Eof) {
             match &self.toks[self.pos].kind {
+                // Braced `module Path { ... }` is depth-transparent (see
+                // prescan_constexprs) so constexpr fns inside are still captured.
+                TokKind::Module if depth == 0 => { self.prescan_skip_module_header(); }
+                TokKind::RBrace if depth == 0 => { self.pos += 1; } // braced-module close
                 TokKind::LBrace | TokKind::LParen | TokKind::LBracket => { depth += 1; self.pos += 1; }
                 TokKind::RBrace | TokKind::RParen | TokKind::RBracket => { depth -= 1; self.pos += 1; }
                 TokKind::Constexpr if depth == 0 && self.constexpr_kw_starts_fn() => {

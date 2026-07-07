@@ -1,0 +1,12 @@
+// `helper` is not `pub`, so the `app` module cannot import or call it.
+module app;
+
+module math {
+    int helper(int x) { return x + 1; }   // not pub
+}
+
+import math.helper;
+
+unit main() {
+    log(math.helper(1));
+}

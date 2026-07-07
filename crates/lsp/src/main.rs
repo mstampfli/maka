@@ -340,8 +340,9 @@ fn analyze_inner(this_path: Option<std::path::PathBuf>, this_text: String, open:
             .flat_map(|imp| imp.names.iter().map(|n| (imp.path.clone(), n.clone())))
             .collect();
         let hi = m.has_imports.clone();
-        for _ in &m.items {
-            merged.item_modules.push(path.clone());
+        for (idx, _) in m.items.iter().enumerate() {
+            // Braced `module Y { ... }` items carry `Y`; the rest the file path.
+            merged.item_modules.push(m.item_modules.get(idx).cloned().unwrap_or_else(|| path.clone()));
             merged.item_imports.push(flat.clone());
             merged.item_has_imports.push(hi.clone());
         }
