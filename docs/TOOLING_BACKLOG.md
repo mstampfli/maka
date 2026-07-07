@@ -11,10 +11,12 @@ are queued; check them off as they land.
       into the stdlib source. Compiler builtins with no source (`Vec`, `push`,
       `pop`, `log`, `format`, `thread`/`spawn`/`job`/`join`, `tag`, `fields`, ...)
       resolve via a `BUILTINS` hover/completion table.
-- [ ] **Doc comments.** A standard way to document functions (and types) that the
-      server shows on hover. Pick a syntax (e.g. `///` doc lines above the decl,
-      or `//!` for module docs), have the lexer/parser retain them attached to the
-      following item, and render them in hover markdown below the signature.
+- [x] **Doc comments.** `///` lines directly above a declaration are shown on
+      hover (below the signature), for user code, cross-file, and the stdlib.
+      Implemented tooling-side (they are ordinary comments to the compiler, so no
+      lexer/parser/AST change); documented in the STYLE_GUIDE; seeded docs on key
+      stdlib items (Option, String, str_len, str_eq, str_dup, read_file,
+      int_to_str, string_new/from). Fuller stdlib docs are ongoing.
 - [x] **Signature help.** Typing a call's arguments now shows the callee's
       signature and highlights the active parameter (triggered on `(` and `,`).
       Token-based enclosing-call detection (ignores commas/parens in strings and

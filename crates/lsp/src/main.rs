@@ -496,6 +496,34 @@ fn occurrences(text: &str, name: &str) -> Vec<Range> {
     out
 }
 
+/// A `///` doc comment: the run of contiguous `///` lines immediately above the
+/// declaration on `line` (1-based), stripped of the `///` prefix and one space,
+/// joined as markdown.  Any blank or non-doc line ends the run, so only comments
+/// attached to the declaration are shown.  These are ordinary comments to the
+/// compiler; the convention is purely a tooling one.
+fn doc_above(src: &str, line: u32) -> Option<String> {
+    if line == 0 {
+        return None;
+    }
+    let lines: Vec<&str> = src.split('\n').collect();
+    let mut idx = (line as usize).min(lines.len()).saturating_sub(1); // 0-based decl line
+    let mut docs: Vec<String> = Vec::new();
+    while idx > 0 {
+        idx -= 1;
+        let t = lines[idx].trim_start();
+        if let Some(rest) = t.strip_prefix("///") {
+            docs.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+        } else {
+            break; // a blank line or code ends the doc block
+        }
+    }
+    if docs.is_empty() {
+        return None;
+    }
+    docs.reverse();
+    Some(docs.join("\n"))
+}
+
 /// Byte offset of a 0-based (line, character) position in `text` (character is
 /// treated as a UTF-16 offset, exact for the ASCII that Maka identifiers use).
 fn pos_to_byte(text: &str, pos: Position) -> usize {
@@ -857,21 +885,47 @@ impl LanguageServer for Backend {
             return Ok(Some(hover_md(format!("{} — built-in type", name))));
         }
         let a = self.analyze(&uri);
-        // Open-file local/param/decl (typed via the HIR).
+        // Determine the hover markdown and where the definition lives, so a `///`
+        // doc comment written above it can be appended.
+        let mut base: Option<String> = None;
+        let mut def: Option<(Url, u32)> = None; // (file, 1-based decl line)
         if let (Some(hir), Some(user)) = (&a.hir, &a.user_ast) {
-            if let Some((md, _)) = resolve(user, hir, &name, pos.line) {
-                return Ok(Some(hover_md(md)));
+            if let Some((md, sp)) = resolve(user, hir, &name, pos.line) {
+                base = Some(md);
+                if let Some(sp) = sp {
+                    def = Some((uri.clone(), sp.line));
+                }
             }
         }
-        // A definition in another project file.
-        if let Some(d) = a.symbol_index.iter().find(|d| d.name == name) {
-            return Ok(Some(hover_md(code_md(&d.detail))));
+        if base.is_none() {
+            // A definition in another project file or the stdlib.
+            if let Some(d) = a.symbol_index.iter().find(|d| d.name == name) {
+                base = Some(code_md(&d.detail));
+                def = Some((d.uri.clone(), d.range.start.line + 1));
+            }
         }
-        // A compiler builtin (Vec, push, thread, ...): a description, no location.
-        if let Some((_, _, doc)) = BUILTINS.iter().find(|(n, _, _)| *n == name.as_str()) {
-            return Ok(Some(hover_md(doc.to_string())));
+        let Some(mut md) = base else {
+            // A compiler builtin (Vec, push, thread, ...): a description.
+            if let Some((_, _, doc)) = BUILTINS.iter().find(|(n, _, _)| *n == name.as_str()) {
+                return Ok(Some(hover_md(doc.to_string())));
+            }
+            return Ok(None);
+        };
+        // A resolved-but-unlocated symbol (e.g. a stdlib function reached via its
+        // signature) may still have a doc in the indexed source; find its location.
+        if def.is_none() {
+            if let Some(d) = a.symbol_index.iter().find(|d| d.name == name) {
+                def = Some((d.uri.clone(), d.range.start.line + 1));
+            }
         }
-        Ok(None)
+        if let Some((u, line)) = def {
+            if let Some(src) = self.source_of(&u) {
+                if let Some(doc) = doc_above(&src, line) {
+                    md = format!("{}\n\n---\n{}", md, doc);
+                }
+            }
+        }
+        Ok(Some(hover_md(md)))
     }
 
     async fn goto_definition(
@@ -1145,6 +1199,15 @@ impl Backend {
     /// Invalidate all cached analyses (any edit can change any file cross-file).
     fn bump_version(&self) {
         self.version.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// The source text of `uri`: the open buffer if any, else read from disk (so
+    /// doc comments resolve for cross-file and stdlib definitions too).
+    fn source_of(&self, uri: &Url) -> Option<String> {
+        if let Some(t) = self.docs.get(uri) {
+            return Some(t.clone());
+        }
+        to_path(uri).and_then(|p| std::fs::read_to_string(p).ok())
     }
 
     async fn publish(&self, uri: Url) {

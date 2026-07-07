@@ -80,6 +80,23 @@ naming and the editor's Rename applies a fix you choose.
 - Plain ASCII only in source, comments, and identifiers. No smart quotes, no
   em/en dashes.
 
+### Doc comments
+
+Document a declaration with `///` lines directly above it (no blank line in
+between). These are ordinary comments to the compiler, but the language server
+shows them on hover, so they are the standard way to document a function, type,
+enum, or global:
+
+```maka
+/// Adds two integers and returns the sum.
+/// Overflow wraps, per the platform int.
+int add(int a, int b) { return a + b; }
+```
+
+Write them as short prose for the caller: what it does, what it returns, and any
+precondition (e.g. "guard the result before dereferencing"). A blank line or any
+non-`///` line ends the block, so keep the doc contiguous with what it documents.
+
 ## 3. Types and ownership
 
 Every binding states who owns the value. Pick the weakest pointer that does the

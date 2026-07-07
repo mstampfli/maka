@@ -13,6 +13,8 @@ module std;
 
 // ---- generic tagged options --------------------------------------------
 
+/// An optional value: `Some { value }` when present, `None` when absent.
+/// The prelude option type; monomorphized per element type.
 pub enum Option<T> {
     Some { T value },
     None,
@@ -83,7 +85,9 @@ pub inline T try_ok<T, E>(Result<T, E> r) {
 extern "strlen" usize __str_len(string s);
 extern "strcmp" i32   __str_cmp(string a, string b);
 
+/// The length of a borrowed string in bytes (excludes the trailing NUL).
 pub usize str_len(string s)              { return __str_len(s); }
+/// True if two borrowed strings have identical contents.
 pub bool  str_eq (string a, string b)    { return __str_cmp(a, b) == 0; }
 
 // ---- concurrency: sleep / slice composition / par_* --------------------
@@ -552,6 +556,8 @@ pub int str_hash(string s) { return __rt_str_hash(s); }
 
 // Read an entire file into an owned own *string.  Returns null if the file cannot
 // be opened.  The buffer auto-frees at scope exit.
+/// Read a whole file into a newly allocated string, or `null` on error.
+/// Guard the result (`if (s != null)`) before dereferencing.
 pub own *string read_file(string path) { return __rt_read_file(path); }
 
 // Write `content` to `path`, creating/truncating it.  Returns true on success.
@@ -585,6 +591,7 @@ pub Vec<own *string> read_lines(string path) {
 }
 
 // An owned copy of a string (heap own *string that auto-frees).
+/// A freshly allocated owning copy of a borrowed string (always non-null).
 pub own *string str_dup(string s) { int n = str_len(s) as int; return __rt_substr(s, 0, n, n); }
 
 // =====================================================================
@@ -601,18 +608,21 @@ pub own *string str_dup(string s) { int n = str_len(s) as int; return __rt_subst
 // `len`, etc.  Call them with dot syntax: `s.length()`, `s.push('x')`,
 // `s.as_str()`.  Construction is via the free `string_new` / `string_from`.
 // =====================================================================
+/// A growable, heap-owned, NUL-terminated string. Construct with `string_new`
+/// or `string_from`; grow with `push` / `push_str`; borrow a view with
+/// `as_str()`. Auto-frees on drop.
 pub data String {
     mut Vec<char> buf;     // chars followed by a trailing NUL; length() == buf.len - 1
 }
 
-// An empty growable string.
+/// An empty growable string.
 pub String string_new() {
     mut Vec<char> b = [];
     b.push(0 as char);                 // trailing NUL
     return String { buf = b };
 }
 
-// A growable owned copy of a borrowed string.
+/// A growable owned copy of a borrowed string.
 pub String string_from(string s) {
     mut Vec<char> b = [];
     mut int i = 0;
@@ -925,6 +935,7 @@ extern "__maka_rt_str_to_int"   int    __str_to_int (string s);
 extern "__maka_rt_int_to_str"   own *string __int_to_str (int n);
 extern "__maka_rt_str_find"     int    __str_find   (string s, string needle);
 pub int    str_to_int(string s)            { return __str_to_int(s); }
+/// Format an integer as a freshly allocated string (always non-null).
 pub own *string int_to_str(int n)               { return __int_to_str(n); }
 pub int    str_find  (string s, string needle) { return __str_find(s, needle); }
 
