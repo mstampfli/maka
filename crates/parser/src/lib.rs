@@ -241,7 +241,6 @@ impl Parser {
                 Item::Data(d)   => d.is_pub = is_pub,
                 Item::Enum(e)   => e.is_pub = is_pub,
                 Item::Extern(e) => e.is_pub = is_pub,
-                Item::Logic(l)  => l.is_pub = is_pub,
                 Item::Attr(a)   => a.is_pub = is_pub,
                 Item::Has(h)    => h.is_pub = is_pub,
                 Item::Global(g) => g.is_pub = is_pub,
@@ -672,7 +671,6 @@ impl Parser {
             TokKind::Clink => self.parse_clink(),
             TokKind::Rblock => self.parse_rblock(),
             TokKind::Rdep => self.parse_rdep(),
-            TokKind::Logic => Ok(Item::Logic(self.parse_logic()?)),
             TokKind::Attr => Ok(Item::Attr(self.parse_attr()?)),
             TokKind::Inline => Ok(Item::Func(self.parse_func()?)),
             TokKind::Gate => Ok(Item::Func(self.parse_func()?)),
@@ -856,18 +854,6 @@ impl Parser {
         let ok = self.parse_type().is_ok() && matches!(self.peek(), TokKind::Has);
         self.pos = save;
         ok
-    }
-
-    fn parse_logic(&mut self) -> Result<LogicDecl, ParseError> {
-        let kw = self.expect(&TokKind::Logic, "`logic`")?;
-        let (name, _) = self.expect_ident("logic name")?;
-        self.expect(&TokKind::LBrace, "`{`")?;
-        let mut funcs = Vec::new();
-        while !self.at(&TokKind::RBrace) {
-            funcs.push(self.parse_func()?);
-        }
-        self.expect(&TokKind::RBrace, "`}`")?;
-        Ok(LogicDecl { name, funcs, is_pub: false, span: kw.span })
     }
 
     fn parse_type_params(&mut self) -> Result<Vec<String>, ParseError> {

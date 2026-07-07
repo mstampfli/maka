@@ -792,15 +792,6 @@ pub enum HStmt {
     Propagate { value: Option<HExpr>, /* owning locals of THIS frame to free before the early-return */ heap_drops: Vec<LocalId>, span: Span },
 }
 
-/// Global symbol table assembled before per-function type checking.
-#[derive(Debug, Clone)]
-pub struct LogicInfo {
-    pub name: String,
-    /// FuncIds that belong to this logic, in declaration order.
-    pub funcs: Vec<FuncId>,
-    pub span: Span,
-}
-
 /// Registered `attr Name { sigs }` declaration.  Stores each method's expected
 /// shape (param types and return, in placeholder form using `_` for the impl
 /// type) and the optional default body the `has` impl inherits when it doesn't
@@ -878,7 +869,6 @@ pub struct SymTab {
     pub enums: Vec<EnumInfo>,
     pub sigs: Vec<FuncSig>,
     pub funcs: Vec<HFunc>,
-    pub logics: Vec<LogicInfo>,
     /// `attr Name { ... }` declarations, indexed by name for `<T: Attr>` /
     /// `where T has Attr` validity checks.
     pub attrs: Vec<AttrInfo>,
@@ -988,9 +978,6 @@ impl SymTab {
             .map(|(i, s)| (FuncId(i as u32), s))
             .collect()
     }
-    pub fn logic_by_name(&self, n: &str) -> Option<&LogicInfo> {
-        self.logics.iter().find(|l| l.name == n)
-    }
     pub fn attr_by_name(&self, n: &str) -> Option<&AttrInfo> {
         self.attrs.iter().find(|a| a.name == n)
     }
@@ -998,9 +985,9 @@ impl SymTab {
     pub fn enum_info(&self, id: EnumId) -> &EnumInfo { &self.enums[id.0 as usize] }
     pub fn func_sig(&self, id: FuncId) -> &FuncSig { &self.sigs[id.0 as usize] }
 
-    /// True if `name` names a trait - a `logic` block OR an `attr`.
+    /// True if `name` names a trait (an `attr`).
     pub fn is_trait(&self, name: &str) -> bool {
-        self.logic_by_name(name).is_some() || self.attr_by_name(name).is_some()
+        self.attr_by_name(name).is_some()
     }
 
     /// Every method-impl `FuncId` tagged with trait `name`.  For a `logic` these

@@ -850,13 +850,6 @@ impl SymTab {
                     scan_struct_insts(&sym, &f.ret, &f.type_params, &mut struct_inst_requests, &mut errors);
                     scan_block(&sym, &f.body, &f.type_params, &mut struct_inst_requests, &mut errors);
                 }
-                ast::Item::Logic(l) => {
-                    for f in &l.funcs {
-                        for p in &f.params { scan_struct_insts(&sym, &p.ty, &f.type_params, &mut struct_inst_requests, &mut errors); }
-                        scan_struct_insts(&sym, &f.ret, &f.type_params, &mut struct_inst_requests, &mut errors);
-                        scan_block(&sym, &f.body, &f.type_params, &mut struct_inst_requests, &mut errors);
-                    }
-                }
                 ast::Item::Has(h) => {
                     // §10.4: include the receiver's own type variables in scope
                     // when scanning impl-method types — `Result<T, E> has Foo {
@@ -1084,78 +1077,6 @@ impl SymTab {
                         imports: item_imports.clone(),
                         has_imports: Vec::new(),
                         where_bounds: Vec::new(),
-                    });
-                }
-                ast::Item::Logic(l) => {
-                    if sym.logic_by_name(&l.name).is_some() {
-                        errors.push(SemaError { msg: format!("duplicate logic `{}`", l.name), span: l.span });
-                        continue;
-                    }
-                    let mut func_ids = Vec::new();
-                    // Count overloads for unique mangling.
-                    let mut name_seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-                    // Track which receiver types we've already recorded a HasImpl for
-                    // (a logic block may declare multiple methods on the same receiver).
-                    let mut recorded_receivers: std::collections::HashSet<String> = std::collections::HashSet::new();
-                    for f in &l.funcs {
-                        let (param_tys, ret) = resolve_signature(&sym, &f.params, &f.ret, &f.type_params, &mut errors);
-                        // Record that the first parameter's underlying struct implements
-                        // the trait named by this logic block — bridge into both the legacy
-                        // `trait_impls` index and the visibility-aware `has_impls` list.
-                        if let Some(first_ty) = param_tys.first() {
-                            let key = underlying_struct_key(&sym, first_ty);
-                            if let Some(k) = key {
-                                sym.trait_impls.entry(l.name.clone()).or_default().insert(k.clone());
-                                if recorded_receivers.insert(k.clone()) {
-                                    sym.has_impls.push(HasImpl {
-                                        attr_name: l.name.clone(),
-                                        type_key: k,
-                                        attr_args: Vec::new(),
-                                        is_pub: l.is_pub,
-                                        module_path: item_module.clone(),
-                                        func_ids: Vec::new(),
-                                        assoc_type_defs: Vec::new(),
-                                        receiver_tyvars: Vec::new(),
-                                        receiver_pattern: first_ty.clone(),
-                                    });
-                                }
-                            }
-                        }
-                        let param_names: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
-                        let overload_idx = *name_seen.entry(f.name.clone()).and_modify(|v| *v += 1).or_insert(0);
-                        let c_name = if overload_idx == 0 {
-                            format!("{}__{}", l.name, f.name)
-                        } else {
-                            format!("{}__{}_{}", l.name, f.name, overload_idx)
-                        };
-                        let fid = FuncId(sym.sigs.len() as u32);
-                        sym.sigs.push(FuncSig {
-                            name: f.name.clone(),
-                            param_tys, param_names, ret,
-                            is_extern: false,
-                            c_name,
-                            logic: Some(l.name.clone()),
-                            type_params: f.type_params.clone(),
-                            is_inline: f.is_inline,
-                            is_gate: f.is_gate,
-                            is_variadic: false,
-                            // `pub logic` exports every method inside it.  Per-method
-                            // `pub` on a logic-block method isn't a thing in the
-                            // grammar — visibility flows from the block.
-                            is_pub: l.is_pub || f.is_pub,
-                            is_export: false,
-                            module_path: item_module.clone(),
-                            imports: item_imports.clone(),
-                            has_imports: item_has_imports.clone(),
-                            where_bounds: Vec::new(),
-                        });
-                        sym.ast_funcs.insert(fid.0, f.clone());
-                        func_ids.push(fid);
-                    }
-                    sym.logics.push(LogicInfo {
-                        name: l.name.clone(),
-                        funcs: func_ids,
-                        span: l.span,
                     });
                 }
                 ast::Item::Global(_) => {

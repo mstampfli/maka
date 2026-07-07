@@ -269,7 +269,6 @@ fn collect_symbols(m: &Module, uri: &Url, out: &mut Vec<SymDef>) {
                 }
             }
             Item::Attr(a) => add(&a.name, a.span, format!("attr {}", a.name)),
-            Item::Logic(l) => add(&l.name, l.span, format!("logic {}", l.name)),
             Item::Global(g) => {
                 add(&g.name, g.span, format!("{}{}", if g.is_mut { "mut " } else { "" }, g.name))
             }
@@ -966,7 +965,6 @@ fn document_symbols(m: &Module) -> Vec<DocumentSymbol> {
                 out.push(sym(e.name.clone(), SymbolKind::ENUM, e.span, variants));
             }
             Item::Attr(a) => out.push(sym(a.name.clone(), SymbolKind::INTERFACE, a.span, vec![])),
-            Item::Logic(l) => out.push(sym(l.name.clone(), SymbolKind::INTERFACE, l.span, vec![])),
             Item::Global(g) => out.push(sym(g.name.clone(), SymbolKind::VARIABLE, g.span, vec![])),
             Item::Constexpr(c) => out.push(sym(c.name.clone(), SymbolKind::CONSTANT, c.span, vec![])),
             _ => {}
@@ -977,7 +975,7 @@ fn document_symbols(m: &Module) -> Vec<DocumentSymbol> {
 
 const KEYWORDS: &[&str] = &[
     "if", "else", "while", "for", "in", "break", "continue", "match", "yield", "return",
-    "propagate", "unsafe", "data", "enum", "attr", "has", "logic", "module", "import", "use",
+    "propagate", "unsafe", "data", "enum", "attr", "has", "module", "import", "use",
     "type", "embed", "where", "dyn", "some", "mut", "const", "own", "raw", "pub", "inline",
     "gate", "export", "constexpr", "thread_local", "extern", "alloc", "free", "transfer",
     "share", "as", "cinclude", "cblock", "clink", "rblock", "rdep", "true", "false", "null",

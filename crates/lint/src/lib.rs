@@ -227,12 +227,6 @@ fn lint_item(it: &Item, out: &mut Vec<Finding>) {
                 lint_func(f, out);
             }
         }
-        Item::Logic(l) => {
-            check(&l.name, l.span, NameKind::Type, out);
-            for f in &l.funcs {
-                lint_func(f, out);
-            }
-        }
         Item::Has(h) => {
             // The receiver/attr names are references, not declarations, so only
             // the method bodies are the impl's own to style.
@@ -358,7 +352,6 @@ fn item_span(it: &Item) -> Span {
         Item::Data(d) => d.span,
         Item::Enum(e) => e.span,
         Item::Attr(a) => a.span,
-        Item::Logic(l) => l.span,
         Item::Has(h) => h.span,
         Item::Func(f) => f.span,
         Item::Global(g) => g.span,

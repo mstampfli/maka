@@ -531,17 +531,6 @@ pub struct DataDecl {
 }
 
 #[derive(Debug, Clone)]
-pub struct LogicDecl {
-    pub name: String,
-    pub funcs: Vec<FuncDecl>,
-    /// `pub logic Trait { ... }` — exports the trait registration and every
-    /// method inside.  Without `pub`, the logic block and its methods are
-    /// file-private (cannot be referenced from another module).
-    pub is_pub: bool,
-    pub span: Span,
-}
-
-#[derive(Debug, Clone)]
 pub struct VariantDecl {
     pub name: String,
     /// Fields for tagged variants; empty for payload-less variants.
@@ -580,7 +569,6 @@ pub enum Item {
     Data(DataDecl),
     Enum(EnumDecl),
     Extern(ExternDecl),
-    Logic(LogicDecl),
     /// `attr Name { signatures }` — declares an attribute (trait) with method signatures
     /// and optional default bodies.  The signatures use `_` as a placeholder for the
     /// implementing type.

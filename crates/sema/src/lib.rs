@@ -60,11 +60,6 @@ fn lambda_lift(mut m: maka_ast::Module) -> maka_ast::Module {
             maka_ast::Item::Func(f) => {
                 lift_block(&mut f.body, &mut counter, &mut bucket, false);
             }
-            maka_ast::Item::Logic(l) => {
-                for f in &mut l.funcs {
-                    lift_block(&mut f.body, &mut counter, &mut bucket, false);
-                }
-            }
             _ => {}
         }
         for nf in bucket { lifted.push((idx, nf)); }
@@ -276,28 +271,6 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                         funcs.push(hfunc);
                     }
                     Err(es) => errors.extend(es),
-                }
-            }
-            maka_ast::Item::Logic(l) => {
-                let logic = sym.logic_by_name(&l.name).map(|li| li.funcs.clone()).unwrap_or_default();
-                for (i, f) in l.funcs.iter().enumerate() {
-                    if !f.type_params.is_empty() { continue; }
-                    let forced = logic.get(i).copied();
-                    let tc = TypeChecker::new_with_logic(&sym, Some(&l.name));
-                    match tc.check_func_with_id(f, forced) {
-                        Ok((hfunc, reqs, synth)) => {
-                            for s in synth.structs { sym.structs.push(s); }
-                            for s in synth.sigs { sym.sigs.push(s); }
-                            let __ss = funcs.len();
-                        for fnc in synth.funcs { funcs.push(fnc); pending_reqs.push(Vec::new()); }
-                        if funcs.len() > __ss { synth_of_parent.insert(funcs.len(), __ss..funcs.len()); }
-                            sym.send_probes.extend(synth.send_probes);
-                            sym.sync_probes.extend(synth.sync_probes);
-                            pending_reqs.push(reqs);
-                            funcs.push(hfunc);
-                        }
-                        Err(es) => errors.extend(es),
-                    }
                 }
             }
             maka_ast::Item::Has(h) => {

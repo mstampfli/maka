@@ -2215,7 +2215,7 @@ impl<'a> TypeChecker<'a> {
         args: &[ast::Expr],
         sp: Span,
     ) -> HExpr {
-        if self.sym.attr_by_name(attr).is_none() && self.sym.logic_by_name(attr).is_none() {
+        if !self.sym.is_trait(attr) {
             self.err(format!("unknown attr `{}` in qualified call `{}::{}`", attr, attr, name), sp);
             return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
         }
@@ -2252,9 +2252,9 @@ impl<'a> TypeChecker<'a> {
         let (name, qualifier) = match callee {
             ast::Expr::Ident(n, _) => (n.clone(), None),
             ast::Expr::Field { base, name, .. } => {
-                if let ast::Expr::Ident(logic_name, _) = base.as_ref() {
-                    if self.sym.logic_by_name(logic_name).is_some() {
-                        (name.clone(), Some(logic_name.clone()))
+                if let ast::Expr::Ident(trait_name, _) = base.as_ref() {
+                    if self.sym.is_trait(trait_name) {
+                        (name.clone(), Some(trait_name.clone()))
                     } else { return false; }
                 } else { return false; }
             }
@@ -2474,7 +2474,7 @@ impl<'a> TypeChecker<'a> {
                         } else {
                             (name.clone(), None, Some((**base).clone()))
                         }
-                    } else if self.sym.logic_by_name(qual).is_some() || self.sym.attr_by_name(qual).is_some() {
+                    } else if self.sym.is_trait(qual) {
                         (name.clone(), Some(qual.clone()), None)
                     } else if self.is_module_name(qual) {
                         // Module-qualified call: filter candidates by module path.
