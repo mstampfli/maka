@@ -1,27 +1,30 @@
-// Extended operator overloading: BitAnd/BitOr/BitXor/Shl/Shr, unary Neg, Index.
+// Extended operator overloading: BitAnd (stdlib trait), unary Neg and Index
+// (declared here - they are not stdlib traits), all via attr + has.
 data Vec3 {
     int x;
     int y;
     int z;
 }
 
-logic BitAnd {
-    Vec3 band(Vec3 a, Vec3 b) {
-        return Vec3 { x = a.x & b.x, y = a.y & b.y, z = a.z & b.z };
+Vec3 has BitAnd {
+    Vec3 band(&Vec3 self, &Vec3 b) {
+        return Vec3 { x = self.x & b.x, y = self.y & b.y, z = self.z & b.z };
     }
 }
 
-logic Neg {
-    Vec3 neg(Vec3 a) {
-        return Vec3 { x = -a.x, y = -a.y, z = -a.z };
+attr Neg { _ neg(&_ self); }
+Vec3 has Neg {
+    Vec3 neg(&Vec3 self) {
+        return Vec3 { x = -self.x, y = -self.y, z = -self.z };
     }
 }
 
-logic Index {
-    int index(Vec3 a, int i) {
-        if (i == 0) { return a.x; }
-        if (i == 1) { return a.y; }
-        return a.z;
+attr Index { int index(&_ self, int i); }
+Vec3 has Index {
+    int index(&Vec3 self, int i) {
+        if (i == 0) { return self.x; }
+        if (i == 1) { return self.y; }
+        return self.z;
     }
 }
 

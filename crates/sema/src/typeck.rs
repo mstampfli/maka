@@ -1614,28 +1614,17 @@ impl<'a> TypeChecker<'a> {
             Shr => ("Shr", "shr"),
             And | Or => return None,
         };
-        // Operator operands auto-borrow: a value operand matches a `&T` parameter,
-        // so an overload taking `&Self` (e.g. `add(&String,&String)`,
-        // `eq(&String,&String)`) does NOT consume its operands.
-        let arg_ok = |param: &HType, actual: &HType, tps: &[String]| -> bool {
-            if param_compatible(param, actual, tps) { return true; }
-            if let HType::Ref { inner, .. } = param {
-                if !matches!(actual, HType::Ref { .. }) && param_compatible(inner, actual, tps) {
-                    return true;
-                }
-            }
-            false
-        };
         // Candidates: any impl method named `fn_name` registered under the operator's
         // attr/logic name.  Both `logic` blocks and `attr` + `has` impls tag their
         // methods with `logic = Some(<name>)`, so a single sig scan covers both.
+        // Operands auto-borrow (`op_arg_ok`), so a `&Self` receiver is non-consuming.
         let cand = self.sym.sigs.iter().enumerate()
             .filter(|(_, s)| s.name == fn_name
                 && s.logic.as_deref() == Some(logic_name)
                 && s.param_tys.len() == 2)
             .map(|(i, s)| (FuncId(i as u32), s.clone()))
-            .find(|(_, sig)| arg_ok(&sig.param_tys[0], &l.ty, &sig.type_params)
-                && arg_ok(&sig.param_tys[1], &r.ty, &sig.type_params))?;
+            .find(|(_, sig)| op_arg_ok(&sig.param_tys[0], &l.ty, &sig.type_params)
+                && op_arg_ok(&sig.param_tys[1], &r.ty, &sig.type_params))?;
         let (fid, sig) = cand;
         let ret = sig.ret.clone();
         let lh = self.op_operand(l.clone(), &sig.param_tys[0]);
@@ -1736,19 +1725,18 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn try_unary_overload(&mut self, logic_name: &str, fn_name: &str, h: &HExpr, sp: Span) -> Option<HExpr> {
-        let info = self.sym.logic_by_name(logic_name)?.clone();
-        let cand = info.funcs.iter().find_map(|fid| {
-            let sig = self.sym.func_sig(*fid);
-            if sig.name == fn_name && sig.param_tys.len() == 1 {
-                if param_compatible(&sig.param_tys[0], &h.ty, &sig.type_params) {
-                    return Some((*fid, sig.clone()));
-                }
-            }
-            None
-        })?;
+    fn try_unary_overload(&mut self, trait_name: &str, fn_name: &str, h: &HExpr, sp: Span) -> Option<HExpr> {
+        // Any impl method named `fn_name` under the operator's trait name - both
+        // `logic` blocks and `attr` + `has` impls tag their methods with
+        // `logic = Some(<name>)`, so one sig scan covers both sources.
+        let cand = self.sym.sigs.iter().enumerate()
+            .filter(|(_, s)| s.name == fn_name
+                && s.logic.as_deref() == Some(trait_name)
+                && s.param_tys.len() == 1)
+            .map(|(i, s)| (FuncId(i as u32), s.clone()))
+            .find(|(_, sig)| op_arg_ok(&sig.param_tys[0], &h.ty, &sig.type_params))?;
         let (fid, sig) = cand;
-        let arg = self.coerce(h.clone(), &sig.param_tys[0]);
+        let arg = self.op_operand(h.clone(), &sig.param_tys[0]);
         let ret = sig.ret.clone();
         Some(HExpr {
             kind: HExprKind::Call { callee: fid, args: vec![arg] },
@@ -2178,27 +2166,24 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn try_index_overload_or_err(&mut self, bh: HExpr, ih: HExpr, sp: Span) -> HExpr {
-        if let Some(info) = self.sym.logic_by_name("Index").cloned() {
-            let cand = info.funcs.iter().find_map(|fid| {
-                let sig = self.sym.func_sig(*fid);
-                if sig.name == "index" && sig.param_tys.len() == 2 {
-                    if param_compatible(&sig.param_tys[0], &bh.ty, &sig.type_params)
-                        && param_compatible(&sig.param_tys[1], &ih.ty, &sig.type_params) {
-                        return Some((*fid, sig.clone()));
-                    }
-                }
-                None
-            });
-            if let Some((fid, sig)) = cand {
-                let lh = self.coerce(bh, &sig.param_tys[0]);
-                let rh = self.coerce(ih, &sig.param_tys[1]);
-                let ret = sig.ret.clone();
-                return HExpr {
-                    kind: HExprKind::Call { callee: fid, args: vec![lh, rh] },
-                    ty: ret,
-                    span: sp,
-                };
-            }
+        // `index` impls under the `Index` trait, from a `logic` block or an
+        // `attr` + `has` impl (both tag the sig with `logic = Some("Index")`).
+        let cand = self.sym.sigs.iter().enumerate()
+            .filter(|(_, s)| s.name == "index"
+                && s.logic.as_deref() == Some("Index")
+                && s.param_tys.len() == 2)
+            .map(|(i, s)| (FuncId(i as u32), s.clone()))
+            .find(|(_, sig)| op_arg_ok(&sig.param_tys[0], &bh.ty, &sig.type_params)
+                && op_arg_ok(&sig.param_tys[1], &ih.ty, &sig.type_params));
+        if let Some((fid, sig)) = cand {
+            let lh = self.op_operand(bh, &sig.param_tys[0]);
+            let rh = self.op_operand(ih, &sig.param_tys[1]);
+            let ret = sig.ret.clone();
+            return HExpr {
+                kind: HExprKind::Call { callee: fid, args: vec![lh, rh] },
+                ty: ret,
+                span: sp,
+            };
         }
         self.err("indexing on non-array/slice/vector (no `Index.index` overload found)", sp);
         HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp }
@@ -6500,6 +6485,20 @@ pub fn concretize_generic_patterns(t: &HType, sym: &SymTab) -> HType {
 /// Check if an argument's type is compatible with a parameter type (possibly generic).
 pub fn param_compatible(param: &HType, actual: &HType, type_params: &[String]) -> bool {
     param_compatible_impl(param, actual, type_params, None)
+}
+
+/// Operator operands auto-borrow: a value operand matches a `&T` parameter, so
+/// an overload taking `&Self` (e.g. `add(&Vec2,&Vec2)`, `neg(&Vec3)`,
+/// `index(&Vec3,int)`) does NOT consume its operands.  Shared by the binary,
+/// unary, and index operator-overload paths.
+fn op_arg_ok(param: &HType, actual: &HType, type_params: &[String]) -> bool {
+    if param_compatible(param, actual, type_params) { return true; }
+    if let HType::Ref { inner, .. } = param {
+        if !matches!(actual, HType::Ref { .. }) && param_compatible(inner, actual, type_params) {
+            return true;
+        }
+    }
+    false
 }
 
 /// SymTab-aware variant — needed when the param contains `GenericPattern`

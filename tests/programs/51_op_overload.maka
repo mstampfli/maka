@@ -1,38 +1,39 @@
-// Operator overloading via logic dispatch.
+// Operator overloading via attr + has dispatch, using the stdlib operator
+// traits (Add / Mul / Eq).  A single `Type has Op { ... }` impl is all it takes.
 data Vec2 {
     int x;
     int y;
 }
 
-logic Add {
-    Vec2 add(Vec2 a, Vec2 b) {
-        return Vec2 { x = a.x + b.x, y = a.y + b.y };
+Vec2 has Add {
+    Vec2 add(&Vec2 self, &Vec2 b) {
+        return Vec2 { x = self.x + b.x, y = self.y + b.y };
     }
 }
 
-logic Mul {
-    Vec2 mul(Vec2 a, int k) {
-        return Vec2 { x = a.x * k, y = a.y * k };
+Vec2 has Mul<int> {
+    Vec2 mul(&Vec2 self, &int k) {
+        return Vec2 { x = self.x * k, y = self.y * k };
     }
 }
 
-logic Eq {
-    bool eq(Vec2 a, Vec2 b) {
-        return (a.x == b.x) && (a.y == b.y);
+Vec2 has Eq {
+    bool eq(&Vec2 self, &Vec2 b) {
+        return (self.x == b.x) && (self.y == b.y);
     }
 }
 
 unit main() {
     Vec2 a = Vec2 { x = 1, y = 2 };
     Vec2 b = Vec2 { x = 10, y = 20 };
-    Vec2 c = a + b;            // operator → Add.add(a, b)
+    Vec2 c = a + b;            // operator -> Add.add(a, b)
     log(c.x);                  // 11
     log(c.y);                  // 22
 
-    Vec2 d = a * 3;            // operator → Mul.mul(a, 3)
+    Vec2 d = a * 3;            // operator -> Mul.mul(a, 3)
     log(d.x);                  // 3
     log(d.y);                  // 6
 
-    if (a == Vec2 { x = 1, y = 2 }) { log("equal"); }   // → Eq.eq
+    if (a == Vec2 { x = 1, y = 2 }) { log("equal"); }   // -> Eq.eq
     if (a == b) { log("nope"); } else { log("differs"); }
 }
