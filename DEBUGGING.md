@@ -78,16 +78,19 @@ C/C++ (cpptools, gdb):
 
 A `maka build` puts the binary at `target/<project-name>`; point `program` at it.
 
-## What works, and one rough edge
+## What works
 
-Working: source-level breakpoints, stepping (`next`/`step`), a Maka backtrace,
-and reading variable *values*.
+Source-level breakpoints, stepping (`next`/`step`), a Maka backtrace, and
+reading variables by their **Maka names**: a parameter `a`, a local `total`
+show as `a`, `total` (not `a_0`, `total_3`). The compiler emits each local with
+its readable Maka name, only falling back to a unique `name_<id>` spelling when
+that name would clash (a shadowed name, or a function/type/runtime symbol of the
+same name), so gdb, lldb, and the VS Code variables view all read clean names
+straight from DWARF.
 
-Rough edge: **variable names** appear with their emitted-C spelling - a parameter
-`a` shows as `a_0`, a local `s` as `s`, a global `g` as `__maka_global__g`.
-The values are correct; only the names carry the mangling. A DWARF rename / gdb
-pretty-printer to show clean Maka names (and Maka-aware pretty-printing of
-`Vec`/`String`/enums) is a planned follow-up.
+Remaining rough edges: a module-scope **global** `g` still shows as
+`__maka_global__g` (the prefix keeps it distinct from C globals), and there is
+no Maka-aware pretty-printing of `Vec`/`String`/enums yet - both are follow-ups.
 
 ## Optimized builds
 

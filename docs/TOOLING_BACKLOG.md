@@ -47,9 +47,21 @@ are queued; check them off as they land.
       explicit form (a `::<>` turbofish, `id::<int>(5)`, avoids the ambiguity)
       as an optional override; keep argument inference as the default.
 
+## Debugger
+
+- [x] **Readable variable names.** Codegen emits each local with its Maka name
+      (`a`, `total`), suffixing `_<id>` only on a genuine clash; gdb/lldb/VS Code
+      show clean names from DWARF and the generated C is readable. (Globals still
+      carry the `__maka_global__` prefix; Maka-aware pretty-printing of
+      `Vec`/`String`/enums is a follow-up.)
+
 ## CLI
 
 - [x] **`maka` not found in the terminal.** Fixed: `install.sh` builds release
       and installs both `maka` and `makac` to `~/.cargo/bin` (or `$BINDIR`), so
       `maka build/run/test/fmt/lint` work from any project directory. Documented
       in the README.
+- [ ] **`maka add`.** Real dependency management. Maka declares deps in source
+      (`rdep name = "ver";` for Rust crates, `cinclude`/`clink` for C), so `maka
+      add` currently only prints guidance. Decide whether to insert the directive
+      into a chosen source file / a deps hub, and do it.

@@ -78,6 +78,13 @@ struct Cx<'a> {
     /// copy) - a read-only for-each element bound to `&elem[i]`, or a by-ref
     /// struct parameter.  Every use of such a local is emitted as `(*name)`.
     aliased_locals: std::collections::HashSet<u32>,
+    /// The chosen C name of each local of the function currently being emitted,
+    /// keyed by `LocalId.0`.  Built once per function (`build_local_names`): a
+    /// local keeps its readable Maka name when that is unambiguous, and only
+    /// falls back to the unique `name_<id>` spelling on a genuine clash (a
+    /// shadowed name, a function/type of the same name, a runtime symbol).  This
+    /// is what makes the emitted C - and therefore gdb/lldb/DWARF - readable.
+    cur_local_names: std::collections::HashMap<u32, String>,
     /// In-scope loop induction variables proven to stay within `[0, bound)` by a
     /// for-range loop guard - `(counter local id, bound)`.  Lets indexing skip
     /// the bounds check: a constant bound covers fixed arrays of length >= it; a
@@ -156,6 +163,7 @@ impl<'a> Cx<'a> {
             closure_trampolines: Default::default(),
             drop_owns: Default::default(),
             aliased_locals: Default::default(),
+            cur_local_names: Default::default(),
             bounded_vars: Vec::new(),
             inline_call_seq: 0,
             inline_ret_stack: Vec::new(),
@@ -244,9 +252,12 @@ impl<'a> Cx<'a> {
             self.wl(&format!("extern void __maka_drop_{}(void*);", c_ident(label)));
         }
 
-        // Forward decls (non-extern)
+        // Forward decls (non-extern).  Build the local-name table first so a
+        // prototype's parameter names match the definition's (the table is a
+        // deterministic function of `f`, so both passes agree).
         for f in &funcs {
             if self.sym.func_sig(f.id).is_inline { continue; }
+            self.cur_local_names = self.build_local_names(f);
             let sig = self.func_signature(f);
             self.wl(&format!("{};", sig));
         }
@@ -5905,12 +5916,12 @@ impl<'a> Cx<'a> {
         else {
             let parts: Vec<String> = f.params.iter().map(|id| {
                 let li = &f.locals[id.0 as usize];
-                self.c_decl(&li.ty.strip_heap().clone(), &local_name(*id, &li.name))
+                self.c_decl(&li.ty.strip_heap().clone(), &self.local_name(*id, &li.name))
             }).collect();
             // For heap params we still use T* (heap-storage). Use c_decl on the heap-wrapped type instead.
             let parts2: Vec<String> = f.params.iter().map(|id| {
                 let li = &f.locals[id.0 as usize];
-                self.c_decl(&li.ty, &local_name(*id, &li.name))
+                self.c_decl(&li.ty, &self.local_name(*id, &li.name))
             }).collect();
             let _ = parts;
             out.push_str(&parts2.join(", "));
@@ -7629,9 +7640,72 @@ impl<'a> Cx<'a> {
         self.w("}\n");
     }
 
+    /// The C name of a local in the function being emitted, from the per-function
+    /// table built by `build_local_names`.  There is deliberately NO fallback: a
+    /// missing entry means a local was named before its function's table was
+    /// installed (a new emission path that forgot to set `cur_local_names`), which
+    /// would silently emit a wrong or mangled name.  Fail loudly instead.
+    fn local_name(&self, id: LocalId, name: &str) -> String {
+        match self.cur_local_names.get(&id.0) {
+            Some(n) => n.clone(),
+            None => panic!(
+                "codegen bug: local `{}` (id {}) has no name-table entry; a code \
+                 path emitted a local without first building `cur_local_names` for \
+                 its function (see build_local_names / emit_func / func_signature)",
+                name, id.0
+            ),
+        }
+    }
+
+    /// Assign each of `f`'s locals a C name: its readable `c_ident(name)` when
+    /// unambiguous, else the unique `name_<id>` form.  Reserves function, struct,
+    /// enum, and global names (a local must never shadow a callable or a type in
+    /// C) and the runtime's `maka`/`__` prefixes, and guarantees the resulting
+    /// set is collision-free by construction.
+    fn build_local_names(&self, f: &HFunc) -> std::collections::HashMap<u32, String> {
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for x in &self.sym.funcs {
+            used.insert(c_ident(&x.name));
+        }
+        for x in &self.sym.sigs {
+            used.insert(c_ident(&x.name));
+        }
+        for x in &self.sym.structs {
+            used.insert(c_ident(&x.name));
+        }
+        for x in &self.sym.enums {
+            used.insert(c_ident(&x.name));
+        }
+        for x in &self.sym.globals {
+            used.insert(c_ident(&x.name));
+        }
+        let mut map = std::collections::HashMap::new();
+        for (idx, li) in f.locals.iter().enumerate() {
+            let id = idx as u32;
+            let base = c_ident(&li.name);
+            // Runtime C symbols all start with `maka` or `__`; keep the unique
+            // form for a user local that would otherwise look like one.
+            let reserved = base.starts_with("maka") || base.starts_with("__");
+            let chosen = if !reserved && used.insert(base.clone()) {
+                base
+            } else {
+                // The always-unique `name_<id>` form, extended if it somehow
+                // collides (e.g. a user local literally named `foo_3`).
+                let mut cand = local_name_mangled(LocalId(id), &li.name);
+                while !used.insert(cand.clone()) {
+                    cand.push('_');
+                }
+                cand
+            };
+            map.insert(id, chosen);
+        }
+        map
+    }
+
     fn emit_func(&mut self, f: &HFunc) {
         // inline functions are spliced at each call site; no standalone C function emitted.
         if self.sym.func_sig(f.id).is_inline { return; }
+        self.cur_local_names = self.build_local_names(f);
         self.cur_c_func_ret = self.sym.func_sig(f.id).ret.clone();
         // The `.maka` file backing this function's module, for `#line` stamping.
         self.cur_debug_file = self
@@ -7682,7 +7756,7 @@ impl<'a> Cx<'a> {
                 for cap_id in first_non_param..(f.locals.len() as u32) {
                     let li = &f.locals[cap_id as usize];
                     if env_info.fields.iter().any(|fi| fi.name == li.name) {
-                        let lname = local_name(LocalId(cap_id), &li.name);
+                        let lname = self.local_name(LocalId(cap_id), &li.name);
                         let ty = self.c_type(&li.ty);
                         self.wl(&format!("{} {} = __env_0->{};", ty, lname, c_ident(&li.name)));
                     }
@@ -7709,13 +7783,13 @@ impl<'a> Cx<'a> {
         // Null-collapse pointers whose deps just died.
         for id in &b.ptr_nulls {
             let li = &f.locals[id.0 as usize];
-            self.wl(&format!("{} = NULL; /* collapse {} */", local_name(*id, &li.name), li.name));
+            self.wl(&format!("{} = NULL; /* collapse {} */", self.local_name(*id, &li.name), li.name));
         }
         // Free heap locals declared in this block (in reverse decl order).
         for id in &b.heap_to_free {
             let (n, ty, nm) = {
                 let li = &f.locals[id.0 as usize];
-                (local_name(*id, &li.name), li.ty.clone(), li.name.clone())
+                (self.local_name(*id, &li.name), li.ty.clone(), li.name.clone())
             };
             self.wl(&format!("/* drop heap {} */", nm));
             self.emit_field_drop(&n, &ty, 0);
@@ -7730,7 +7804,7 @@ impl<'a> Cx<'a> {
                 if let HStmt::Let { local, .. } = s {
                     if self.cur_abandoned_handles.contains(&local.0) {
                         let li = &f.locals[local.0 as usize];
-                        let n = local_name(*local, &li.name);
+                        let n = self.local_name(*local, &li.name);
                         self.wl(&format!("if ({0}) {{ __maka_detach((maka_unit*)({0})); }} /* auto-detach abandoned handle {1} */", n, li.name));
                     }
                 }
@@ -7798,7 +7872,7 @@ impl<'a> Cx<'a> {
                 // `heap_drops`, so their ownership transfers cleanly.
                 let drops: Vec<(String, HType)> = heap_drops.iter().map(|id| {
                     let li = &f.locals[id.0 as usize];
-                    (local_name(*id, &li.name), li.ty.clone())
+                    (self.local_name(*id, &li.name), li.ty.clone())
                 }).collect();
                 match value {
                     Some(e) if !matches!(e.ty, HType::Unit) => {
@@ -7863,13 +7937,13 @@ impl<'a> Cx<'a> {
             }
             HStmt::Break { heap_drops, .. } => {
                 let drops: Vec<(String, HType)> = heap_drops.iter()
-                    .map(|id| { let li = &f.locals[id.0 as usize]; (local_name(*id, &li.name), li.ty.clone()) }).collect();
+                    .map(|id| { let li = &f.locals[id.0 as usize]; (self.local_name(*id, &li.name), li.ty.clone()) }).collect();
                 for (n, ty) in &drops { self.wl("/* drop on break */"); self.emit_field_drop(n, ty, 0); }
                 self.wl("break;");
             }
             HStmt::Continue { heap_drops, .. } => {
                 let drops: Vec<(String, HType)> = heap_drops.iter()
-                    .map(|id| { let li = &f.locals[id.0 as usize]; (local_name(*id, &li.name), li.ty.clone()) }).collect();
+                    .map(|id| { let li = &f.locals[id.0 as usize]; (self.local_name(*id, &li.name), li.ty.clone()) }).collect();
                 for (n, ty) in &drops { self.wl("/* drop on continue */"); self.emit_field_drop(n, ty, 0); }
                 self.wl("continue;");
             }
@@ -7880,7 +7954,7 @@ impl<'a> Cx<'a> {
                 // drops in case it reads one of them.
                 let drops: Vec<(String, HType)> = heap_drops.iter().map(|id| {
                     let li = &f.locals[id.0 as usize];
-                    (local_name(*id, &li.name), li.ty.clone())
+                    (self.local_name(*id, &li.name), li.ty.clone())
                 }).collect();
                 match value {
                     Some(v) => {
@@ -7917,7 +7991,7 @@ impl<'a> Cx<'a> {
             }
             HStmt::ForEach { var, src, body, .. } => {
                 let li = &f.locals[var.0 as usize];
-                let var_name = local_name(*var, &li.name);
+                let var_name = self.local_name(*var, &li.name);
                 let var_ty = self.c_type(&li.ty);
                 let src_c = self.emit_expr(f, src);
                 // Iterating a dense existential column `Vec<some X>`: the buffer is
@@ -9129,7 +9203,7 @@ impl<'a> Cx<'a> {
 
     fn emit_let(&mut self, f: &HFunc, id: LocalId, init: &HExpr) {
         let li = &f.locals[id.0 as usize];
-        let name = local_name(id, &li.name);
+        let name = self.local_name(id, &li.name);
         match &li.ty {
             HType::Heap { inner } => {
                 // heap [*]T: emit as plain Vec_T struct, no extra heap layer.
@@ -9145,7 +9219,7 @@ impl<'a> Cx<'a> {
                 if let HExprKind::Local(src) = init.kind {
                     if matches!(f.locals[src.0 as usize].ty, HType::Heap { .. }) {
                         // move
-                        self.wl(&format!("{} {} = {}; /* moved */", ptr_ty, name, local_name(src, &f.locals[src.0 as usize].name)));
+                        self.wl(&format!("{} {} = {}; /* moved */", ptr_ty, name, self.local_name(src, &f.locals[src.0 as usize].name)));
                         return;
                     }
                 }
@@ -9331,7 +9405,7 @@ impl<'a> Cx<'a> {
                     && self.drop_ty_owns(&place.ty)
                     && place_root_local(place) != Some(sid.0)
                 {
-                    let base = local_name(sid, &f.locals[sid.0 as usize].name);
+                    let base = self.local_name(sid, &f.locals[sid.0 as usize].name);
                     let sname = if self.aliased_locals.contains(&sid.0) { format!("(*{})", base) } else { base };
                     self.wl(&format!("{} = NULL;", sname));
                 }
@@ -9343,7 +9417,7 @@ impl<'a> Cx<'a> {
     fn emit_place(&mut self, f: &HFunc, e: &HExpr) -> String {
         match &e.kind {
             HExprKind::Local(id) => {
-                let n = local_name(*id, &f.locals[id.0 as usize].name);
+                let n = self.local_name(*id, &f.locals[id.0 as usize].name);
                 if self.aliased_locals.contains(&id.0) { format!("(*{})", n) } else { n }
             }
             HExprKind::GlobalRef(gid) => self.sym.globals[gid.0 as usize].c_name.clone(),
@@ -10120,7 +10194,7 @@ impl<'a> Cx<'a> {
             HExprKind::LitNull => "NULL".into(),
             HExprKind::LitUnit => "MAKA_UNIT".into(),
             HExprKind::Local(id) => {
-                let n = local_name(*id, &f.locals[id.0 as usize].name);
+                let n = self.local_name(*id, &f.locals[id.0 as usize].name);
                 if self.aliased_locals.contains(&id.0) { format!("(*{})", n) } else { n }
             }
             HExprKind::GlobalRef(gid) => self.sym.globals[gid.0 as usize].c_name.clone(),
@@ -10154,11 +10228,11 @@ impl<'a> Cx<'a> {
             HExprKind::InlineCall { callee, args, propagate_drops, loop_jump_drops } => {
                 let pd: Vec<(String, HType)> = propagate_drops.iter().map(|id| {
                     let li = &f.locals[id.0 as usize];
-                    (local_name(*id, &li.name), li.ty.clone())
+                    (self.local_name(*id, &li.name), li.ty.clone())
                 }).collect();
                 let ld: Vec<(String, HType)> = loop_jump_drops.iter().map(|id| {
                     let li = &f.locals[id.0 as usize];
-                    (local_name(*id, &li.name), li.ty.clone())
+                    (self.local_name(*id, &li.name), li.ty.clone())
                 }).collect();
                 self.emit_inline_expansion(f, *callee, args, &e.ty, pd, ld)
             }
@@ -10618,7 +10692,7 @@ impl<'a> Cx<'a> {
             body.push_str(&self.match_bindings(f, &a.kind));
             if let Some(local) = a.scrut_binding {
                 let li = &f.locals[local.0 as usize];
-                body.push_str(&format!("{} {} = __s; ", self.c_type(&li.ty), local_name(local, &li.name)));
+                body.push_str(&format!("{} {} = __s; ", self.c_type(&li.ty), self.local_name(local, &li.name)));
             }
             // Value-producing arm via a synthetic `__yield` local: register an end
             // label so a `yield` nested in the body terminates the arm.
@@ -10716,7 +10790,7 @@ impl<'a> Cx<'a> {
                 let li = &f.locals[id.0 as usize];
                 let n = match tag {
                     Some(t) => inline_local_name(f, *id, t),
-                    None => local_name(*id, &li.name),
+                    None => self.local_name(*id, &li.name),
                 };
                 (n, li.ty.clone())
             };
@@ -10794,7 +10868,7 @@ impl<'a> Cx<'a> {
             // Scrut binding: bind __s to a local before guard/body.
             if let Some(local) = a.scrut_binding {
                 let li = &f.locals[local.0 as usize];
-                let n = local_name(local, &li.name);
+                let n = self.local_name(local, &li.name);
                 let ty = self.c_type(&li.ty);
                 bindings.push_str(&format!("{} {} = __s; ", ty, n));
             }
@@ -10937,7 +11011,7 @@ impl<'a> Cx<'a> {
                 for (i, b) in bindings.iter().enumerate() {
                     if let Some(local) = b {
                         let li = &f.locals[local.0 as usize];
-                        let name = local_name(*local, &li.name);
+                        let name = self.local_name(*local, &li.name);
                         let fname = &v.fields[i].name;
                         let ty = self.c_type(&li.ty);
                         out.push_str(&format!("{} {} = __s.payload.{}.{}; ", ty, name, c_ident(&v.name), c_ident(fname)));
@@ -11041,7 +11115,7 @@ impl<'a> Cx<'a> {
         let place = match &scrutinee.kind {
             HExprKind::Local(id) if matches!(scrutinee.ty, HType::Enum(_)) => {
                 let li = &f.locals[id.0 as usize];
-                local_name(*id, &li.name)
+                self.local_name(*id, &li.name)
             }
             // A freshly-produced owned-enum rvalue scrutinee (call/match result)
             // lives in `__s` (dropped after the switch); null the fields it moves
@@ -11781,7 +11855,9 @@ fn fn_sig_key(ret: &HType, params: &[HType]) -> String {
     s.replace('\'', "x").replace('+', "p")
 }
 
-fn local_name(id: LocalId, name: &str) -> String {
+/// The always-unique, always-safe C name of a local: `name_<id>`.  Used as the
+/// fallback whenever a readable name would be ambiguous or is not available.
+fn local_name_mangled(id: LocalId, name: &str) -> String {
     format!("{}_{}", c_ident(name), id.0)
 }
 
