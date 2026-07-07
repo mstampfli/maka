@@ -244,7 +244,11 @@ pub enum Expr {
     Ref { mutness: Mutness, expr: Box<Expr>, span: Span },
     Field { base: Box<Expr>, name: String, span: Span },
     Index { base: Box<Expr>, idx: Box<Expr>, span: Span },
-    Call { callee: Box<Expr>, args: Vec<Expr>, span: Span },
+    /// `callee(args)`, optionally with explicit generic type arguments written
+    /// turbofish-style: `callee::<T, U>(args)`.  `type_args` is empty for an
+    /// ordinary call (type parameters are then inferred from the arguments and
+    /// the expected return type).
+    Call { callee: Box<Expr>, args: Vec<Expr>, type_args: Vec<Type>, span: Span },
     /// `expr as T`
     Cast { expr: Box<Expr>, ty: Type, span: Span },
     /// `expr as? T`

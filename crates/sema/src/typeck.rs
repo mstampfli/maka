@@ -46,6 +46,11 @@ pub struct TypeChecker<'a> {
     /// parameter that appears only in the return type from its context, e.g.
     /// `Stack<int> s = snew();` binds T=int from the expected `Stack<int>`.
     call_ret_expected: Option<HType>,
+    /// Explicit generic type arguments for the call currently being dispatched
+    /// (`f::<int>(...)`), set by `check_expr` before `check_call`.  Empty for an
+    /// ordinary call; when present they bind the callee's type parameters
+    /// directly instead of inferring them.
+    call_type_args: Vec<ast::Type>,
     /// Whether the current function is `inline` (governs `propagate` legality).
     cur_is_inline: bool,
     /// Dotted module path of the function currently being checked.  Used to enforce
@@ -315,6 +320,7 @@ impl<'a> TypeChecker<'a> {
             yield_expected: Vec::new(),
             in_arm_body: 0,
             call_ret_expected: None,
+            call_type_args: Vec::new(),
             cur_is_inline: false,
             cur_module: Vec::new(),
             cur_imports: Vec::new(),
@@ -942,8 +948,9 @@ impl<'a> TypeChecker<'a> {
             ast::Expr::Ref { mutness, expr, span } => self.check_ref(matches!(mutness, Mutness::Mut), expr, *span, expected),
             ast::Expr::Field { base, name, span } => self.check_field(base, name, expected, *span),
             ast::Expr::Index { base, idx, span } => self.check_index(base, idx, *span),
-            ast::Expr::Call { callee, args, span } => {
+            ast::Expr::Call { callee, args, type_args, span } => {
                 self.call_ret_expected = expected.cloned();
+                self.call_type_args = type_args.clone();
                 self.check_call(callee, args, *span)
             }
             ast::Expr::AttrCall { attr, name, receiver, args, span } => {
@@ -2252,9 +2259,11 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_call_inner(&mut self, callee: &ast::Expr, args: &[ast::Expr], sp: Span) -> HExpr {
-        // Capture (and clear, so nested arg calls don't inherit it) the expected
-        // return type for return-position generic inference below.
+        // Capture (and clear, so nested arg calls don't inherit them) the expected
+        // return type for return-position generic inference, and any explicit
+        // turbofish type arguments, below.
         let ret_expected = self.call_ret_expected.take();
+        let explicit_type_args = std::mem::take(&mut self.call_type_args);
         // Built-in `zeroed()` -> a zero-initialized value of the contextually
         // expected type.  Codegen emits `(T){0}`: a zeroed value is safe to drop
         // for every type (null pointers / Vecs, 0 scalars, a struct whose owning
@@ -4114,29 +4123,53 @@ impl<'a> TypeChecker<'a> {
             self.err(format!("function `{}` expects {} args, got {}", name, template_param_tys.len(), args.len()), sp);
         }
 
-        // If the function is generic, infer substitution from arg types.
+        // Explicit turbofish type arguments on a non-generic function are an error.
+        if type_params.is_empty() && !explicit_type_args.is_empty() {
+            self.err(format!("`{}` is not generic and takes no type arguments", name), sp);
+        }
+        // If the function is generic, bind its type parameters: from the explicit
+        // turbofish arguments when given, else inferred from the arg + return types.
         let mut env: std::collections::HashMap<String, HType> = std::collections::HashMap::new();
         if !type_params.is_empty() {
-            // First do a probe: type-check each arg without coercion to learn its type.
-            let probed: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
-            for (i, ph) in probed.iter().enumerate() {
-                if let Some(want) = template_param_tys.get(i) {
-                    unify_with_sym(want, &ph.ty, &mut env, self.sym);
+            if !explicit_type_args.is_empty() {
+                // `f::<T, U>(...)` - bind each parameter to the written type. The
+                // arguments are still coerced to the instantiated signature below,
+                // so a wrong argument type is reported as usual.
+                if explicit_type_args.len() != type_params.len() {
+                    self.err(format!(
+                        "`{}` takes {} type argument(s), but {} were given",
+                        name, type_params.len(), explicit_type_args.len()
+                    ), sp);
                 }
-            }
-            // Bind type params that appear only in the return type from the call's
-            // expected type (e.g. `Stack<int> s = snew();` infers T=int even with
-            // no arguments to unify against).
-            if type_params.iter().any(|tp| !env.contains_key(tp)) {
-                if let Some(exp) = &ret_expected {
-                    unify_with_sym(&template_ret, exp, &mut env, self.sym);
+                for (tp, ta) in type_params.iter().zip(explicit_type_args.iter()) {
+                    let ht = resolve_type_in(self.sym, ta, &self.cur_type_params, &mut self.errors);
+                    env.insert(tp.clone(), ht);
                 }
-            }
-            // Ensure all type params got substitutions.
-            for tp in &type_params {
-                if !env.contains_key(tp) {
-                    self.err(format!("cannot infer type parameter `{}` for `{}`", tp, name), sp);
-                    env.insert(tp.clone(), HType::Int);
+                for tp in &type_params {
+                    env.entry(tp.clone()).or_insert(HType::Int);
+                }
+            } else {
+                // First do a probe: type-check each arg without coercion to learn its type.
+                let probed: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
+                for (i, ph) in probed.iter().enumerate() {
+                    if let Some(want) = template_param_tys.get(i) {
+                        unify_with_sym(want, &ph.ty, &mut env, self.sym);
+                    }
+                }
+                // Bind type params that appear only in the return type from the call's
+                // expected type (e.g. `Stack<int> s = snew();` infers T=int even with
+                // no arguments to unify against).
+                if type_params.iter().any(|tp| !env.contains_key(tp)) {
+                    if let Some(exp) = &ret_expected {
+                        unify_with_sym(&template_ret, exp, &mut env, self.sym);
+                    }
+                }
+                // Ensure all type params got substitutions.
+                for tp in &type_params {
+                    if !env.contains_key(tp) {
+                        self.err(format!("cannot infer type parameter `{}` for `{}`", tp, name), sp);
+                        env.insert(tp.clone(), HType::Int);
+                    }
                 }
             }
         }
@@ -5830,6 +5863,7 @@ fn build_iter_desugaring(
     let call_next = Expr::Call {
         callee: Box::new(Expr::Field { base: Box::new(it_ref), name: "next".to_string(), span: sp }),
         args: Vec::new(),
+        type_args: Vec::new(),
         span: sp,
     };
     let opt_ty = Type::Generic { name: "Option".to_string(), args: vec![elem_ty.clone()], span: sp };

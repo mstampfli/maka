@@ -2005,7 +2005,39 @@ impl Parser {
                         }
                     }
                     self.expect(&TokKind::RParen, "`)`")?;
-                    e = Expr::Call { callee: Box::new(e), args, span };
+                    e = Expr::Call { callee: Box::new(e), args, type_args: Vec::new(), span };
+                }
+                TokKind::ColonColon => {
+                    // Turbofish: `callee::<T, ...>(args)` — explicit generic type
+                    // arguments for the call that must immediately follow.  Only a
+                    // `::` followed by `<` is a turbofish; any other `::` after an
+                    // expression is left for the outer parser (rewind and stop).
+                    let save = self.pos;
+                    self.bump(); // `::`
+                    if !self.at(&TokKind::Lt) {
+                        self.pos = save;
+                        break;
+                    }
+                    self.bump(); // `<`
+                    let mut type_args = Vec::new();
+                    loop {
+                        type_args.push(self.parse_type()?);
+                        if !self.eat(&TokKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&TokKind::Gt, "`>` to close the type arguments")?;
+                    let span = self.peek_span();
+                    self.expect(&TokKind::LParen, "`(` — `::<...>` type arguments are only valid on a call")?;
+                    let mut args = Vec::new();
+                    if !self.at(&TokKind::RParen) {
+                        loop {
+                            args.push(self.parse_expr()?);
+                            if !self.eat(&TokKind::Comma) { break; }
+                        }
+                    }
+                    self.expect(&TokKind::RParen, "`)`")?;
+                    e = Expr::Call { callee: Box::new(e), args, type_args, span };
                 }
                 TokKind::Bang => {
                     let span = self.peek_span();

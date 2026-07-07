@@ -1,0 +1,12 @@
+// Explicit generic type arguments (turbofish): the escape hatch when a type
+// parameter can't be inferred from the arguments or the expected type.
+Vec<T> empty_vec<T>() { Vec<T> v = []; return v; }
+T identity<T>(T x) { return x; }
+unit main() {
+    Vec<int> a = empty_vec::<int>();
+    push(a, 7);
+    push(a, 8);
+    log(a.len);                    // 2
+    log(identity::<int>(42));      // 42
+    log(empty_vec::<int>().len);   // 0 - no expected type; turbofish binds T
+}

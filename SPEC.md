@@ -1246,9 +1246,26 @@ type (`column() -> &Vec<T>`, `parse() -> T`, `default() -> T`) — the call's
 type matches the expected type is kept. So `&Vec<Position> ps = column(&w);`
 selects the `HasColumn<Position>` impl. This runs ONLY on a call that would
 otherwise be a hard "ambiguous" error and narrows only when exactly one candidate
-matches, so it never changes the meaning of a call that already resolved. There
-is no turbofish (`f<T>(x)` parses as comparison); a return-only type parameter is
-pinned by the expected type. See `414_return_type_directed_dispatch.maka`.
+matches, so it never changes the meaning of a call that already resolved. See
+`414_return_type_directed_dispatch.maka`.
+
+**Explicit type arguments (turbofish).** Type parameters are normally inferred
+from the arguments, then from the expected type. When neither pins them down —
+a parameter that appears only in the return type or nowhere in the signature,
+called in a position with no expected type (`empty_vec::<int>().len`) — give
+them explicitly with a `::<>` turbofish:
+
+```maka
+Vec<T> empty_vec<T>() { Vec<T> v = []; return v; }
+log(empty_vec::<int>().len);        // T = int, explicitly
+T identity<T>(T x) { return x; }
+log(identity::<int>(42));           // force a specific instantiation
+```
+
+The `::` is required (a bare `f<T>(x)` parses as comparison). The count must
+match the function's type parameters, the function must be generic, and the
+arguments are still checked against the resulting instantiation. Inference stays
+the default; the turbofish is only the escape hatch. See `439_turbofish.maka`.
 
 **Visibility.** `has` impls are file-private by default. To use a `has` impl
 in another module:

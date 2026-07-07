@@ -37,15 +37,12 @@ are queued; check them off as they land.
 
 ## Language
 
-- [ ] **Explicit generic type arguments at call sites.** Inference from arguments
-      is the default and works well (`total(&table)`, `render(&p)` bind `T` from
-      the argument's concrete type). But when `T` appears only in the return type
-      or nowhere in the parameters (a constructor like `empty<int>()`), inference
-      has nothing to work from and there is no escape hatch. Verified today:
-      `id<int>(5)` does NOT parse - `<` is read as less-than ("ordering on
-      non-numeric types"), exactly the grammar ambiguity to design around. Add an
-      explicit form (a `::<>` turbofish, `id::<int>(5)`, avoids the ambiguity)
-      as an optional override; keep argument inference as the default.
+- [x] **Explicit generic type arguments at call sites.** Added the `::<>`
+      turbofish (`identity::<int>(42)`, `empty_vec::<int>()`) - the `::` sidesteps
+      the `<`-as-less-than ambiguity. When present the type arguments bind the
+      callee's type parameters directly (bypassing inference); arity, non-generic
+      misuse, and argument-type mismatches are all diagnosed. Inference stays the
+      default. Parser + AST + typeck; tests `439_turbofish`, `neg_137`, `neg_138`.
 
 ## Debugger
 
