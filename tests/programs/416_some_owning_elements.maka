@@ -6,9 +6,12 @@
 import std.{Vec, push};
 data Boxed { own *int p; }
 data Pair  { own *int a; own *int b; }
-logic Val {
-    int val(&Boxed x) { *int p = x.p; if (p != null) { return p!; } return 0; }
-    int val(&Pair x)  { *int a = x.a; *int b = x.b; mut int s = 0; if (a != null) { s = s + a!; } if (b != null) { s = s + b!; } return s; }
+attr Val { int val(&_ self); }
+Boxed has Val {
+    int val(&Boxed self) { *int p = self.p; if (p != null) { return p!; } return 0; }
+}
+Pair has Val {
+    int val(&Pair self) { *int a = self.a; *int b = self.b; mut int s = 0; if (a != null) { s = s + a!; } if (b != null) { s = s + b!; } return s; }
 }
 unit main() {
     Vec<Boxed> bs = [];

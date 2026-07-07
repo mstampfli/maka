@@ -2,9 +2,8 @@
 data Cat { mut int meow = 1; }
 data Player { mut int hp = 0; }
 
-logic Movement {
-    unit move(&mut Player p) {}
-}
+attr Movement { unit move(&mut _ self); }
+Player has Movement { unit move(&mut Player self) {} }
 
 unit main() {
     mut Cat c = { meow = 1 };

@@ -1,6 +1,8 @@
 data Cat { int n; }
 data Dog { int n; }
-logic Speak { int sound(&Cat c) { return c.n; } int sound(&Dog d) { return d.n * 10; } }
+attr Speak { int sound(&_ self); }
+Cat has Speak { int sound(&Cat self) { return self.n; } }
+Dog has Speak { int sound(&Dog self) { return self.n * 10; } }
 int total([]&dyn Speak xs) {
     mut int s = 0;
     mut int i = 0;

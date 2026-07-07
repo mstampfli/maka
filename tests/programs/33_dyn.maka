@@ -2,14 +2,17 @@
 data Player { mut int hp = 100; }
 data Zombie { mut int decay = 1; }
 
-logic Movement {
-    unit move(&mut Player p) {
+attr Movement { unit move(&mut _ self); }
+Player has Movement {
+    unit move(&mut Player self) {
         log("player");
-        p.hp = p.hp - 1;
+        self.hp = self.hp - 1;
     }
-    unit move(&mut Zombie z) {
+}
+Zombie has Movement {
+    unit move(&mut Zombie self) {
         log("zombie");
-        z.decay = z.decay + 1;
+        self.decay = self.decay + 1;
     }
 }
 

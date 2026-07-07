@@ -8,10 +8,9 @@ import std.{Vec, push};
 
 data Gram { int g; }
 data Kilo { int k; }
-logic Weigh {
-    int weight(&Gram g) { return g.g; }
-    int weight(&Kilo k) { return k.k * 1000; }
-}
+attr Weigh { int weight(&_ self); }
+Gram has Weigh { int weight(&Gram self) { return self.g; } }
+Kilo has Weigh { int weight(&Kilo self) { return self.k * 1000; } }
 
 unit main() {
     Vec<Gram> grams = [];

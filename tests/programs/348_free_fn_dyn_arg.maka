@@ -7,10 +7,11 @@
 import std.{String, StringOps, string_from};
 data Dog  { mut String name; int legs; }
 data Bird { mut String name; int legs; }
-logic Animal {
-  int legs(&Dog d)  { return d.legs; }
-  int legs(&Bird b) { return b.legs; }
+attr Animal {
+  int legs(&_ self);
 }
+Dog has Animal  { int legs(&Dog self)  { return self.legs; } }
+Bird has Animal { int legs(&Bird self) { return self.legs; } }
 int describe(&dyn Animal a) { return Animal.legs(a) + 100; }   // free fn taking a dyn
 
 unit main() {

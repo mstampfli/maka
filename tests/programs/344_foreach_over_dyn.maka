@@ -6,11 +6,17 @@
 import std.{Vec, push, String, StringOps, string_from};
 data Dog  { mut String name; int legs; }
 data Bird { mut String name; int legs; }
-logic Animal {
-  int legs(&Dog d)  { return d.legs; }
-  int legs(&Bird b) { return b.legs; }
-  int nlen(&Dog d)  { return d.name.length(); }
-  int nlen(&Bird b) { return b.name.length(); }
+attr Animal {
+  int legs(&_ self);
+  int nlen(&_ self);
+}
+Dog has Animal {
+  int legs(&Dog self)  { return self.legs; }
+  int nlen(&Dog self)  { return self.name.length(); }
+}
+Bird has Animal {
+  int legs(&Bird self) { return self.legs; }
+  int nlen(&Bird self) { return self.name.length(); }
 }
 unit main() {
   mut int t = 0;

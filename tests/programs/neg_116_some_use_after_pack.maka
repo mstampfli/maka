@@ -2,7 +2,8 @@
 // must be rejected (use-after-move), else it would alias the column's buffer.
 import std.{Vec, push};
 data Gram { int g; }
-logic Weigh { int weight(&Gram g) { return g.g; } }
+attr Weigh { int weight(&_ self); }
+Gram has Weigh { int weight(&Gram self) { return self.g; } }
 unit main() {
     Vec<Gram> grams = []; push(grams, Gram { g = 2 });
     Vec<Vec<some Weigh>> cols = [];
