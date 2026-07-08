@@ -7,11 +7,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  # The custom asm context switch, validated on BOTH architectures from one
-  # Linux runner: x86_64 natively, aarch64 by cross-compiling and running the
-  # emitted C under qemu-user.  100 fibers x 50 yields = 5000 switches -> 100.
+  # The custom asm context switch + the explicit-Pool M:N fiber migration,
+  # validated on BOTH architectures from one Linux runner: x86_64 natively,
+  # aarch64 by cross-compiling the smoke test and running it under qemu-user.
+  # 100 fibers x 50 yields = 5000 switches -> 100.
   linux:
-    name: fiber switch (linux x86_64 + aarch64/qemu)
+    name: fibers + pool migration (linux x86_64 + aarch64/qemu)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,11 +41,33 @@ jobs:
           echo "$out"
           echo "$out" | tail -n1 | grep -qx 100 || { echo "FAIL aarch64"; exit 1; }
           echo "PASS: aarch64 custom asm switch under qemu (5000 context switches)"
+      - name: Pool M:N migration (x86_64)
+        shell: bash
+        run: |
+          set +e
+          MK=./target/release/makac; fail=0
+          runcheck() {
+            local name; name=$(basename "$1"); local i out last
+            for i in 1 2 3 4 5; do
+              out=$($MK "$1" -o t_pool --run 2>&1)
+              last=$(printf '%s\n' "$out" | tail -n1)
+              if [ "$last" != "$2" ]; then echo "FAIL $name run $i: got [$last] want [$2]"; printf '%s\n' "$out" | tail -20; fail=1; return; fi
+            done
+            echo "PASS $name (5x -> $2)"
+          }
+          runcheck tests/programs/446_spawn_on_pool.maka 4950
+          runcheck tests/programs/447_pool_nested_join.maka 20
+          runcheck tests/programs/448_pool_sleep_migrate.maka 20
+          runcheck tests/ci/pool_migrate.maka MIGRATED
+          [ $fail -eq 0 ] || { echo "FAIL: pool migration (linux)"; exit 1; }
+          echo "PASS: explicit-Pool M:N migration verified on linux x86_64"
 
-  # Windows uses the ucontext / native-fiber fallback (no custom asm), compiled
-  # with mingw gcc.
+  # Windows: fibers via the Win32-fiber ucontext shim (each worker thread is
+  # ConvertThreadToFiber'd, so SwitchToFiber resumes a fiber on any worker); the
+  # reactor is the poll backend over the shared fd registry.  Compiled with
+  # mingw gcc.
   windows:
-    name: fiber switch (windows fallback)
+    name: fibers + pool migration (windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -65,14 +88,37 @@ jobs:
           echo "rc=$?"
           cat out.txt
           tail -n1 out.txt | grep -qx 100 || { echo "FAIL windows"; exit 1; }
-          echo "PASS: windows fallback (5000 context switches)"
+          echo "PASS: windows fiber switch (5000 context switches)"
+      - name: Pool M:N migration
+        shell: bash
+        run: |
+          set +e
+          export CC=gcc
+          MK=./target/release/makac.exe; fail=0
+          runcheck() {
+            local name; name=$(basename "$1"); local i last
+            for i in 1 2 3 4 5; do
+              $MK "$1" -o t_pool.exe --run > out.txt 2>&1
+              last=$(tail -n1 out.txt | tr -d '\r')
+              if [ "$last" != "$2" ]; then echo "FAIL $name run $i: got [$last] want [$2]"; tail -20 out.txt; fail=1; return; fi
+            done
+            echo "PASS $name (5x -> $2)"
+          }
+          runcheck tests/programs/446_spawn_on_pool.maka 4950
+          runcheck tests/programs/447_pool_nested_join.maka 20
+          runcheck tests/programs/448_pool_sleep_migrate.maka 20
+          runcheck tests/ci/pool_migrate.maka MIGRATED
+          [ $fail -eq 0 ] || { echo "FAIL: pool migration (windows)"; exit 1; }
+          echo "PASS: explicit-Pool M:N migration verified on windows"
 
-  # macOS aarch64 uses the custom asm switch (validated above via qemu), but the
-  # runtime's socket/network C layer has a pre-existing, incomplete macOS port
-  # (header ordering, __DARWIN asm-label collisions) unrelated to the switch.
-  # Kept informational until that port lands.
+  # macOS aarch64 uses the same custom asm switch as Linux, and the reactor is
+  # now a kqueue shared across a Pool's workers (moved out of per-thread TLS
+  # into the sched_state).  BUT the runtime's socket/network C layer still has a
+  # pre-existing, incomplete macOS port, so end-to-end Maka on macOS is broken
+  # and the pool migration cannot be verified here yet - that is a separate
+  # macOS-fixing effort.  Kept as an informational smoke test only.
   macos:
-    name: fiber switch (macos aarch64) [WIP macOS socket port]
+    name: fiber switch (macos aarch64) [WIP macOS port]
     runs-on: macos-latest
     continue-on-error: true
     steps:
@@ -86,5 +132,5 @@ jobs:
         run: |
           set +e
           ./target/release/makac tests/ci/fiber_smoke.maka -o fiber_smoke --run > out.txt 2>&1
-          echo "rc=$?"; cat out.txt | tail -30
-          tail -n1 out.txt | grep -qx 100 && echo "PASS macos" || echo "known WIP: macOS socket-layer port"
+          echo "rc=$?"; tail -30 out.txt
+          tail -n1 out.txt | grep -qx 100 && echo "PASS macos fiber switch" || echo "known WIP: macOS socket-layer port (separate fixing session)"

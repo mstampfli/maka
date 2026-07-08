@@ -1,0 +1,39 @@
+// Cross-platform proof that an explicit Pool migrates fibers: each fiber
+// records its OS thread (pthread_self) before and after a sleep-park; under a
+// shared scheduler it resumes on a DIFFERENT worker, so at least one fiber
+// sees before != after -> "MIGRATED".  Also exercises the shared reactor +
+// clean shutdown.  int64_t (not long) so the return type matches maka `int`
+// on LLP64 Windows too.
+import std.{ Pool, pool, pool_shutdown, Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy, WaitGroup, wg_new, wg_add, wg_done, wg_wait, wg_destroy };
+import std.sleep_ms;
+cblock "
+    #include <pthread.h>
+    #include <string.h>
+    #include <stdint.h>
+    int64_t __mk_tid(void) { pthread_t s = pthread_self(); int64_t r = 0; memcpy(&r, &s, sizeof(s) < sizeof(r) ? sizeof(s) : sizeof(r)); return r; }
+";
+extern "__mk_tid" int mk_tid();
+unit main() {
+    Pool p = pool(4);
+    WaitGroup wg = wg_new();
+    int N = 16;
+    wg_add(wg, N);
+    Atomic<int> migrated = atomic_new(0);
+    Atomic<int> ran = atomic_new(0);
+    for (int i in 0..N) {
+        *Thread t = spawn_on(p, unit() [wg, migrated, ran] {
+            int before = mk_tid();
+            sleep_ms(10);
+            int after = mk_tid();
+            _ = atomic_add(ran, 1);
+            if (before != after) { _ = atomic_add(migrated, 1); }
+            wg_done(wg);
+        });
+        detach(t);
+    }
+    wg_wait(wg);
+    if (atomic_get(ran) == N && atomic_get(migrated) > 0) { log("MIGRATED"); }
+    else { log("no-migration"); }
+    pool_shutdown(p);
+    atomic_destroy(migrated); atomic_destroy(ran); wg_destroy(wg);
+}

@@ -1550,6 +1550,14 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    maka_fiber_t* fd_waiters;    /* fibers parked on an fd */\n");
         self.w("    int epoll_fd;                /* shared reactor fd (-1 until first use) */\n");
         self.w("    struct maka_fd_reg_s* fd_regs; /* fd -> armed-mask registry (shared) */\n");
+        // kqueue (macOS/BSD) armed-filter cache.  On those platforms epoll_fd
+        // holds the kqueue fd; this per-fd cache moves out of TLS into the
+        // sched_state so a Pool's workers share ONE kq with a consistent
+        // arm/disarm view (a lone/spawn_pool worker keeps its own, as before).
+        self.w("#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)\n");
+        self.w("    int kq_armed_in[1024];\n");
+        self.w("    int kq_armed_out[1024];\n");
+        self.w("#endif\n");
         self.w("} maka_sched_state_t;\n");
         self.w("static _Atomic int64_t __maka_sched_epoch_ctr = 1;\n");
         self.w("static __thread maka_sched_state_t* maka_sched_state = NULL;\n");
@@ -1712,33 +1720,26 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         // EPOLL_CTL_MOD diffs old vs new mask so dropped filters get
         // EV_DELETE'd; EPOLL_CTL_DEL splits the two filters into separate
         // kevent calls so ENOENT on one doesn't suppress the other.
-        self.w("static __thread int __maka_kq_fd = -1;\n");
-        self.w("static __thread int __maka_kq_armed_in[1024] = {0};   /* fd → 1 if EVFILT_READ armed */\n");
-        self.w("static __thread int __maka_kq_armed_out[1024] = {0};  /* fd → 1 if EVFILT_WRITE armed */\n");
-        self.w("static inline void __maka_kq_ensure(void) {\n");
-        self.w("    if (__maka_kq_fd >= 0) return;\n");
-        self.w("    __maka_kq_fd = kqueue();\n");
-        self.w("    if (__maka_kq_fd >= 0) {\n");
-        self.w("        int f = fcntl(__maka_kq_fd, F_GETFD);\n");
-        self.w("        if (f >= 0) fcntl(__maka_kq_fd, F_SETFD, f | FD_CLOEXEC);\n");
-        self.w("    }\n");
-        self.w("}\n");
+        // The kq fd lives in maka_epoll_fd (the sched_state reactor field),
+        // shared across a Pool's workers exactly like the Linux epoll fd; the
+        // armed-filter cache lives in the sched_state too so arm/disarm stays
+        // consistent whichever worker services the shared kq.
         self.w("static inline int epoll_create1(int flags) {\n");
         self.w("    (void)flags;\n");
-        self.w("    __maka_kq_ensure();\n");
-        self.w("    return __maka_kq_fd;\n");
+        self.w("    int kq = kqueue();\n");
+        self.w("    if (kq >= 0) { int f = fcntl(kq, F_GETFD); if (f >= 0) fcntl(kq, F_SETFD, f | FD_CLOEXEC); }\n");
+        self.w("    return kq;\n");
         self.w("}\n");
         self.w("static inline int epoll_ctl(int ep, int op, int fd, struct epoll_event* e) {\n");
-        self.w("    (void)ep;\n");
-        self.w("    __maka_kq_ensure();\n");
+        self.w("    if (ep < 0) return -1;\n");
         self.w("    int want_in  = e && (e->events & EPOLLIN);\n");
         self.w("    int want_out = e && (e->events & EPOLLOUT);\n");
         // For fds >= 1024 we can't cache armed state in the static table;
         // pretend "not armed if we want it" and "armed if we want to drop it"
         // so the change always gets emitted (EV_ADD is idempotent, EV_DELETE
         // of an unarmed filter just returns ENOENT via EV_RECEIPT).
-        self.w("    int armed_in  = (fd >= 0 && fd < 1024) ? __maka_kq_armed_in [fd] : !want_in;\n");
-        self.w("    int armed_out = (fd >= 0 && fd < 1024) ? __maka_kq_armed_out[fd] : !want_out;\n");
+        self.w("    int armed_in  = (fd >= 0 && fd < 1024) ? maka_sched_state->kq_armed_in [fd] : !want_in;\n");
+        self.w("    int armed_out = (fd >= 0 && fd < 1024) ? maka_sched_state->kq_armed_out[fd] : !want_out;\n");
         self.w("    if (op == EPOLL_CTL_DEL) { want_in = 0; want_out = 0; armed_in = 1; armed_out = 1; }\n");
         self.w("    /* Issue each filter change separately with EV_RECEIPT so we\n");
         self.w("       see per-change errors (kevent stops processing on first\n");
@@ -1747,35 +1748,35 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    struct kevent change, recv;\n");
         self.w("    if (want_in && !armed_in) {\n");
         self.w("        EV_SET(&change, fd, EVFILT_READ, EV_ADD | EV_RECEIPT, 0, 0, NULL);\n");
-        self.w("        (void)kevent(__maka_kq_fd, &change, 1, &recv, 1, NULL);\n");
-        self.w("        if (recv.data == 0 && fd >= 0 && fd < 1024) __maka_kq_armed_in[fd] = 1;\n");
+        self.w("        (void)kevent(ep, &change, 1, &recv, 1, NULL);\n");
+        self.w("        if (recv.data == 0 && fd >= 0 && fd < 1024) maka_sched_state->kq_armed_in[fd] = 1;\n");
         self.w("        else if (recv.data != 0) rc = -1;\n");
         self.w("    } else if (!want_in && armed_in) {\n");
         self.w("        EV_SET(&change, fd, EVFILT_READ, EV_DELETE | EV_RECEIPT, 0, 0, NULL);\n");
-        self.w("        (void)kevent(__maka_kq_fd, &change, 1, &recv, 1, NULL);\n");
-        self.w("        if (fd >= 0 && fd < 1024) __maka_kq_armed_in[fd] = 0;\n");
+        self.w("        (void)kevent(ep, &change, 1, &recv, 1, NULL);\n");
+        self.w("        if (fd >= 0 && fd < 1024) maka_sched_state->kq_armed_in[fd] = 0;\n");
         self.w("    }\n");
         self.w("    if (want_out && !armed_out) {\n");
         self.w("        EV_SET(&change, fd, EVFILT_WRITE, EV_ADD | EV_RECEIPT, 0, 0, NULL);\n");
-        self.w("        (void)kevent(__maka_kq_fd, &change, 1, &recv, 1, NULL);\n");
-        self.w("        if (recv.data == 0 && fd >= 0 && fd < 1024) __maka_kq_armed_out[fd] = 1;\n");
+        self.w("        (void)kevent(ep, &change, 1, &recv, 1, NULL);\n");
+        self.w("        if (recv.data == 0 && fd >= 0 && fd < 1024) maka_sched_state->kq_armed_out[fd] = 1;\n");
         self.w("        else if (recv.data != 0) rc = -1;\n");
         self.w("    } else if (!want_out && armed_out) {\n");
         self.w("        EV_SET(&change, fd, EVFILT_WRITE, EV_DELETE | EV_RECEIPT, 0, 0, NULL);\n");
-        self.w("        (void)kevent(__maka_kq_fd, &change, 1, &recv, 1, NULL);\n");
-        self.w("        if (fd >= 0 && fd < 1024) __maka_kq_armed_out[fd] = 0;\n");
+        self.w("        (void)kevent(ep, &change, 1, &recv, 1, NULL);\n");
+        self.w("        if (fd >= 0 && fd < 1024) maka_sched_state->kq_armed_out[fd] = 0;\n");
         self.w("    }\n");
         self.w("    return rc;\n");
         self.w("}\n");
-        self.w("static inline int __maka_epoll_wait_kq(struct epoll_event* evs, int max, int timeout_ms) {\n");
-        self.w("    __maka_kq_ensure();\n");
+        self.w("static inline int __maka_epoll_wait_kq(int ep, struct epoll_event* evs, int max, int timeout_ms) {\n");
+        self.w("    if (ep < 0) return 0;\n");
         self.w("    struct kevent kevs[32]; if (max > 32) max = 32;\n");
         self.w("    struct timespec ts; struct timespec* pts = NULL;\n");
         self.w("    if (timeout_ms >= 0) { ts.tv_sec = timeout_ms/1000; ts.tv_nsec = (timeout_ms%1000)*1000000; pts = &ts; }\n");
         self.w("    int n;\n");
         self.w("    /* Retry on EINTR — otherwise the scheduler treats a signal\n");
         self.w("       interrupt as a full quantum elapsed and busy-loops. */\n");
-        self.w("    do { n = kevent(__maka_kq_fd, NULL, 0, kevs, max, pts); }\n");
+        self.w("    do { n = kevent(ep, NULL, 0, kevs, max, pts); }\n");
         self.w("    while (n < 0 && errno == EINTR);\n");
         self.w("    if (n < 0) return 0;  /* other errors: treat as no events */\n");
         self.w("    int out = 0;\n");
@@ -1795,7 +1796,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    }\n");
         self.w("    return out;\n");
         self.w("}\n");
-        self.w("#define epoll_wait(ep, evs, max, t) __maka_epoll_wait_kq((evs), (max), (t))\n");
+        self.w("#define epoll_wait(ep, evs, max, t) __maka_epoll_wait_kq((ep), (evs), (max), (t))\n");
         self.w("#else\n");
         self.w("#define MAKA_USE_EPOLL 0\n");
         self.w("#define MAKA_USE_KQUEUE 0\n");
@@ -2559,7 +2560,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         // Close the shared reactor + free the fd->mask registry.  Only close a
         // real epoll fd (the poll fallback uses a fake epoll_fd of 0 = stdin;
         // kqueue keeps its fd in per-thread TLS, cleaned on that thread).
-        self.w("#if MAKA_USE_EPOLL\n");
+        self.w("#if MAKA_USE_EPOLL || MAKA_USE_KQUEUE\n");
         self.w("    if (s->epoll_fd >= 0) close(s->epoll_fd);\n");
         self.w("#endif\n");
         self.w("    { maka_fd_reg_t* r = s->fd_regs; while (r) { maka_fd_reg_t* nx = r->next; free(r); r = nx; } }\n");
