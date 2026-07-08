@@ -929,7 +929,7 @@ unmonomorphized form has no Shareable verdict.
 
 Recognized Shareable types by name: `Mutex`, `RwLock`, `Spinlock`, `Channel`,
 the generic `Atomic<T>` (by template name), `WaitGroup`, `Once`, the `*Chan`
-family, `TlsConn`, and `Thread`.
+family, `TlsConn`, `Thread`, and `Pool`.
 
 Calls to non-`gate` functions reject `transfer`/`share` annotations.
 
@@ -993,10 +993,24 @@ The check is conservative: it flags thread *writes* of a mut global (a thread
 that only *reads* one is allowed).
 
 **Implementation status**: `spawn` runs on a real cooperative fiber runtime
-(anchor fiber + `swapcontext`; blocking primitives park the fiber and drive the
-scheduler rather than blocking the OS thread).  `thread` is a kernel thread and
-`job` a work-pool item; both are `pthread`-backed.  User code is written against
-the `thread` / `spawn` / `job` surface regardless of backing.
+(anchor fiber + a hand-written context switch; blocking primitives park the
+fiber and drive an epoll/kqueue reactor rather than blocking the OS thread).
+Fibers get pooled 64 KB slab stacks with a guard page; the context switch is
+custom callee-saved-register asm (~15 ns, no per-switch syscall) on x86_64 and
+aarch64, with a ucontext / native-fiber fallback on Windows and other targets.
+`thread` is a kernel thread and `job` a work-stealing pool item; both are
+`pthread`-backed.  User code is written against the surface regardless of
+backing.
+
+**Explicit worker pools.** Beyond the three implicit tiers, `pool(N)` creates a
+user-sized set of `N` worker threads with nothing spun up implicitly;
+`spawn_on(p, closure)` runs a fiber on the pool and `job_on(p, closure)` a
+run-to-completion work item, and `pool_shutdown(p)` drains and joins the
+workers.  `spawn_on` / `job_on` cross an OS-thread boundary, so their captures
+obey the same rule as `thread` / `job` (owning move-in, Shareable copy, or a
+scoped borrow proven joined before the borrowed data's scope ends).  `Pool` is
+Shareable.  Fibers distribute across the pool's workers via a shared intake;
+cross-worker migration of an already-parked fiber is not yet implemented.
 
 Composition helpers documented in `CONCURRENCY.md`:
   - `join(&[]Handle<T>) -> []T` — homogeneous wait-all

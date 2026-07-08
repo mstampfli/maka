@@ -39,6 +39,9 @@ The decision tree:
     blocking code?  Use **`spawn`**.
   - Need to fan a CPU-bound computation across cores?  Use **`job`**
     (or, more commonly, `par_for` / `par_reduce`).
+  - Want to choose the worker count yourself, or run several
+    independent pools with nothing spun up implicitly?  Create an
+    explicit **`pool(N)`** and use `spawn_on` / `job_on` (§5.6).
 
 ---
 
@@ -201,9 +204,9 @@ the rest of the program).
 
 ### 3.4 Implementation
 
-The MVP backs `thread` with `pthread_create`/`pthread_join`.  Same
-infrastructure Maka has had since v1.  Future: rename internally to
-distinguish from the fiber path; no semantic change.
+`thread` is backed by `pthread_create` / `pthread_join` (a real kernel thread
+with the platform default ~8 MB stack) - the same primitive Maka has had since
+v1.  Unlike `spawn`, it is not a fiber and does not multiplex.
 
 ---
 
@@ -312,16 +315,16 @@ Clean, deterministic, follows Maka's existing drop semantics.
 
 ### 4.8 Implementation status
 
-Real fiber implementation requires per-architecture context-switch
-assembly (~30 LOC each for x86_64, aarch64, riscv64), a scheduler
-(~200 LOC of Maka), a reactor (~400 LOC), and a slab pool (~100
-LOC).  Total ~700 LOC of Maka + ~90 LOC of asm.
-
-**For now, `spawn` is backed by `pthread_create`/`pthread_join`** —
-the same backing as `thread`.  This is incorrect for the high-
-concurrency case (no IO yielding, no slab pool) but lets the surface
-ship and lets user code be written today.  Future work replaces the
-backing without changing the surface.
+`spawn` runs on a **real cooperative fiber runtime** - it is not a thread.
+Each fiber gets a 64 KB slab stack (1 MB of VM reserved, the bottom page a
+`PROT_NONE` overflow guard), pooled and reused across spawns so the warm path
+pays no `mmap`.  A per-thread scheduler multiplexes fibers with an
+epoll/kqueue **reactor**: a fiber that blocks on IO, a channel, a mutex, a
+wait group, or `sleep` **parks and drives the scheduler** instead of blocking
+the OS thread.  Context switches use a hand-written callee-saved-register swap
+(~15 ns) on x86_64 and aarch64 (Linux and macOS), with a ucontext /
+native-fiber fallback on Windows and other targets.  A direct probe confirms
+it: 10,000 `spawn`ed fibers run on ~1 OS thread, not 10,000 pthreads.
 
 ---
 
@@ -385,11 +388,35 @@ job spawn (~10 ns) amortised across millions of items — invisible.
 
 ### 5.5 Implementation status
 
-For MVP, `job` is also backed by `pthread_create` (one thread per
-job).  This is wildly suboptimal (defeats the whole point — 10 μs per
-job).  Real implementation needs the work-stealing pool, which is
-another ~300 LOC.  Surface is shippable today, performance gets the
-pool later.
+`job` runs on a **work-stealing pool** of N = core-count worker threads.  Each
+`job` closure is a run-to-completion work item pushed onto a per-worker deque;
+idle workers steal from busy ones (the classic Chase-Lev pattern).  Real
+parallel compute fanout, with no per-job stack - a job runs on whichever
+worker's stack picks it up.
+
+### 5.6 Explicit pools: `pool` / `spawn_on` / `job_on` / `pool_shutdown`
+
+`job` and `spawn_pool` use a process-global pool sized to the core count.  When
+you want to **choose the worker count yourself** and keep the threads visible
+(nothing spun up implicitly), create an explicit pool:
+
+```maka
+Pool p = pool(4);                     // 4 worker threads, created right here
+*Thread a = spawn_on(p, unit() [x] { /* a fiber on the pool */ });
+*Thread b = job_on(p,   unit() [x] { /* run-to-completion work on the pool */ });
+join(a); join(b);
+pool_shutdown(p);                     // close the intake, drain, join the workers
+```
+
+`spawn_on` and `job_on` cross an OS-thread boundary, so their closure captures
+obey the **same rule as `thread` / `job`** (owning move-in, Shareable copy, or
+a scoped borrow proven joined before the borrowed data's scope ends - a bare
+borrow is rejected at compile time).  `Pool` is Shareable, so a pool can itself
+be captured into other pool work.  Fibers run on whichever worker grabs them
+from the shared intake, which load-balances new fibers across the workers;
+cross-worker migration of an already-parked fiber (so an idle worker can resume
+work parked on a busy one) is not yet implemented - a parked fiber resumes on
+its worker.
 
 ---
 
@@ -559,7 +586,9 @@ unit frame() {
 | `sleep_ms` / `sleep_us` runtime calls | **Implemented** |
 | `yield_now()` — cooperative yield from a fiber | **Implemented** |
 | `thread()` — pthread with default ~8 MB stack | **Implemented** |
-| `spawn()` — real cooperative fiber (ucontext + scheduler) | **Implemented** |
+| `spawn()` — real cooperative fiber (custom asm context switch + scheduler) | **Implemented** |
+| Custom asm fiber context switch (~15 ns, no per-switch syscall) | **Implemented** — x86_64 + aarch64 (Linux + macOS); ucontext / native-fiber fallback on Windows and other targets; CI-validated on x86_64 and aarch64 |
+| Explicit worker pool: `pool(N)` / `spawn_on` / `job_on` / `pool_shutdown` | **Implemented** — user-sized worker set draining a shared intake; fibers distribute across workers; ASan + TSan clean |
 | `job()` — N-worker pthread pool with Chase-Lev work-stealing deques | **Implemented** |
 | Cooperative scheduler with ready queue + sleep wheel | **Implemented** |
 | Fiber-aware `sleep_ms`: yields instead of blocking when in a fiber | **Implemented** |
@@ -588,12 +617,12 @@ unit frame() {
 | kqueue backend (macOS/BSD) | **Implemented** — translates epoll API → kevent / EVFILT_READ/WRITE |
 | `poll()` fallback reactor for non-epoll kernels | **Implemented** — rebuilds pollfd[] from maka_fd_regs per tick |
 | IOCP backend (Windows) | **Partial** — compile-only port: Win32 Fibers (CreateFiber/SwitchToFiber) implement the ucontext API; reactor + signalfd/timerfd/eventfd/inotify return -1 stubs.  Untested without Windows hardware; a proper completion-based IOCP reactor remains a multi-day project |
-| Cross-thread fiber migration (load-balance fibers across worker schedulers) | Pending — job pool covers parallelism today |
+| Cross-thread fiber migration (an idle worker resumes a fiber parked on a busy one) | Pending — needs a shared reactor/timer; the shared intake already load-balances *new* fibers across workers, and the job pool covers parallelism |
 | `par_map_float` / `par_reduce_float` / `par_for_each_float` (float slices) | **Implemented** |
 | `TcpListener` / `TcpStream` typed wrappers + tcp_listener_open/accept/close, tcp_dial_v4, tcp_stream_read/write/close | **Implemented** |
 | Generic `par_map<T, U>` / `par_reduce<T>` for arbitrary element types | Pending — requires monomorphization-aware codegen |
 | Cross-thread fiber pool (`spawn_pool`) — fibers fan out across worker threads | **Implemented** — global MPMC queue + N background workers, each runs its own scheduler |
-| transfer/share enforcement on spawn captures (Send-probe at boundary) | **Implemented** — `&T`/`&mut T` captures rejected on `thread`/`job`/`spawn_pool` (cross-thread tiers); `spawn` (same-thread fiber) allows them.  Rust<T> probes flow to the sidecar as before |
+| transfer/share enforcement on spawn captures (Send-probe at boundary) | **Implemented** — a bare `&T`/`&mut T` capture is rejected on `thread`/`job`/`spawn_pool`/`spawn_on`/`job_on` (cross-thread tiers) unless it is a scoped borrow proven joined before the borrowed data's scope ends; `spawn` (same-thread fiber) allows them.  Rust<T> probes flow to the sidecar as before |
 | IOCP backend (Windows) | Pending — different completion model |
 | Blocking-syscall watchdog warning | **Implemented** — opt-in via `MAKA_WATCHDOG_MS=<ms>`; a global thread checks every scheduler's tick and warns on stderr when a scheduler has work but hasn't yielded past the threshold |
 | UDP datagram helpers (`udp_open`, `udp_send_v4`, `udp_recv_async`) | **Implemented** — reactor-aware (yields via wait_fd on EAGAIN) |
