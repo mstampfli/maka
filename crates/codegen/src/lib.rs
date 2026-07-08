@@ -1514,6 +1514,12 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    int n_workers;\n");
         self.w("    maka_fiber_t* run_head;\n");
         self.w("    maka_fiber_t* run_tail;\n");
+        // Slice 2: when a group has N>1 workers (a Pool), an idle worker blocks on
+        // `cv` for a ready fiber; enqueue signals it.  `closed` + `inflight` drive
+        // shutdown.  Unused for a lone worker (n_workers==1).
+        self.w("    pthread_cond_t cv;\n");
+        self.w("    int closed;\n");
+        self.w("    _Atomic long inflight;\n");
         self.w("} maka_sched_group_t;\n");
         self.w("typedef struct maka_sched_state_s {\n");
         self.w("    pthread_mutex_t remote_mu;\n");
@@ -2382,7 +2388,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    pthread_mutex_destroy(&s->remote_mu);\n");
         // Free a lone-worker (thread-owned) group.  A shared Pool group is owned
         // and freed by the pool, not here.
-        self.w("    if (s->group && s->group->n_workers == 1) { pthread_mutex_destroy(&s->group->lock); free(s->group); }\n");
+        self.w("    if (s->group && s->group->n_workers == 1) { pthread_mutex_destroy(&s->group->lock); pthread_cond_destroy(&s->group->cv); free(s->group); }\n");
         self.w("    free(s);\n");
         self.w("}\n");
         self.w("static void __maka_sched_state_key_dtor_impl(void* p);\n");
@@ -2418,6 +2424,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         // (slice 2) will replace this with a shared group of N workers.
         self.w("    maka_sched_state->group = (maka_sched_group_t*)calloc(1, sizeof(maka_sched_group_t));\n");
         self.w("    pthread_mutex_init(&maka_sched_state->group->lock, NULL);\n");
+        self.w("    pthread_cond_init(&maka_sched_state->group->cv, NULL);\n");
         self.w("    maka_sched_state->group->n_workers = 1;\n");
         // Owner ref — released by sched_state_cleanup on thread exit.
         self.w("    atomic_init(&maka_sched_state->refcount, 1);\n");
