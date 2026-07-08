@@ -329,10 +329,15 @@ pub unit  mutex_destroy(Mutex m)       { __fmutex_destroy(m.h); }
 // builtin, so its captures are checked at the call site) runs a fiber on the
 // pool; `pool_shutdown(p)` closes the intake and joins the workers.
 pub data Pool { *unit h; }
-extern "__maka_pool_new"  *unit __pool_new_h(int n);
+extern "__maka_pool_new"  *unit __pool_new_h(int n, int stack_bytes);
 extern "__maka_pool_free" unit  __pool_free_h(*unit p);
 
-pub Pool pool(int n)           { Pool p = { h = __pool_new_h(n) }; return p; }
+// `pool(N)` uses the default 64 KB fiber stack; `pool_stack(N, kb)` sets a
+// custom per-fiber stack size (KB, rounded to a page, floored at the default)
+// for every spawn_on/job_on fiber on that pool - use it for deeply-recursive
+// or large-frame fiber bodies.
+pub Pool pool(int n)                     { Pool p = { h = __pool_new_h(n, 0) }; return p; }
+pub Pool pool_stack(int n, int stack_kb) { Pool p = { h = __pool_new_h(n, stack_kb * 1024) }; return p; }
 pub unit pool_shutdown(Pool p) { __pool_free_h(p.h); }
 
 // === WaitGroup ===

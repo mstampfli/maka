@@ -413,7 +413,8 @@ obey the **same rule as `thread` / `job`** (owning move-in, Shareable copy, or
 a scoped borrow proven joined before the borrowed data's scope ends - a bare
 borrow is rejected at compile time).  `Pool` is Shareable, so a pool can itself
 be captured into other pool work.  A pool is a true **M:N scheduler**: its `N`
-workers share one run queue, timer, and reactor, so a fiber that parks (channel
+workers share one timer + reactor and each owns a lock-free FIFO work-stealing
+deque, so a fiber that parks (channel
 / mutex / wait group / sleep / IO) and is later woken resumes on whichever
 worker is free - an idle worker can pick up work parked on a busy one - and a
 sleep/IO-parked fiber does not pin the worker it parked on.  Nested `spawn` +

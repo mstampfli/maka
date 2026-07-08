@@ -218,6 +218,19 @@ sleep+nested-join stress; TSan race-free on the waiter-park path (446).
    portability work; moving `__maka_kq_fd` into `maka_sched_state` alongside
    `epoll_fd` is the fix.
 
-Scalable follow-up (unchanged from the plan): the single locked run queue is the
-correctness-first structure; per-worker Chase-Lev deques + lazy cancellation are
-the throughput follow-up once the semantics are settled.
+Scalable run queue: DONE. The single locked run queue was the correctness-first
+step; it is now replaced by per-worker lock-free FIFO work-stealing deques (a
+Go/Tokio-style ring - push tail, pop/steal head, both CAS head; FIFO, not the
+LIFO Chase-Lev the `job` pool uses, so `yield` stays fair) with lazy
+cancellation (a ready fiber is flagged and reaped at dequeue). The group's
+linked list survives only as the global overflow + cross-thread landing queue.
+The multi-worker timer expiry wakes sleepers into that global queue under the
+lock (not a lock-free deque), which is what keeps a just-woken sleeper from
+being stolen + freed mid-expiry. See commit history (`perf(sched): per-worker
+lock-free work-stealing deques`).
+
+Configurable stack size: DONE. `pool(N)` uses the default 64 KB fiber stack;
+`pool_stack(N, kb)` gives every spawn_on/job_on fiber on that pool a custom
+stack (rounded to a page, floored at the default). The default size keeps the
+cached fixed-size slab fast path; a custom size gets a dedicated mmap (commit
+the size, guard below) that is munmap'd on free rather than pooled.

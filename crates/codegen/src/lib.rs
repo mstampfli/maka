@@ -1381,50 +1381,60 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("typedef struct maka_slab_s {\n");
         self.w("    void* base;                  /* mmap base (guard page at top) */\n");
         self.w("    void* stack_top;             /* start of usable stack region */\n");
+        self.w("    size_t stack_size;           /* usable (committed) stack bytes */\n");
+        self.w("    size_t reserve;              /* mmap'd VM span (for munmap) */\n");
+        self.w("    int cacheable;               /* 1 = default-size, returns to the cache */\n");
         self.w("    struct maka_slab_s* next;    /* free-list link */\n");
         self.w("} maka_slab_t;\n");
+        // Only default-size (64 KB) slabs are cached; a custom-size fiber stack
+        // (Pool with a user stack size) gets a dedicated mmap that is munmap'd on
+        // free rather than pooled - keeps the hot path a fixed-size free-list.
         self.w("static __thread maka_slab_t* maka_slab_pool = NULL;\n");
-        self.w("static maka_slab_t* __maka_slab_alloc(void) {\n");
-        self.w("    if (maka_slab_pool) {\n");
+        self.w("static maka_slab_t* __maka_slab_alloc(size_t stack) {\n");
+        self.w("    if (stack == 0) stack = MAKA_FIBER_STACK_SIZE;\n");
+        self.w("    if (stack == (size_t)MAKA_FIBER_STACK_SIZE && maka_slab_pool) {\n");
         self.w("        maka_slab_t* s = maka_slab_pool;\n");
-        self.w("        maka_slab_pool = s->next; s->next = NULL;\n");
+        self.w("        maka_slab_pool = s->next; s->next = NULL; s->stack_size = stack;\n");
         self.w("        return s;\n");
         self.w("    }\n");
         self.w("#ifdef _WIN32\n");
-        // Win32 Fibers manage their own stack — slab_alloc returns a stub
-        // (base = NULL, stack_top = NULL) since CreateFiber in our shim
-        // accepts a 0 size and allocates internally.
+        // Win32 Fibers manage their own stack — slab is a stub carrying the size
+        // (CreateFiber in the shim uses ctx.ss_size = stack_size).
         self.w("    maka_slab_t* s = (maka_slab_t*)calloc(1, sizeof(maka_slab_t));\n");
+        self.w("    if (s) { s->stack_size = stack; s->cacheable = (stack == (size_t)MAKA_FIBER_STACK_SIZE); }\n");
         self.w("    return s; /* may be NULL on OOM; callers must handle */\n");
         self.w("#else\n");
-        self.w("    /* mmap PROT_NONE for the full VM range, then mprotect the usable\n");
-        self.w("       region read/write.  Bottom page stays PROT_NONE as the stack\n");
-        self.w("       overflow guard. */\n");
-        self.w("    void* base = mmap(NULL, MAKA_FIBER_SLAB_RESERVE, PROT_NONE,\n");
-        self.w("                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n");
+        self.w("    /* Reserve VM (PROT_NONE), commit the top `stack` bytes RW, leave the\n");
+        self.w("       rest below as a PROT_NONE overflow guard.  Default size uses the\n");
+        self.w("       1 MB reserve (poolable); a custom size reserves stack + one\n");
+        self.w("       default-size guard span. */\n");
+        self.w("    size_t reserve = (stack == (size_t)MAKA_FIBER_STACK_SIZE) ? (size_t)MAKA_FIBER_SLAB_RESERVE : (stack + (size_t)MAKA_FIBER_STACK_SIZE);\n");
+        self.w("    void* base = mmap(NULL, reserve, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n");
         self.w("    if (base == MAP_FAILED) return NULL;\n");
-        self.w("    /* Commit only the top MAKA_FIBER_STACK_SIZE bytes; leave the bottom\n");
-        self.w("       MAKA_FIBER_SLAB_RESERVE - MAKA_FIBER_STACK_SIZE as PROT_NONE so a\n");
-        self.w("       stack-overflowing fiber segfaults cleanly instead of trampling\n");
-        self.w("       another fiber's slab. */\n");
-        self.w("    void* commit_start = (char*)base + MAKA_FIBER_SLAB_RESERVE - MAKA_FIBER_STACK_SIZE;\n");
-        self.w("    if (mprotect(commit_start, MAKA_FIBER_STACK_SIZE, PROT_READ | PROT_WRITE) != 0) {\n");
-        self.w("        munmap(base, MAKA_FIBER_SLAB_RESERVE);\n");
+        self.w("    void* commit_start = (char*)base + reserve - stack;\n");
+        self.w("    if (mprotect(commit_start, stack, PROT_READ | PROT_WRITE) != 0) {\n");
+        self.w("        munmap(base, reserve);\n");
         self.w("        return NULL;\n");
         self.w("    }\n");
         self.w("    maka_slab_t* s = (maka_slab_t*)malloc(sizeof(maka_slab_t));\n");
-        self.w("    if (!s) { munmap(base, MAKA_FIBER_SLAB_RESERVE); return NULL; }\n");
+        self.w("    if (!s) { munmap(base, reserve); return NULL; }\n");
         self.w("    s->base = base;\n");
         self.w("    s->stack_top = commit_start;\n");
+        self.w("    s->stack_size = stack;\n");
+        self.w("    s->reserve = reserve;\n");
+        self.w("    s->cacheable = (stack == (size_t)MAKA_FIBER_STACK_SIZE);\n");
         self.w("    s->next = NULL;\n");
         self.w("    return s;\n");
         self.w("#endif\n");
         self.w("}\n");
         self.w("static void __maka_slab_free(maka_slab_t* s) {\n");
-        self.w("    /* Return to the pool — never munmap during the program's lifetime.\n");
-        self.w("       This is what makes spawn cheap in the steady state. */\n");
-        self.w("    s->next = maka_slab_pool;\n");
-        self.w("    maka_slab_pool = s;\n");
+        // Default-size slabs return to the per-thread free-list (cheap reuse).
+        // A custom-size stack is released immediately (never pooled).
+        self.w("    if (s->cacheable) { s->next = maka_slab_pool; maka_slab_pool = s; return; }\n");
+        self.w("#ifndef _WIN32\n");
+        self.w("    if (s->base) munmap(s->base, s->reserve);\n");
+        self.w("#endif\n");
+        self.w("    free(s);\n");
         self.w("}\n");
         // Release THIS thread's cached slabs (unmap the reserves + free the
         // structs).  Immortal global-pool workers never call this - it exists
@@ -1435,7 +1445,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    while (s) {\n");
         self.w("        maka_slab_t* nx = s->next;\n");
         self.w("#ifndef _WIN32\n");
-        self.w("        if (s->base) munmap(s->base, MAKA_FIBER_SLAB_RESERVE);\n");
+        self.w("        if (s->base) munmap(s->base, s->reserve);\n");
         self.w("#endif\n");
         self.w("        free(s); s = nx;\n");
         self.w("    }\n");
@@ -2851,7 +2861,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("        __maka_thread_unref(t);  /* runner ref */\n");
         self.w("        return (maka_unit*)t;\n");
         self.w("    }\n");
-        self.w("    f->slab = __maka_slab_alloc();\n");
+        self.w("    f->slab = __maka_slab_alloc(MAKA_FIBER_STACK_SIZE);\n");
         // Slab allocation can fail under heavy OOM / vm.max_map_count limits.
         // Mark the Thread failed + done so a joiner picks up cleanly without
         // pthread_join() / readying a fiber with no usable stack.
@@ -2875,7 +2885,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    atomic_store_explicit(&f->home_sched, (void*)maka_sched_state, memory_order_release);\n");
         self.w("    atomic_store_explicit(&t->home_sched_epoch, maka_sched_state->epoch, memory_order_relaxed);\n");
         self.w("    atomic_store_explicit((_Atomic(void*)*)&t->home_sched, (void*)maka_sched_state, memory_order_release);\n");
-        self.w("    maka_ctx_make(&f->ctx, f->slab->stack_top, MAKA_FIBER_STACK_SIZE, __maka_fiber_entry);\n");
+        self.w("    maka_ctx_make(&f->ctx, f->slab->stack_top, f->slab->stack_size, __maka_fiber_entry);\n");
         // A spawn() from inside a Pool worker creates a child on the shared
         // group; count it in-flight so pool_shutdown waits for it too (matched
         // by the completion-path decrement).
@@ -3011,7 +3021,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("        __maka_thread_unref(t);  /* runner ref */\n");
         self.w("        return (maka_unit*)t;\n");
         self.w("    }\n");
-        self.w("    f->slab = __maka_slab_alloc();\n");
+        self.w("    f->slab = __maka_slab_alloc(MAKA_FIBER_STACK_SIZE);\n");
         self.w("    if (!f->slab) {\n");
         self.w("        free(f);\n");
         self.w("        atomic_store(&t->is_failed, 1);\n");
@@ -3025,7 +3035,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    f->state = 0;\n");
         self.w("    f->waiting_fd = -1; f->waiting_events = 0;\n");
         self.w("    f->wait_deadline_ns = 0; f->wait_timed_out = 0;\n");
-        self.w("    maka_ctx_make(&f->ctx, f->slab->stack_top, MAKA_FIBER_STACK_SIZE, __maka_fiber_entry);\n");
+        self.w("    maka_ctx_make(&f->ctx, f->slab->stack_top, f->slab->stack_size, __maka_fiber_entry);\n");
         self.w("    if (__maka_pool_q_push(f) != 0) {\n");
         // Pool refused (queue closed) — simulate immediate completion so
         // join() doesn't hang, free the fiber, drop the runner ref.
@@ -3057,6 +3067,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
     pthread_cond_t init_cv;
     int creating;                  /* 1 once a worker has begun creating `sched` */
     int closed;                    /* pool_shutdown requested */
+    size_t stack_bytes;            /* fiber stack size for spawn_on/job_on (0 = default) */
 } maka_pool_t;
 /* Each worker runs the SHARED scheduler over the SHARED run queue + reactor, so
    a parked-then-woken fiber resumes on whichever worker is free (M:N), and a
@@ -3114,7 +3125,7 @@ static void* __maka_pool_h_worker(void* arg) {
     __maka_slab_drain();  /* release this worker's cached slabs before exit */
     return NULL;
 }
-maka_unit* __maka_pool_new(maka_int n) {
+maka_unit* __maka_pool_new(maka_int n, maka_int stack_bytes) {
     if (n < 1) n = 1;
     if (n > 1024) n = 1024;
     maka_pool_t* pool = (maka_pool_t*)calloc(1, sizeof(maka_pool_t));
@@ -3122,6 +3133,10 @@ maka_unit* __maka_pool_new(maka_int n) {
     pthread_mutex_init(&pool->init_mu, NULL);
     pthread_cond_init(&pool->init_cv, NULL);
     pool->req_workers = (int)n;
+    /* Clamp the stack size: 0 -> default; otherwise round up to a page and
+       floor at the default so a too-small request can't overflow immediately. */
+    if (stack_bytes <= 0) pool->stack_bytes = 0;
+    else { size_t sb = (size_t)stack_bytes; if (sb < (size_t)MAKA_FIBER_STACK_SIZE) sb = (size_t)MAKA_FIBER_STACK_SIZE; sb = (sb + 4095u) & ~(size_t)4095u; pool->stack_bytes = sb; }
     pool->workers = (pthread_t*)calloc((size_t)n, sizeof(pthread_t));
     if (!pool->workers) { free(pool); return NULL; }
     int started = 0;
@@ -3151,7 +3166,7 @@ maka_unit* __maka_pool_spawn_on(maka_unit* poolv, void* code, void* env, void* e
     t->is_fiber = 1;
     t->env_drop = (void(*)(void*))env_drop;
     maka_fiber_t* f = (maka_fiber_t*)calloc(1, sizeof(maka_fiber_t));
-    maka_slab_t* slab = f ? __maka_slab_alloc() : NULL;
+    maka_slab_t* slab = f ? __maka_slab_alloc(pool ? pool->stack_bytes : 0) : NULL;
     /* Wait for the shared scheduler to come up (the first worker may still be
        creating it) unless the pool is already closed. */
     maka_sched_state_t* sched = NULL;
@@ -3169,7 +3184,7 @@ maka_unit* __maka_pool_spawn_on(maka_unit* poolv, void* code, void* env, void* e
     f->slab = slab;
     f->entry_code = (void(*)(void*))code; f->entry_env = env; f->completion = t; f->state = 0;
     f->waiting_fd = -1; f->waiting_events = 0; f->wait_deadline_ns = 0; f->wait_timed_out = 0;
-    maka_ctx_make(&f->ctx, f->slab->stack_top, MAKA_FIBER_STACK_SIZE, __maka_fiber_entry);
+    maka_ctx_make(&f->ctx, f->slab->stack_top, f->slab->stack_size, __maka_fiber_entry);
     /* Home both the fiber and its completion Thread on the shared scheduler so
        wakes/joins route there. */
     atomic_store_explicit(&f->home_sched_epoch, sched->epoch, memory_order_relaxed);

@@ -1,0 +1,14 @@
+// pool_stack(N, kb): every spawn_on/job_on fiber on this pool gets a custom
+// stack.  deep() recurses with 32 KB frames x 10 = 320 KB, which overflows the
+// default 64 KB fiber stack but fits a 1 MB one.  Proves the user-chosen stack
+// size + the dedicated (non-cached) custom slab alloc/free path.  4 * sum(1..10)
+// = 4 * 55 = 220.
+import std.{ Pool, pool_stack, pool_shutdown, WaitGroup, wg_new, wg_add, wg_done, wg_wait, wg_destroy, Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy };
+int deep(int n) { if (n <= 0) { return 0; } [4096]int big = [n; 4096]; return big[0] + deep(n - 1); }
+unit main() {
+    Pool p = pool_stack(2, 1024);
+    Atomic<int> a = atomic_new(0);
+    WaitGroup wg = wg_new(); wg_add(wg, 4);
+    for (int i in 0..4) { *Thread t = spawn_on(p, unit() [wg, a] { _ = atomic_add(a, deep(10)); wg_done(wg); }); detach(t); }
+    wg_wait(wg); log(atomic_get(a)); pool_shutdown(p); atomic_destroy(a); wg_destroy(wg);
+}
