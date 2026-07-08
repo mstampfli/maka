@@ -2628,20 +2628,22 @@ impl<'a> TypeChecker<'a> {
         //
         // The closure must be a `unit()` callable; captures need `alloc` so the
         // env lives on the heap (the lambda-escape rule applies to all three).
-        // `spawn_on(pool, closure)` — run a fiber on an explicit Pool.  Crosses
-        // an OS-thread boundary, so its captures obey the same rule as
-        // thread/job/spawn_pool (owning / Shareable / scoped-borrow only).
-        if name == "spawn_on" && qualifier.is_none() {
+        // `spawn_on(pool, closure)` / `job_on(pool, closure)` — run work on an
+        // explicit Pool.  Both fan a fiber across the pool's workers (a job is a
+        // fiber that runs to completion; a spawn may yield); they share one
+        // mechanism.  Crossing an OS-thread boundary, their captures obey the
+        // same rule as thread/job/spawn_pool (owning / Shareable / scoped-borrow).
+        if (name == "spawn_on" || name == "job_on") && qualifier.is_none() {
             let hargs: Vec<HExpr> = args.iter().map(|a| self.check_expr(a, None)).collect();
             let thread_id = self.sym.struct_by_name("Thread").map(|(id, _)| id).expect("Thread struct registered");
             let ret_ty = HType::Ptr { mutable: true, inner: Box::new(HType::Struct(thread_id)) };
             if hargs.len() != 2 {
-                self.err("spawn_on expects (Pool, `unit()` closure)".to_string(), sp);
+                self.err(format!("{} expects (Pool, `unit()` closure)", name), sp);
                 return HExpr { kind: HExprKind::LitUnit, ty: ret_ty, span: sp };
             }
             let pool_ok = matches!(&hargs[0].ty, HType::Struct(sid) if self.sym.struct_info(*sid).name == "Pool");
             if !pool_ok {
-                self.err(format!("spawn_on expects a `Pool` as its first argument, got `{}`", type_str(&hargs[0].ty)), sp);
+                self.err(format!("{} expects a `Pool` as its first argument, got `{}`", name, type_str(&hargs[0].ty)), sp);
             }
             let clo = &hargs[1];
             let inner = match &clo.ty {
@@ -2654,10 +2656,10 @@ impl<'a> TypeChecker<'a> {
             let ok = matches!(inner, Some(HType::FnPtr { ret, params })
                 if matches!(**ret, HType::Unit) && params.is_empty());
             if !ok {
-                self.err(format!("spawn_on expects a `unit()` closure, got `{}`", type_str(&clo.ty)), sp);
+                self.err(format!("{} expects a `unit()` closure, got `{}`", name, type_str(&clo.ty)), sp);
             }
             self.collect_send_from_closure(clo);
-            self.check_cross_thread_captures("spawn_on", clo, sp);
+            self.check_cross_thread_captures(name.as_str(), clo, sp);
             // Emit closure-first so the cross-thread lifetime scans (which read
             // args[0]) find it; codegen reads the Pool from args[1].
             return HExpr {
