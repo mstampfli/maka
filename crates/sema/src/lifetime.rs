@@ -2788,6 +2788,13 @@ fn check_scoped_thread_borrows(f: &HFunc, errors: &mut Vec<SemaError>) {
     walk(&f.body, &f.locals, &caps, errors);
 }
 
+/// Does the nominal type named `name` carry a user `Drop` impl?  Such a type is
+/// move-only and gets scope-exit drop glue even if it owns no heap fields (the
+/// `drop` is the resource release).  Mirrors codegen's `type_impls_drop`.
+pub(crate) fn type_impls_drop(sym: &SymTab, name: &str) -> bool {
+    sym.trait_impls.get("Drop").is_some_and(|s| s.contains(name))
+}
+
 pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
     fn go(sym: &SymTab, ty: &HType, seen: &mut Vec<u64>) -> bool {
         match ty {
@@ -2797,6 +2804,8 @@ pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
             // `Rust<T>` owns a boxed Rust value (dropped via a generated shim).
             HType::RustOpaque(_) => true,
             HType::Struct(id) => {
+                // A `has Drop` type is owning/move-only by its destructor alone.
+                if type_impls_drop(sym, &sym.struct_info(*id).name) { return true; }
                 let k = id.0 as u64;
                 if seen.contains(&k) { return false; }
                 seen.push(k);
@@ -2810,6 +2819,7 @@ pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
                 r
             }
             HType::Enum(id) => {
+                if type_impls_drop(sym, &sym.enum_info(*id).name) { return true; }
                 let k = (id.0 as u64) | (1u64 << 32);
                 if seen.contains(&k) { return false; }
                 seen.push(k);

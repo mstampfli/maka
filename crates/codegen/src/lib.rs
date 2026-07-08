@@ -5705,6 +5705,28 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("\n");
     }
 
+    /// Does the nominal type named `name` carry a user `Drop` impl?  Mirrors
+    /// sema's `type_impls_drop`: such a type is owning (its `drop` must run) and
+    /// move-only even when it holds no heap fields.
+    fn type_impls_drop(&self, name: &str) -> bool {
+        self.sym.trait_impls.get("Drop").is_some_and(|s| s.contains(name))
+    }
+
+    /// The C name of `T`'s `Drop::drop` method, if `T has Drop`.  Looked up from
+    /// the `has Drop` impl record keyed by the receiver type name.
+    fn drop_method_cname(&self, type_name: &str) -> Option<String> {
+        for h in &self.sym.has_impls {
+            if h.attr_name != "Drop" || h.type_key != type_name { continue; }
+            for &fid in &h.func_ids {
+                let sig = self.sym.func_sig(fid);
+                if sig.name == "drop" {
+                    return Some(c_ident(&sig.c_name));
+                }
+            }
+        }
+        None
+    }
+
     /// Does a value of this type, by itself, own heap resources that must be
     /// freed?  `own *T` / `own &T` own their pointee; structs/enums own if any
     /// field/variant does; arrays own if their element does.
@@ -5732,6 +5754,16 @@ void __maka_pool_free(maka_unit* poolv) {
     fn compute_drop_owns(&mut self) {
         let structs = self.sym.structs.clone();
         let enums = self.sym.enums.clone();
+        // Seed: a `has Drop` type is owning by its destructor alone, even with no
+        // owning fields.  Seeding before the fixpoint lets containers of a Drop
+        // type inherit ownership through the normal field propagation below.
+        for s in &structs {
+            if !s.type_params.is_empty() { continue; }
+            if self.type_impls_drop(&s.name) { self.drop_owns.insert(s.name.clone()); }
+        }
+        for e in &enums {
+            if self.type_impls_drop(&e.name) { self.drop_owns.insert(e.name.clone()); }
+        }
         loop {
             let mut changed = false;
             for s in &structs {
@@ -5770,6 +5802,11 @@ void __maka_pool_free(maka_unit* poolv) {
         for s in &structs {
             self.wl(&format!("static void __maka_drop_{0}(struct {0}* p) {{", c_ident(&s.name)));
             self.open();
+            // User `Drop::drop` runs first (logical teardown), before the
+            // compiler recursively frees the value's owning fields.
+            if let Some(dropfn) = self.drop_method_cname(&s.name) {
+                self.wl(&format!("{}(p);", dropfn));
+            }
             for fld in &s.fields {
                 if !self.drop_ty_owns(&fld.ty) { continue; }
                 let lv = format!("p->{}", c_ident(&fld.name));
@@ -5781,6 +5818,9 @@ void __maka_pool_free(maka_unit* poolv) {
         for e in &enums {
             self.wl(&format!("static void __maka_drop_{0}(struct {0}* p) {{", c_ident(&e.name)));
             self.open();
+            if let Some(dropfn) = self.drop_method_cname(&e.name) {
+                self.wl(&format!("{}(p);", dropfn));
+            }
             self.wl("switch (p->tag) {");
             self.open();
             for v in &e.variants {

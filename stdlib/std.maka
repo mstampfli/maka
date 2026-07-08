@@ -683,6 +683,14 @@ pub attr BitXor<R = _> { _   bxor(&_ a, &R b); }
 pub attr Shl<R = _>    { _   shl (&_ a, &R b); }
 pub attr Shr<R = _>    { _   shr (&_ a, &R b); }
 
+// Drop: custom teardown for an owning value.  A type that `has Drop` becomes
+// move-only (like `own *T`), and its `drop` runs exactly once at scope exit -
+// before the compiler recursively frees the value's owning fields.  This is the
+// per-type override of the free step: use it to release a resource the compiler
+// can't auto-free (an FFI handle behind a `raw *T`).  For plain heap that libc
+// `free` reclaims, just use `own *T` - no Drop needed.
+pub attr Drop { unit drop(&mut _ self); }
+
 pub String has StringOps {
     // Number of chars held (excludes the trailing NUL).
     int length(&String self) { return (self.buf.len as int) - 1; }
