@@ -265,9 +265,16 @@ fn run() {
         }
     }
 
-    // Write to temp + invoke cc
-    let tmp = format!("/tmp/{}.c", stem);
-    std::fs::write(&tmp, &c_code).expect("write C tmp");
+    // Write to temp + invoke cc.  Use the platform temp dir (`std::env::temp_dir`)
+    // rather than a hardcoded `/tmp` so this works on Windows (%TEMP%) too.
+    let tmp = std::env::temp_dir()
+        .join(format!("{}.c", stem))
+        .to_string_lossy()
+        .into_owned();
+    if let Err(e) = std::fs::write(&tmp, &c_code) {
+        eprintln!("cannot write temp C `{}`: {}", tmp, e);
+        std::process::exit(1);
+    }
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
     let mut cc_args: Vec<String> = vec!["-std=c11".into(), opt_level.clone(),
         // Debug info, so the binary carries DWARF; combined with the `#line`
