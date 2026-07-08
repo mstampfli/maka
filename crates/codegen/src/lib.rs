@@ -1947,6 +1947,9 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("}\n");
         self.w("#endif\n");
         self.w("static void __maka_fd_reg_drop(int fd) {\n");
+        // No scheduler => no reactor registry (maka_fd_regs is
+        // maka_sched_state->fd_regs); nothing was registered, nothing to drop.
+        self.w("    if (!maka_sched_state) return;\n");
         self.w("    maka_fd_reg_t** prev = &maka_fd_regs;\n");
         self.w("    while (*prev) {\n");
         self.w("        if ((*prev)->fd == fd) {\n");
@@ -3259,6 +3262,11 @@ void __maka_pool_free(maka_unit* poolv) {
         // Arm or re-arm `fd` in epoll with `events_mask` (bitwise OR of all
         // waiters' requests).  Drops the registration when the mask is 0.
         self.w("static void __maka_fd_arm(int fd, int events_mask) {\n");
+        // No scheduler on this thread => no reactor (maka_epoll_fd is
+        // maka_sched_state->epoll_fd).  A bare `main` that uses the blocking
+        // solo async path never armed anything, so close_fd's disarm has
+        // nothing to do; without this guard the epoll_fd macro derefs NULL.
+        self.w("    if (!maka_sched_state) return;\n");
         self.w("    if (maka_epoll_fd < 0) { maka_epoll_fd = epoll_create1(EPOLL_CLOEXEC); }\n");
         self.w("    if (events_mask == 0) {\n");
         self.w("        epoll_ctl(maka_epoll_fd, EPOLL_CTL_DEL, fd, NULL);\n");
