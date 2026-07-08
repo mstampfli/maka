@@ -774,10 +774,9 @@ impl Parser {
         if !self.at(&TokKind::RParen) {
             loop {
                 let pstart = self.peek_span();
-                let consume = self.eat(&TokKind::Consume);
                 let ty = self.parse_type()?;
                 let (pname, _) = self.expect_ident("parameter name")?;
-                params.push(Param { name: pname, ty, span: pstart, consume });
+                params.push(Param { name: pname, ty, span: pstart });
                 if !self.eat(&TokKind::Comma) { break; }
             }
         }
@@ -1058,10 +1057,9 @@ impl Parser {
                     break;
                 }
                 let pstart = self.peek_span();
-                let consume = self.eat(&TokKind::Consume);
                 let ty = self.parse_type()?;
                 let (pname, _) = self.expect_ident("parameter name")?;
-                params.push(Param { name: pname, ty, span: pstart, consume });
+                params.push(Param { name: pname, ty, span: pstart });
                 if !self.eat(&TokKind::Comma) { break; }
             }
         }
@@ -1160,10 +1158,9 @@ impl Parser {
         if !self.at(&TokKind::RParen) {
             loop {
                 let pstart = self.peek_span();
-                let consume = self.eat(&TokKind::Consume);
                 let ty = self.parse_type()?;
                 let (pname, _) = self.expect_ident("parameter name")?;
-                params.push(Param { name: pname, ty, span: pstart, consume });
+                params.push(Param { name: pname, ty, span: pstart });
                 if !self.eat(&TokKind::Comma) { break; }
             }
         }
@@ -2500,7 +2497,7 @@ impl Parser {
                     TokKind::Ident(n) => { self.bump(); n },
                     _ => { self.pos = save; return Ok(None); }
                 };
-                params.push(Param { name: p_name, ty: p_ty, span: p_start, consume: false });
+                params.push(Param { name: p_name, ty: p_ty, span: p_start });
                 if self.eat(&TokKind::Comma) { first = false; continue; }
                 if self.at(&TokKind::RParen) { break; }
                 self.pos = save; return Ok(None);

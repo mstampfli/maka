@@ -508,9 +508,6 @@ pub struct FuncSig {
     pub name: String,
     pub param_tys: Vec<HType>,
     pub param_names: Vec<String>,
-    /// Per-param `consume` flag: calling this function moves the caller's
-    /// argument in that position (the callee takes ownership / frees it).
-    pub param_consume: Vec<bool>,
     pub ret: HType,
     /// If true, this is an `extern` declaration; do not emit a body, and call by `c_name`.
     pub is_extern: bool,

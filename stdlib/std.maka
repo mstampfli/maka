@@ -322,7 +322,7 @@ extern "maka_fmutex_destroy" unit                    __fmutex_destroy(*unit m);
 pub Mutex mutex_new()                  { Mutex m = { h = __fmutex_new() }; return m; }
 pub unit  mutex_lock   (Mutex m)       { __fmutex_lock(m.h); }
 pub unit  mutex_unlock (Mutex m)       { __fmutex_unlock(m.h); }
-pub unit  mutex_destroy(consume Mutex m)       { __fmutex_destroy(m.h); }
+pub unit  mutex_destroy(Mutex m)       { __fmutex_destroy(m.h); }
 
 // === Pool (explicit worker pool for spawn_on) ===
 // `Pool p = pool(N)` creates N worker threads; `spawn_on(p, closure)` (a
@@ -338,9 +338,7 @@ extern "__maka_pool_free" unit  __pool_free_h(*unit p);
 // or large-frame fiber bodies.
 pub Pool pool(int n)                     { Pool p = { h = __pool_new_h(n, 0) }; return p; }
 pub Pool pool_stack(int n, int stack_kb) { Pool p = { h = __pool_new_h(n, stack_kb * 1024) }; return p; }
-// `consume` Pool: pool_shutdown frees the pool, so the handle is moved - using
-// the Pool after pool_shutdown is a compile-time use-after-move, not a UAF.
-pub unit pool_shutdown(consume Pool p) { __pool_free_h(p.h); }
+pub unit pool_shutdown(Pool p) { __pool_free_h(p.h); }
 
 // === WaitGroup ===
 pub data WaitGroup { *unit h; }
@@ -354,7 +352,7 @@ pub WaitGroup wg_new()                          { WaitGroup w = { h = __wg_new()
 pub unit      wg_add    (WaitGroup w, int n)    { __wg_add(w.h, n); }
 pub unit      wg_done   (WaitGroup w)           { __wg_done(w.h); }
 pub unit      wg_wait   (WaitGroup w)           { __wg_wait(w.h); }
-pub unit      wg_destroy(consume WaitGroup w)           { __wg_destroy(w.h); }
+pub unit      wg_destroy(WaitGroup w)           { __wg_destroy(w.h); }
 
 // === Once ===
 pub data Once { *unit h; }
@@ -362,7 +360,7 @@ extern "maka_once_new"     *unit __once_new();
 extern "maka_once_destroy" unit                   __once_destroy(*unit o);
 
 pub Once once_new()                              { Once o = { h = __once_new() }; return o; }
-pub unit once_destroy(consume Once o)                    { __once_destroy(o.h); }
+pub unit once_destroy(Once o)                    { __once_destroy(o.h); }
 // `once_do(o, init)` is a compiler builtin — see typeck dispatch.
 
 // === Atomic<T> — one generic atomic for every word-sized value ===
@@ -397,7 +395,7 @@ pub unit atomic_set<T>(Atomic<T> a, T v)   where T has AtomicWord { __atomic_sto
 pub bool atomic_compare_swap<T>(Atomic<T> a, T e, T d) where T has AtomicWord {
     return __atomic_cas_raw(a.h, (&e).to_word(), (&d).to_word()) != 0;
 }
-pub unit atomic_destroy<T>(consume Atomic<T> a)    where T has AtomicWord { __atomic_destroy_raw(a.h); }
+pub unit atomic_destroy<T>(Atomic<T> a)    where T has AtomicWord { __atomic_destroy_raw(a.h); }
 // Fetch-and-add is integer arithmetic, so it is `Atomic<int>`-only.
 pub int  atomic_add(Atomic<int> a, int delta) { return __atomic_add_raw(a.h, delta); }
 
@@ -418,7 +416,7 @@ pub unit atomic_ptr_set<T>(AtomicPtr<T> a, *T p)  { __atomic_store_raw(a.h, p as
 pub bool atomic_ptr_compare_swap<T>(AtomicPtr<T> a, *T expected, *T desired) {
     return __atomic_cas_raw(a.h, expected as int, desired as int) != 0;
 }
-pub unit atomic_ptr_destroy<T>(consume AtomicPtr<T> a)    { __atomic_destroy_raw(a.h); }
+pub unit atomic_ptr_destroy<T>(AtomicPtr<T> a)    { __atomic_destroy_raw(a.h); }
 
 // Byte-channel: variable-size items, set per channel via item_size.  Use
 // these to build typed channels in user code — wrap the *unit handle in a
@@ -439,7 +437,7 @@ pub unit     chan_bytes_send   (ByteChan ch, *mut unit src) { __chan_bytes_send(
 pub unit     chan_bytes_recv   (ByteChan ch, *mut unit dst) { __chan_bytes_recv(ch.h, dst as *unit); }
 pub int      chan_bytes_count  (ByteChan ch)                { return __chan_bytes_count(ch.h); }
 pub unit     chan_bytes_close  (ByteChan ch)                { __chan_bytes_close(ch.h); }
-pub unit     chan_bytes_destroy(consume ByteChan ch)                { __chan_bytes_destroy(ch.h); }
+pub unit     chan_bytes_destroy(ByteChan ch)                { __chan_bytes_destroy(ch.h); }
 
 // Typed int channel — the common case, no need for users to wrap
 // chan_bytes themselves.  Item size is 8 (one i64).
@@ -449,7 +447,7 @@ pub unit    chan_int_send  (IntChan c, int v) { mut int x = v; __chan_bytes_send
 pub int     chan_int_recv  (IntChan c)        { mut int out = 0; __chan_bytes_recv(c.h, &mut out as *mut unit); return out; }
 pub int     chan_int_count (IntChan c)        { return __chan_bytes_count(c.h); }
 pub unit    chan_int_close (IntChan c)        { __chan_bytes_close(c.h); }
-pub unit    chan_int_destroy(consume IntChan c)       { __chan_bytes_destroy(c.h); }
+pub unit    chan_int_destroy(IntChan c)       { __chan_bytes_destroy(c.h); }
 
 // Typed float channel (8-byte f64 items).
 pub data FloatChan { *unit h; }
@@ -458,7 +456,7 @@ pub unit      chan_float_send  (FloatChan c, float v) { mut float x = v; __chan_
 pub float     chan_float_recv  (FloatChan c)         { mut float out = 0.0; __chan_bytes_recv(c.h, &mut out as *mut unit); return out; }
 pub int       chan_float_count (FloatChan c)         { return __chan_bytes_count(c.h); }
 pub unit      chan_float_close (FloatChan c)         { __chan_bytes_close(c.h); }
-pub unit      chan_float_destroy(consume FloatChan c)        { __chan_bytes_destroy(c.h); }
+pub unit      chan_float_destroy(FloatChan c)        { __chan_bytes_destroy(c.h); }
 
 // Generic par_map_bytes — chunks N items across the job pool, calling
 // `body(in_item_ptr, out_item_ptr)` for every item.  `par_map_bytes` is
@@ -523,7 +521,7 @@ pub RwLock rwlock_new()                       { RwLock r = { h = __rwlock_new() 
 pub unit   rwlock_read_lock (RwLock r)         { __rwlock_read_lock(r.h); }
 pub unit   rwlock_write_lock(RwLock r)         { __rwlock_write_lock(r.h); }
 pub unit   rwlock_unlock    (RwLock r)         { __rwlock_unlock(r.h); }
-pub unit   rwlock_destroy   (consume RwLock r)         { __rwlock_destroy(r.h); }
+pub unit   rwlock_destroy   (RwLock r)         { __rwlock_destroy(r.h); }
 
 // (bool / pointer atomics are now covered by the generic `Atomic<T>` above
 // via their `AtomicWord` impls - no separate AtomicBool / AtomicPtr needed.)

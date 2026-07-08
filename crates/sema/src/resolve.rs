@@ -1030,7 +1030,6 @@ impl SymTab {
                     sym.sigs.push(FuncSig {
                         name: f.name.clone(),
                         param_tys, param_names, ret,
-                        param_consume: f.params.iter().map(|p| p.consume).collect(),
                         is_extern: false,
                         // An `export` fn's C symbol is EXACTLY its declared name (the
                         // reverse-FFI contract); a normal fn dodges stdlib C clashes.
@@ -1065,7 +1064,6 @@ impl SymTab {
                     sym.sigs.push(FuncSig {
                         name: e.name.clone(),
                         param_tys, param_names, ret,
-                        param_consume: e.params.iter().map(|p| p.consume).collect(),
                         is_extern: true,
                         c_name: e.c_name.clone(),
                         trait_name: None,
@@ -1411,7 +1409,6 @@ impl SymTab {
                         sym.sigs.push(FuncSig {
                             name: f_subst.name.clone(),
                             param_tys, param_names, ret,
-                            param_consume: f_subst.params.iter().map(|p| p.consume).collect(),
                             is_extern: false,
                             c_name,
                             trait_name: Some(h.attr_name.clone()),

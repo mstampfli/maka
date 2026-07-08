@@ -885,7 +885,6 @@ fn build_extern_decl(f: &RustFn) -> ExternDecl {
             name: p.name.clone(),
             ty: rust_to_maka_ty(&p.ty, sp, false),
             span: sp,
-            consume: false,
         })
         .collect();
     let ret = rust_to_maka_ty(&f.ret, sp, true);
