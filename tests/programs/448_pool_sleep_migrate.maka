@@ -1,0 +1,22 @@
+// A Pool fiber that sleeps parks on the SHARED timer/reactor, so it frees its
+// worker (no sleep/IO pinning) and resumes on whichever worker is free.  20
+// fibers sleep concurrently on a pool of 4; all must resume + complete, and
+// pool_shutdown must drain + join cleanly (regression for the shutdown
+// lost-wakeup where a poll-owner blocked in epoll_wait forever).
+import std.{ Pool, pool, pool_shutdown, Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy, WaitGroup, wg_new, wg_add, wg_done, wg_wait, wg_destroy };
+import std.sleep_ms;
+unit main() {
+    Pool p = pool(4);
+    Atomic<int> a = atomic_new(0);
+    WaitGroup wg = wg_new();
+    wg_add(wg, 20);
+    for (int i in 0..20) {
+        *Thread t = spawn_on(p, unit() [wg, a] { sleep_ms(10); _ = atomic_add(a, 1); wg_done(wg); });
+        detach(t);
+    }
+    wg_wait(wg);
+    log(atomic_get(a));
+    pool_shutdown(p);
+    atomic_destroy(a);
+    wg_destroy(wg);
+}

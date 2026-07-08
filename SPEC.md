@@ -1009,8 +1009,12 @@ run-to-completion work item, and `pool_shutdown(p)` drains and joins the
 workers.  `spawn_on` / `job_on` cross an OS-thread boundary, so their captures
 obey the same rule as `thread` / `job` (owning move-in, Shareable copy, or a
 scoped borrow proven joined before the borrowed data's scope ends).  `Pool` is
-Shareable.  Fibers distribute across the pool's workers via a shared intake;
-cross-worker migration of an already-parked fiber is not yet implemented.
+Shareable.  A pool is a true M:N scheduler: its `N` workers share one run
+queue, timer, and reactor, so a fiber that parks (channel / mutex / wait group
+/ sleep / IO) and is later woken resumes on whichever worker is free, and a
+sleep/IO-parked fiber does not pin the worker it parked on.  (Linux epoll is
+fully shared; the macOS/BSD kqueue reactor sharing is a tracked follow-up.  See
+`docs/GMP_MIGRATION.md`.)
 
 Composition helpers documented in `CONCURRENCY.md`:
   - `join(&[]Handle<T>) -> []T` — homogeneous wait-all

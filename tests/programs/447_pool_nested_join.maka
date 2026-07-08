@@ -1,0 +1,26 @@
+// Explicit Pool with M:N fiber migration: a Pool fiber spawns a child and
+// joins it.  The join must PARK (yield the worker), not block it — otherwise
+// the pool deadlocks when every worker blocks on a child that needs a free
+// worker.  Also exercises inflight accounting for spawned children at
+// pool_shutdown.  Sum = 10 parents + 10 children = 20.
+import std.{ Pool, pool, pool_shutdown, Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy, WaitGroup, wg_new, wg_add, wg_done, wg_wait, wg_destroy };
+unit main() {
+    Pool p = pool(3);
+    Atomic<int> a = atomic_new(0);
+    WaitGroup wg = wg_new();
+    wg_add(wg, 10);
+    for (int i in 0..10) {
+        *Thread t = spawn_on(p, unit() [wg, a] {
+            *Thread c = spawn(unit() [a] { _ = atomic_add(a, 1); });
+            join(c);
+            _ = atomic_add(a, 1);
+            wg_done(wg);
+        });
+        detach(t);
+    }
+    wg_wait(wg);
+    log(atomic_get(a));
+    pool_shutdown(p);
+    atomic_destroy(a);
+    wg_destroy(wg);
+}
