@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  fiber-switch:
+    name: fiber switch (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install MinGW (Windows only - makac compiles its C output with gcc)
+        if: runner.os == 'Windows'
+        run: choco install mingw --no-progress -y
+        shell: pwsh
+
+      - name: Build makac
+        run: cargo build --release --bin makac
+
+      - name: Fiber context-switch smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=target/release/makac
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            BIN=target/release/makac.exe
+            export CC=gcc
+          fi
+          echo "runner=$RUNNER_OS arch=$(uname -m)"
+          out=$("$BIN" tests/ci/fiber_smoke.maka -o fiber_smoke --run 2>&1)
+          echo "output: [$out]"
+          echo "$out" | tail -n1 | grep -qx 100 \
+            || { echo "FAIL: expected 100 (100 fibers x 50 yields = 5000 switches)"; exit 1; }
+          echo "PASS: 5000 cooperative context switches on $RUNNER_OS ($(uname -m))"

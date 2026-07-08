@@ -1,0 +1,25 @@
+// CI smoke test for the fiber context switch: 100 fibers each yield 50 times
+// (5000 cooperative context switches), increment a shared atomic, and signal a
+// wait group.  Prints 100 iff every fiber ran to completion across the switch.
+import std.{ Atomic, WaitGroup, atomic_new, atomic_get, atomic_add, atomic_destroy,
+    wg_new, wg_add, wg_done, wg_wait, wg_destroy, yield_now };
+
+unit main() {
+    Atomic<int> a = atomic_new(0);
+    WaitGroup wg = wg_new();
+    int N = 100;
+    wg_add(wg, N);
+    for (int i in 0..N) {
+        *Thread t = spawn(unit() [a, wg] {
+            mut int k = 0;
+            while (k < 50) { yield_now(); k = k + 1; }
+            _ = atomic_add(a, 1);
+            wg_done(wg);
+        });
+        detach(t);
+    }
+    wg_wait(wg);
+    log(atomic_get(a));   // 100
+    atomic_destroy(a);
+    wg_destroy(wg);
+}
