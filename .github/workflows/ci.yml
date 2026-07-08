@@ -34,22 +34,27 @@ jobs:
         env:
           RUST_BACKTRACE: "1"
         run: |
-          set -uo pipefail
+          set +e                       # GitHub's shell adds -e; undo it so diagnostics print
           BIN=target/release/makac
           if [ "$RUNNER_OS" = "Windows" ]; then
             BIN=target/release/makac.exe
             export CC=gcc
-            gcc --version | head -1 || true
+            gcc --version | head -1
           fi
           echo "== runner=$RUNNER_OS arch=$(uname -m) CC=${CC:-cc} =="
           echo "== step 1: emit C =="
-          "$BIN" tests/ci/fiber_smoke.maka --emit-c -o smoke.c 2>&1 | head -60
+          "$BIN" tests/ci/fiber_smoke.maka --emit-c -o smoke.c 2>&1 | head -40
           echo "emit rc=${PIPESTATUS[0]}"
-          echo "== step 2: compile + run =="
-          "$BIN" tests/ci/fiber_smoke.maka -o fiber_smoke --run > run.out 2>&1
-          rc=$?
-          echo "run rc=$rc"
+          echo "== step 2: makac compile only (surfaces cc/asm/link errors) =="
+          "$BIN" tests/ci/fiber_smoke.maka -o fiber_smoke > build.log 2>&1
+          echo "build rc=$?"
+          echo "----- build.log -----"; head -60 build.log; echo "---------------------"
+          echo "== step 3: run =="
+          ./fiber_smoke > run.out 2>&1
+          echo "run rc=$?"
           echo "----- output -----"; cat run.out; echo "------------------"
-          tail -n1 run.out | grep -qx 100 \
-            || { echo "FAIL: expected 100 on $RUNNER_OS ($(uname -m))"; exit 1; }
-          echo "PASS: 5000 cooperative context switches on $RUNNER_OS ($(uname -m))"
+          if tail -n1 run.out | grep -qx 100; then
+            echo "PASS: 5000 cooperative context switches on $RUNNER_OS ($(uname -m))"
+          else
+            echo "FAIL on $RUNNER_OS ($(uname -m))"; exit 1
+          fi
