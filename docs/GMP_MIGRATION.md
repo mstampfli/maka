@@ -67,6 +67,37 @@ The group model:
   through `home_sched`; once ready lives in the group, their wakes land in a run
   deque with **no per-primitive change** — the single seam pays off everywhere.
 
+## Crux (learned from build attempts)
+
+Migration cannot be a patch bolted onto the current design; it is an indivisible
+conversion of the wake seam from **per-worker to per-group**, and any partial
+version either hangs or cannot free a sleep/IO-parked worker (which defeats the
+point). Concretely, the current runtime binds a fiber to one worker in three
+coupled places, and all three must move to the group at once:
+
+1. **`home_sched` (a `maka_sched_state*`) -> `home_group`.** Today
+   `__maka_ready_enqueue` compares `f->home_sched` to the current worker to
+   decide local-vs-remote; for migration it must compare **groups**, so a wake by
+   any worker in the group lands in the shared run queue.
+2. **The remote-wake inbox (`remote_wake_head` + `wake_pipe`) is per-worker.**
+   An external thread waking a pool fiber posts to *one* worker's inbox; only
+   that worker drains it. For migration the inbox must be **per-group** so any
+   worker drains it and an idle worker is woken (the wake pipe / eventfd must be
+   the group's, tying into the shared reactor below).
+3. **The idle wait must be on the group, not the worker's intake.** An idle
+   worker blocks on the group condvar/reactor; an enqueue (local or drained
+   remote) signals it. This is why the shared reactor (slice 4) and the idle
+   wait (slice 2) are the same problem - they can't be separated.
+
+So the honest slicing is: slices 2-4 land as **one coherent per-group conversion**
+(run queue + remote-wake inbox + reactor/timer + idle-wait), because the wake
+path touches all of them together. Slice 1 (ready queue into the group) and the
+scaffolding (`cv`/`closed`/`inflight`) are the safe, committed groundwork for it.
+A shared **locked** run queue is the correctness-first structure (it supports the
+arbitrary removal that `cancel`/`select` need, which a lock-free Chase-Lev deque
+does not); per-worker Chase-Lev deques + lazy cancellation are the scalable
+follow-up once correct.
+
 ## Build slices (each: build -> full suite -> ASan -> TSan -> commit; revert on any hang)
 
 1. **Group struct + state, no behavior change.** Introduce `maka_sched_group`,
