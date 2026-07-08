@@ -1,0 +1,27 @@
+// Explicit worker Pool: `spawn_on` runs fibers across the pool's workers under
+// the cross-thread capture rule.  Owning values move into the fiber and are
+// dropped by it; `pool_shutdown` drains and joins the workers.  Exercises the
+// owning-capture move + drop and the worker teardown (slab release).
+import std.{ Pool, pool, pool_shutdown, Atomic, WaitGroup, atomic_new, atomic_get,
+    atomic_add, atomic_destroy, wg_new, wg_add, wg_done, wg_wait, wg_destroy };
+data Box { int v; }
+unit main() {
+    Pool p = pool(3);
+    Atomic<int> a = atomic_new(0);
+    WaitGroup wg = wg_new();
+    int N = 100;
+    wg_add(wg, N);
+    for (int i in 0..N) {
+        own *Box b = alloc Box { v = i };
+        *Thread t = spawn_on(p, unit() [a, wg, b] {
+            if (b != null) { _ = atomic_add(a, b!.v); }
+            wg_done(wg);
+        });
+        detach(t);
+    }
+    wg_wait(wg);
+    log(atomic_get(a));   // 0+1+...+99 = 4950
+    pool_shutdown(p);
+    atomic_destroy(a);
+    wg_destroy(wg);
+}

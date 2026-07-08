@@ -2468,7 +2468,10 @@ fn hoist_one(sym: &SymTab, e: &mut HExpr, locals: &mut Vec<LocalInfo>, pre: &mut
 /// Builtin spawn/thread/job/spawn_pool callee ids (a closure arg to one of
 /// these moves its owning captures into the thread).
 fn is_spawn_callee(c: FuncId) -> bool {
-    c.0 == u32::MAX - 3 || c.0 == u32::MAX - 15 || c.0 == u32::MAX - 16 || c.0 == u32::MAX - 37
+    // spawn / thread / job / spawn_pool / spawn_on -- all move owning captures
+    // into the closure env (so the source local must not also be freed).
+    c.0 == u32::MAX - 3 || c.0 == u32::MAX - 15 || c.0 == u32::MAX - 16
+        || c.0 == u32::MAX - 37 || c.0 == u32::MAX - 70
 }
 
 /// Terminal thread-handle reaps: `join` / `detach` / `cancel` unconditionally
@@ -2486,7 +2489,9 @@ fn is_reaping_callee(c: FuncId) -> bool {
 /// same-thread fiber `spawn`.  Only these can outlive the spawning scope, so a
 /// borrowed-reference capture into one is sound only with a proven join.
 fn is_cross_thread_callee(c: FuncId) -> bool {
-    c.0 == u32::MAX - 15 || c.0 == u32::MAX - 16 || c.0 == u32::MAX - 37
+    // thread / job / spawn_pool / spawn_on -- all cross an OS-thread boundary.
+    // (spawn_on is emitted closure-first, so the closure is args[0] like the rest.)
+    c.0 == u32::MAX - 15 || c.0 == u32::MAX - 16 || c.0 == u32::MAX - 37 || c.0 == u32::MAX - 70
 }
 
 /// If `e` is a cross-thread spawn whose closure captures a borrowed reference

@@ -1417,6 +1417,20 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    s->next = maka_slab_pool;\n");
         self.w("    maka_slab_pool = s;\n");
         self.w("}\n");
+        // Release THIS thread's cached slabs (unmap the reserves + free the
+        // structs).  Immortal global-pool workers never call this - it exists
+        // for explicit Pool workers, which exit on pool_shutdown and would
+        // otherwise leak their per-thread slab cache.
+        self.w("static void __maka_slab_drain(void) {\n");
+        self.w("    maka_slab_t* s = maka_slab_pool; maka_slab_pool = NULL;\n");
+        self.w("    while (s) {\n");
+        self.w("        maka_slab_t* nx = s->next;\n");
+        self.w("#ifndef _WIN32\n");
+        self.w("        if (s->base) munmap(s->base, MAKA_FIBER_SLAB_RESERVE);\n");
+        self.w("#endif\n");
+        self.w("        free(s); s = nx;\n");
+        self.w("    }\n");
+        self.w("}\n");
         // home_sched is set at fiber-spawn time and points to the scheduler
         // state of the pthread the fiber was created on.  swapcontext is only
         // safe between contexts in the same pthread, so cross-thread wakes
@@ -2633,6 +2647,126 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    }\n");
         self.w("    return (maka_unit*)t;\n");
         self.w("}\n");
+        // ====================================================================
+        // Explicit worker Pool: `Pool p = pool(N)` / `spawn_on(p, f)` /
+        // `pool_shutdown(p)`.  A user-sized set of N worker threads, each
+        // running its own hardened per-thread fiber scheduler and draining a
+        // shared intake queue.  `spawn_on` fans a fiber across the pool's
+        // workers; a worker that grabs a fiber runs it there (cross-worker
+        // migration/stealing is a follow-up).  `pool_shutdown` closes the
+        // intake and joins the workers once their fibers drain.  Reuses the
+        // single-thread scheduler unchanged, so nothing about `spawn()` moves.
+        // ====================================================================
+        self.w(r#"typedef struct maka_pool_s {
+    maka_pool_q_t intake;
+    pthread_t* workers;
+    int n_workers;
+} maka_pool_t;
+static void* __maka_pool_h_worker(void* arg) {
+    maka_pool_t* pool = (maka_pool_t*)arg;
+    __maka_sched_init();
+    while (1) {
+        pthread_mutex_lock(&pool->intake.lock);
+        while (!pool->intake.head && !pool->intake.closed) {
+            struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 200000000L;
+            if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+            pthread_cond_timedwait(&pool->intake.cond, &pool->intake.lock, &ts);
+        }
+        maka_fiber_t* f = pool->intake.head;
+        if (f) { pool->intake.head = f->next; if (!pool->intake.head) pool->intake.tail = NULL; f->next = NULL; }
+        int closed = pool->intake.closed;
+        pthread_mutex_unlock(&pool->intake.lock);
+        if (!f) { if (closed) break; else continue; }
+        if (atomic_load(&f->completion->cancel_requested)) {
+            Thread* tc = f->completion;
+            pthread_mutex_lock(&tc->done_mutex); tc->done_flag = 1;
+            pthread_cond_broadcast(&tc->done_cond); pthread_mutex_unlock(&tc->done_mutex);
+            __maka_free_env(f->completion, f->entry_env); __maka_slab_free(f->slab); free(f);
+            __maka_thread_unref(tc);
+            continue;
+        }
+        atomic_store_explicit(&f->home_sched_epoch, maka_sched_state->epoch, memory_order_relaxed);
+        atomic_store_explicit(&f->home_sched, (void*)maka_sched_state, memory_order_release);
+        atomic_store_explicit(&f->completion->home_sched_epoch, maka_sched_state->epoch, memory_order_relaxed);
+        atomic_store_explicit((_Atomic(void*)*)&f->completion->home_sched, (void*)maka_sched_state, memory_order_release);
+        __maka_ready_enqueue(f);
+        maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);
+        maka_current_fiber = maka_anchor_fiber;
+    }
+    __maka_slab_drain();  /* release this worker's cached slabs on exit */
+    return NULL;
+}
+maka_unit* __maka_pool_new(maka_int n) {
+    if (n < 1) n = 1;
+    if (n > 1024) n = 1024;
+    maka_pool_t* pool = (maka_pool_t*)calloc(1, sizeof(maka_pool_t));
+    if (!pool) return NULL;
+    pthread_mutex_init(&pool->intake.lock, NULL);
+    pthread_cond_init(&pool->intake.cond, NULL);
+    pool->intake.head = pool->intake.tail = NULL;
+    pool->intake.closed = 0;
+    pool->workers = (pthread_t*)calloc((size_t)n, sizeof(pthread_t));
+    if (!pool->workers) { free(pool); return NULL; }
+    int started = 0;
+    for (maka_int i = 0; i < n; i++) {
+        if (pthread_create(&pool->workers[started], NULL, __maka_pool_h_worker, pool) == 0) started++;
+    }
+    pool->n_workers = started;
+    if (started == 0) pool->intake.closed = 1;
+    return (maka_unit*)pool;
+}
+maka_unit* __maka_pool_spawn_on(maka_unit* poolv, void* code, void* env, void* env_drop) {
+    maka_pool_t* pool = (maka_pool_t*)poolv;
+    Thread* t = __maka_thread_new();
+    t->is_fiber = 1;
+    t->env_drop = (void(*)(void*))env_drop;
+    maka_fiber_t* f = (maka_fiber_t*)calloc(1, sizeof(maka_fiber_t));
+    maka_slab_t* slab = f ? __maka_slab_alloc() : NULL;
+    if (!pool || !f || !slab) {
+        if (slab) __maka_slab_free(slab);
+        if (f) free(f);
+        atomic_store(&t->is_failed, 1);
+        pthread_mutex_lock(&t->done_mutex); t->done_flag = 1;
+        pthread_cond_broadcast(&t->done_cond); pthread_mutex_unlock(&t->done_mutex);
+        __maka_thread_unref(t);
+        return (maka_unit*)t;
+    }
+    f->slab = slab;
+    f->entry_code = (void(*)(void*))code; f->entry_env = env; f->completion = t; f->state = 0;
+    f->waiting_fd = -1; f->waiting_events = 0; f->wait_deadline_ns = 0; f->wait_timed_out = 0;
+    maka_ctx_make(&f->ctx, f->slab->stack_top, MAKA_FIBER_STACK_SIZE, __maka_fiber_entry);
+    pthread_mutex_lock(&pool->intake.lock);
+    if (pool->intake.closed) {
+        pthread_mutex_unlock(&pool->intake.lock);
+        __maka_slab_free(f->slab); free(f);
+        atomic_store(&t->is_failed, 1);
+        pthread_mutex_lock(&t->done_mutex); t->done_flag = 1;
+        pthread_cond_broadcast(&t->done_cond); pthread_mutex_unlock(&t->done_mutex);
+        __maka_thread_unref(t);
+        return (maka_unit*)t;
+    }
+    f->next = NULL;
+    if (pool->intake.tail) pool->intake.tail->next = f; else pool->intake.head = f;
+    pool->intake.tail = f;
+    pthread_cond_signal(&pool->intake.cond);
+    pthread_mutex_unlock(&pool->intake.lock);
+    return (maka_unit*)t;
+}
+void __maka_pool_free(maka_unit* poolv) {
+    maka_pool_t* pool = (maka_pool_t*)poolv;
+    if (!pool) return;
+    pthread_mutex_lock(&pool->intake.lock);
+    pool->intake.closed = 1;
+    pthread_cond_broadcast(&pool->intake.cond);
+    pthread_mutex_unlock(&pool->intake.lock);
+    for (int i = 0; i < pool->n_workers; i++) pthread_join(pool->workers[i], NULL);
+    pthread_mutex_destroy(&pool->intake.lock);
+    pthread_cond_destroy(&pool->intake.cond);
+    free(pool->workers);
+    free(pool);
+}
+"#);
         // Cooperative sleep / yield primitives.
         self.w("void __maka_yield_now(void) {\n");
         self.w("    if (!maka_current_fiber || maka_current_fiber == maka_anchor_fiber) return;\n");
@@ -9795,6 +9929,16 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
             if let Some(a) = args.first() {
                 let s = self.emit_sub(f, a);
                 return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_spawn_pool(__cb.code, __cb.env, {}); }}))", s, self.spawn_env_drop(a));
+            }
+            return "NULL".into();
+        }
+        // Built-in `spawn_on(closure, pool)` — fiber on an explicit Pool.  Emitted
+        // closure-first (args[0]=closure, args[1]=pool) so the lifetime scans match.
+        if callee.0 == u32::MAX - 70 {
+            if args.len() == 2 {
+                let s = self.emit_sub(f, &args[0]);
+                let pool = self.emit_sub(f, &args[1]);
+                return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_pool_spawn_on(({}).h, __cb.code, __cb.env, {}); }}))", s, pool, self.spawn_env_drop(&args[0]));
             }
             return "NULL".into();
         }

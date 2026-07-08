@@ -324,6 +324,17 @@ pub unit  mutex_lock   (Mutex m)       { __fmutex_lock(m.h); }
 pub unit  mutex_unlock (Mutex m)       { __fmutex_unlock(m.h); }
 pub unit  mutex_destroy(Mutex m)       { __fmutex_destroy(m.h); }
 
+// === Pool (explicit worker pool for spawn_on) ===
+// `Pool p = pool(N)` creates N worker threads; `spawn_on(p, closure)` (a
+// builtin, so its captures are checked at the call site) runs a fiber on the
+// pool; `pool_shutdown(p)` closes the intake and joins the workers.
+pub data Pool { *unit h; }
+extern "__maka_pool_new"  *unit __pool_new_h(int n);
+extern "__maka_pool_free" unit  __pool_free_h(*unit p);
+
+pub Pool pool(int n)           { Pool p = { h = __pool_new_h(n) }; return p; }
+pub unit pool_shutdown(Pool p) { __pool_free_h(p.h); }
+
 // === WaitGroup ===
 pub data WaitGroup { *unit h; }
 extern "maka_wg_new"     *unit __wg_new();

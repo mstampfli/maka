@@ -1,0 +1,10 @@
+// spawn_on crosses an OS-thread boundary, so capturing a borrow without a
+// provable join before the borrowed data's scope ends must be rejected.
+import std.{ Pool, pool, pool_shutdown };
+unit main() {
+    Pool p = pool(2);
+    mut int x = 5;
+    *Thread t = spawn_on(p, unit() [&mut x] { x = x + 1; });
+    detach(t);
+    pool_shutdown(p);
+}

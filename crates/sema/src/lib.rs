@@ -948,7 +948,8 @@ fn place_root_global(e: &HExpr) -> Option<u32> {
 /// The fiber tier (`spawn`, MAX-3) multiplexes cooperatively on one thread and
 /// never races, so it is excluded.
 fn is_real_thread_callee(c: FuncId) -> bool {
-    c.0 == u32::MAX - 15 || c.0 == u32::MAX - 16 || c.0 == u32::MAX - 37
+    // thread / job / spawn_pool / spawn_on all run on real OS threads.
+    c.0 == u32::MAX - 15 || c.0 == u32::MAX - 16 || c.0 == u32::MAX - 37 || c.0 == u32::MAX - 70
 }
 
 /// The lifted body FuncId a spawn's callable argument runs, unwrapping the
