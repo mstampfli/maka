@@ -31,16 +31,25 @@ jobs:
 
       - name: Fiber context-switch smoke test
         shell: bash
+        env:
+          RUST_BACKTRACE: "1"
         run: |
-          set -euo pipefail
+          set -uo pipefail
           BIN=target/release/makac
           if [ "$RUNNER_OS" = "Windows" ]; then
             BIN=target/release/makac.exe
             export CC=gcc
+            gcc --version | head -1 || true
           fi
-          echo "runner=$RUNNER_OS arch=$(uname -m)"
-          out=$("$BIN" tests/ci/fiber_smoke.maka -o fiber_smoke --run 2>&1)
-          echo "output: [$out]"
-          echo "$out" | tail -n1 | grep -qx 100 \
-            || { echo "FAIL: expected 100 (100 fibers x 50 yields = 5000 switches)"; exit 1; }
+          echo "== runner=$RUNNER_OS arch=$(uname -m) CC=${CC:-cc} =="
+          echo "== step 1: emit C =="
+          "$BIN" tests/ci/fiber_smoke.maka --emit-c -o smoke.c 2>&1 | head -60
+          echo "emit rc=${PIPESTATUS[0]}"
+          echo "== step 2: compile + run =="
+          "$BIN" tests/ci/fiber_smoke.maka -o fiber_smoke --run > run.out 2>&1
+          rc=$?
+          echo "run rc=$rc"
+          echo "----- output -----"; cat run.out; echo "------------------"
+          tail -n1 run.out | grep -qx 100 \
+            || { echo "FAIL: expected 100 on $RUNNER_OS ($(uname -m))"; exit 1; }
           echo "PASS: 5000 cooperative context switches on $RUNNER_OS ($(uname -m))"
