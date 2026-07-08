@@ -1,0 +1,13 @@
+// pool(0) is clamped to 1 worker (never 0, which would strand all work).
+// The 5 fibers still run.  Sum = 5.
+import std.{ Pool, pool, pool_shutdown, Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy, WaitGroup, wg_new, wg_add, wg_done, wg_wait, wg_destroy };
+unit main() {
+    Pool p = pool(0);
+    Atomic<int> a = atomic_new(0);
+    WaitGroup wg = wg_new(); wg_add(wg, 5);
+    for (int i in 0..5) { *Thread t = spawn_on(p, unit() [a, wg] { _ = atomic_add(a, 1); wg_done(wg); }); detach(t); }
+    wg_wait(wg);
+    log(atomic_get(a));
+    pool_shutdown(p);
+    atomic_destroy(a); wg_destroy(wg);
+}

@@ -1,0 +1,19 @@
+// One-worker Pool where a fiber spawns 500 children: the worker's 256-slot
+// lock-free deque overflows to the group's global run queue.  All 500 must run
+// (nothing dropped on the overflow path).  Sum = 500.
+import std.{ Pool, pool, pool_shutdown, Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy, WaitGroup, wg_new, wg_add, wg_done, wg_wait, wg_destroy };
+unit main() {
+    Pool p = pool(1);
+    Atomic<int> a = atomic_new(0);
+    WaitGroup wg = wg_new(); wg_add(wg, 1);
+    *Thread parent = spawn_on(p, unit() [a, wg] {
+        WaitGroup cwg = wg_new(); wg_add(cwg, 500);
+        for (int i in 0..500) { *Thread c = spawn(unit() [a, cwg] { _ = atomic_add(a, 1); wg_done(cwg); }); detach(c); }
+        wg_wait(cwg); wg_destroy(cwg); wg_done(wg);
+    });
+    detach(parent);
+    wg_wait(wg);
+    log(atomic_get(a));
+    pool_shutdown(p);
+    atomic_destroy(a); wg_destroy(wg);
+}
