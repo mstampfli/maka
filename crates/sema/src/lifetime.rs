@@ -1271,10 +1271,16 @@ impl<'a> Analyzer<'a> {
             HExprKind::Call { callee, args } => {
                 let spawn = is_spawn_callee(*callee);
                 let reap = is_reaping_callee(*callee);
-                for a in args.iter_mut() {
+                // `spawn_on`/`job_on` (MAX-70) submit work to a Pool passed as
+                // args[1]; they BORROW it (the pool outlives the fibers - its drop
+                // drains+joins the workers), so it must not be moved/consumed.
+                let pool_borrow_arg = if callee.0 == u32::MAX - 70 { 1usize } else { usize::MAX };
+                for (i, a) in args.iter_mut().enumerate() {
                     // Detect move-in for any owning value passed by value.
                     self.walk_expr(a);
-                    self.mark_owning_move(a);
+                    if i != pool_borrow_arg {
+                        self.mark_owning_move(a);
+                    }
                     // A closure passed to spawn/thread/job MOVES its owning
                     // captures into the thread, so using them afterwards is a
                     // use-after-move (the thread now owns and frees them).

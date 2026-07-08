@@ -1,0 +1,18 @@
+// Pool with NO explicit shutdown: must auto-drop (drain+join+free) at scope exit.
+import std.{ Pool, pool, WaitGroup, wg_new, wg_add, wg_done, wg_wait, wg_destroy, Atomic, atomic_new, atomic_add, atomic_get, atomic_destroy };
+unit main() {
+    Atomic<int> a = atomic_new(0);
+    WaitGroup wg = wg_new();
+    {
+        Pool p = pool(3);
+        wg_add(wg, 6);
+        for (int i in 0..6) {
+            *Thread t = spawn_on(p, unit() [a, wg] { _ = atomic_add(a, 1); wg_done(wg); });
+            detach(t);
+        }
+        wg_wait(wg);
+    }   // <- p auto-drops here (no pool_shutdown): drain+join+free
+    log(atomic_get(a));   // 6
+    atomic_destroy(a);
+    wg_destroy(wg);
+}

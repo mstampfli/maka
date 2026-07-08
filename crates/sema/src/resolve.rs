@@ -1299,6 +1299,24 @@ impl SymTab {
                         }
                     }
                     if overlapped { continue; }
+                    // `Drop` may only be implemented on a nominal `data`/`enum`
+                    // type.  On a primitive/pointer/copyable receiver it would be
+                    // a silent no-op (such a type never joins the owning drop
+                    // path), so reject it - wrap the resource in a named type.
+                    if h.attr_name == "Drop"
+                        && !matches!(receiver_pattern, HType::Struct(_) | HType::Enum(_))
+                    {
+                        errors.push(SemaError {
+                            msg: format!(
+                                "`Drop` can only be implemented on a `data` or `enum` type, not `{}`; \
+                                 a destructor on a copyable/primitive type would never run - \
+                                 wrap the resource in a named type",
+                                h.type_name,
+                            ),
+                            span: h.span,
+                        });
+                        continue;
+                    }
                     // Record the impl: `<T: Attr>` bound is satisfied when T == type_name,
                     // subject to visibility filtering at bound-check time.
                     sym.trait_impls.entry(h.attr_name.clone())
