@@ -1,0 +1,28 @@
+// Work-stealing stress: 300 Pool fibers, each sleeps (parks on the shared
+// timer), increments an atomic, spawns a child + joins it, then wg_done.  The
+// child also increments.  Exercises the per-worker lock-free deques + stealing
+// + the timer wake (routed through the group's global queue) + nested join +
+// graceful shutdown under heavy churn.  Sum = 300 parents + 300 children = 600.
+import std.{ Pool, pool, pool_shutdown, Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy, WaitGroup, wg_new, wg_add, wg_done, wg_wait, wg_destroy };
+import std.sleep_us;
+unit main() {
+    Pool p = pool(4);
+    Atomic<int> a = atomic_new(0);
+    WaitGroup wg = wg_new();
+    wg_add(wg, 300);
+    for (int i in 0..300) {
+        *Thread t = spawn_on(p, unit() [wg, a] {
+            sleep_us(150);
+            _ = atomic_add(a, 1);
+            *Thread c = spawn(unit() [a] { sleep_us(80); _ = atomic_add(a, 1); });
+            join(c);
+            wg_done(wg);
+        });
+        detach(t);
+    }
+    wg_wait(wg);
+    log(atomic_get(a));
+    pool_shutdown(p);
+    atomic_destroy(a);
+    wg_destroy(wg);
+}

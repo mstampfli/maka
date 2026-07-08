@@ -1489,13 +1489,50 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    int closed_fd;\n");
         self.w("    struct maka_close_req_s* next;\n");
         self.w("} maka_close_req_t;\n");
-        // Scheduler group (GMP slice 1): the set of worker threads that share a
-        // ready queue.  n_workers==1 is a lone worker (cooperative `spawn`, or a
-        // pool worker not yet grouped) - the hot path never locks.  A Pool will
-        // (slice 2) create ONE group of N workers sharing `run_head`, at which
-        // point `lock` guards it.  PERF NOTE: the scalable end state is per-worker
-        // Chase-Lev deques with stealing (as the `job` pool already uses); this
-        // single shared queue is the correctness-first step, optimized afterward.
+        // --- Per-worker lock-free FIFO run queue (work-stealing) ---------------
+        // A fiber scheduler needs FIFO (fair `yield`: a yielding fiber lets peers
+        // run before it), so this is a Go/Tokio-style ring - push at tail, pop or
+        // steal at head - NOT the LIFO Chase-Lev the `job` pool uses (jobs are
+        // fork-join, where LIFO-local is optimal; fibers are cooperative, where
+        // LIFO would let a yielding fiber immediately re-run itself).  Single
+        // producer (the owner pushes tail), multi consumer (owner pops + thieves
+        // steal, both CAS head).  Overflow spills to the group's global linked
+        // run queue (run_head/tail); cross-thread wakes land there too.  head and
+        // tail are int64 so they never wrap in practice (no ABA).
+        self.w("#define MAKA_FRQ_CAP 256\n");
+        self.w("typedef struct {\n");
+        self.w("    _Atomic int64_t head;\n");
+        self.w("    _Atomic int64_t tail;\n");
+        self.w("    maka_fiber_t* buf[MAKA_FRQ_CAP];\n");
+        self.w("} maka_frunq_t;\n");
+        // Owner push at tail (single producer).  Returns 0 if full (caller spills
+        // to the group's global queue).
+        self.w("static inline int __maka_frq_push(maka_frunq_t* q, maka_fiber_t* f) {\n");
+        self.w("    int64_t t = atomic_load_explicit(&q->tail, memory_order_relaxed);\n");
+        self.w("    int64_t h = atomic_load_explicit(&q->head, memory_order_acquire);\n");
+        self.w("    if (t - h >= MAKA_FRQ_CAP) return 0;\n");
+        self.w("    q->buf[t % MAKA_FRQ_CAP] = f;\n");
+        self.w("    atomic_thread_fence(memory_order_release);\n");
+        self.w("    atomic_store_explicit(&q->tail, t + 1, memory_order_relaxed);\n");
+        self.w("    return 1;\n");
+        self.w("}\n");
+        // Pop (owner) / steal (thief) at head - identical, both CAS head, FIFO.
+        self.w("static inline maka_fiber_t* __maka_frq_take(maka_frunq_t* q) {\n");
+        self.w("    for (;;) {\n");
+        self.w("        int64_t h = atomic_load_explicit(&q->head, memory_order_acquire);\n");
+        self.w("        atomic_thread_fence(memory_order_seq_cst);\n");
+        self.w("        int64_t t = atomic_load_explicit(&q->tail, memory_order_acquire);\n");
+        self.w("        if (h >= t) return NULL;\n");
+        self.w("        maka_fiber_t* f = q->buf[h % MAKA_FRQ_CAP];\n");
+        self.w("        int64_t expected = h;\n");
+        self.w("        if (atomic_compare_exchange_strong_explicit(&q->head, &expected, h + 1, memory_order_seq_cst, memory_order_relaxed)) return f;\n");
+        self.w("    }\n");
+        self.w("}\n");
+        // Scheduler group: the set of worker threads that share a run queue.  The
+        // HOT path is per-worker lock-free FIFO deques (`frunqs`) with stealing;
+        // `run_head`/`run_tail` is the group's global overflow + cross-thread
+        // landing queue (guarded by `lock`, a no-op for a lone cooperative
+        // worker).  n_workers==1 is a lone worker (cooperative `spawn`).
         self.w("struct maka_fd_reg_s;\n");
         self.w("typedef struct maka_sched_group_s {\n");
         self.w("    pthread_mutex_t lock;\n");
@@ -1517,6 +1554,13 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         // poll-owner idle wait (wait-for-work instead of return-to-anchor), and
         // inflight accounting.  Cooperative groups keep zero overhead.
         self.w("    int is_pool;\n");
+        // Per-worker lock-free FIFO deques (the work-stealing hot path) + the
+        // atomic id dispenser workers claim their slot from on attach.  frunqs
+        // has n_workers slots; frunqs[id] is owned by worker `id`, stolen from
+        // by peers.  run_head/tail above is the shared overflow/cross-thread
+        // fallback.
+        self.w("    _Atomic(maka_frunq_t*) *frunqs;\n");
+        self.w("    _Atomic int worker_seq;\n");
         self.w("} maka_sched_group_t;\n");
         self.w("typedef struct maka_sched_state_s {\n");
         self.w("    pthread_mutex_t remote_mu;\n");
@@ -1561,6 +1605,13 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("} maka_sched_state_t;\n");
         self.w("static _Atomic int64_t __maka_sched_epoch_ctr = 1;\n");
         self.w("static __thread maka_sched_state_t* maka_sched_state = NULL;\n");
+        // This worker's own lock-free deque + its id within the group (the slot
+        // it owns in group->frunqs).  Set in sched_init (lone worker id 0) and
+        // in the pool worker attach.
+        self.w("static __thread maka_frunq_t* maka_my_frunq = NULL;\n");
+        self.w("static __thread int maka_my_worker_id = 0;\n");
+        // xorshift32 for random steal-victim selection (per-worker, no shared state).
+        self.w("static __thread unsigned int maka_steal_rng = 2463534242u;\n");
         self.w("static __thread maka_mctx_t maka_sched_ctx;\n");
         self.w("static __thread maka_fiber_t* maka_current_fiber = NULL;\n");
         // The ready queue lives in the worker's group (shared across a Pool's
@@ -1897,6 +1948,23 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("#define MAKA_EV_READ  1\n");
         self.w("#define MAKA_EV_WRITE 2\n");
         self.w("static __thread char maka_sched_stack[256 * 1024];\n");
+        // Is there any ready fiber to run - this worker's deque, the group's
+        // global overflow/cross-thread queue, or (pool) any peer's deque?  Used
+        // by the watchdog, the pool idle re-check, and the anchor wait-loops
+        // that decide whether to drive the scheduler vs block.  Lock-free reads;
+        // a stale answer is harmless (the actual dequeue re-checks).
+        self.w("static inline int __maka_have_ready(void) {\n");
+        self.w("    if (maka_my_frunq && atomic_load_explicit(&maka_my_frunq->head, memory_order_acquire) < atomic_load_explicit(&maka_my_frunq->tail, memory_order_acquire)) return 1;\n");
+        self.w("    if (maka_ready_head) return 1;\n");
+        self.w("    if (maka_sched_state->group->is_pool) {\n");
+        self.w("        maka_sched_group_t* g = maka_sched_state->group;\n");
+        self.w("        if (g->frunqs) for (int i = 0; i < g->n_workers; i++) {\n");
+        self.w("            maka_frunq_t* q = atomic_load_explicit(&g->frunqs[i], memory_order_relaxed);\n");
+        self.w("            if (q && atomic_load_explicit(&q->head, memory_order_acquire) < atomic_load_explicit(&q->tail, memory_order_acquire)) return 1;\n");
+        self.w("        }\n");
+        self.w("    }\n");
+        self.w("    return 0;\n");
+        self.w("}\n");
         self.w("static void __maka_ready_enqueue(maka_fiber_t* f) {\n");
         // Dedupe: if the fiber is already queued somewhere (state==0 with a
         // non-self next), enqueueing again would either splice it into a
@@ -1919,7 +1987,6 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("                pthread_cond_broadcast(&f->completion->done_cond);\n");
         self.w("                pthread_mutex_unlock(&f->completion->done_mutex);\n");
         self.w("            }\n");
-        self.w("            atomic_store(&f->in_queue, 0);\n");
         self.w("            return;\n");
         self.w("        }\n");
         self.w("        pthread_mutex_lock(&home->remote_mu);\n");
@@ -1933,13 +2000,18 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("        __maka_sched_state_unref(home);\n");
         self.w("        return;\n");
         self.w("    }\n");
-        self.w("    MAKA_GRP_LOCK();\n");
-        self.w("    if (maka_ready_tail) { maka_ready_tail->next = f; maka_ready_tail = f; }\n");
-        self.w("    else { maka_ready_head = maka_ready_tail = f; }\n");
-        // Pool: a peer worker may be idle (cv-waiting) or driving the shared
-        // reactor (epoll_wait).  Wake one waiter via the cv, and if a worker
-        // is in the reactor, ping the shared wake_pipe so its epoll_wait
-        // returns and re-checks the run queue.
+        // Local wake: push to THIS worker's lock-free deque (hot path, no lock).
+        // Only when it is full (>256 ready fibers on one worker) spill to the
+        // group's global queue under the lock.  A lone cooperative worker never
+        // contends the lock (it is a no-op there).
+        self.w("    if (!(maka_my_frunq && __maka_frq_push(maka_my_frunq, f))) {\n");
+        self.w("        MAKA_GRP_LOCK();\n");
+        self.w("        if (maka_ready_tail) { maka_ready_tail->next = f; maka_ready_tail = f; }\n");
+        self.w("        else { maka_ready_head = maka_ready_tail = f; }\n");
+        self.w("        MAKA_GRP_UNLOCK();\n");
+        self.w("    }\n");
+        // Pool: wake a peer so it can steal this fiber (idle peers cv-wait; the
+        // poll-owner is in epoll_wait, woken via the shared wake_pipe).
         self.w("    if (maka_sched_state->group->is_pool) {\n");
         self.w("        pthread_cond_signal(&maka_sched_state->group->cv);\n");
         self.w("        if (maka_sched_state->group->polling && maka_sched_state->wake_pipe_w > 0) { char b = 1; (void)send(maka_sched_state->wake_pipe_w, &b, 1, 0); }\n");
@@ -1981,7 +2053,11 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    while (head) { maka_fiber_t* nx = head->next; head->next = prev; prev = head; head = nx; }\n");
         self.w("    while (prev) {\n");
         self.w("        maka_fiber_t* nx = prev->next; prev->next = NULL;\n");
-        self.w("        atomic_store(&prev->in_queue, 0);\n");
+        // Keep in_queue == 1: the fiber is still queued, just moved from the
+        // remote inbox to the global run queue.  Clearing it here would break
+        // the dedup invariant (in_queue==1 iff queued) and let a concurrent
+        // lock-free frq_push double-queue it -> double dispatch.  Dequeue clears
+        // it when the fiber is actually taken to run.
         self.w("        if (maka_ready_tail) { maka_ready_tail->next = prev; maka_ready_tail = prev; }\n");
         self.w("        else { maka_ready_head = maka_ready_tail = prev; }\n");
         self.w("        prev->state = 0; prev = nx;\n");
@@ -2020,17 +2096,62 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("        free(creq); creq = nx;\n");
         self.w("    }\n");
         self.w("}\n");
+        // Reap a lazily-cancelled fiber pulled from a run deque: the fiber never
+        // ran (cancel walks the sleep/fd/waiter lists but cannot remove from a
+        // lock-free deque, so a ready fiber is flagged and reaped here instead).
+        // Mirrors the natural-completion teardown so refcounts stay balanced:
+        // env_drop frees any owner moved into it, joiners wake, inflight drops.
+        self.w("static void __maka_reap_cancelled(maka_fiber_t* f) {\n");
+        self.w("    if (maka_sched_state->group->is_pool && f != maka_anchor_fiber) atomic_fetch_sub(&maka_sched_state->group->inflight, 1);\n");
+        self.w("    Thread* t = f->completion;\n");
+        self.w("    pthread_mutex_lock(&t->done_mutex);\n");
+        self.w("    t->done_flag = 1;\n");
+        self.w("    pthread_cond_broadcast(&t->done_cond);\n");
+        self.w("    maka_fiber_t* drain = f->waiters; f->waiters = NULL;\n");
+        self.w("    maka_fiber_t* jdrain = t->fiber_waiters; t->fiber_waiters = NULL;\n");
+        self.w("    pthread_mutex_unlock(&t->done_mutex);\n");
+        self.w("    while (drain) { maka_fiber_t* nx = drain->next_waiter; drain->next_waiter = NULL; __maka_ready_enqueue(drain); drain = nx; }\n");
+        self.w("    while (jdrain) { maka_fiber_t* nx = jdrain->next_waiter; jdrain->next_waiter = NULL; __maka_ready_enqueue(jdrain); jdrain = nx; }\n");
+        self.w("    __maka_free_env(t, f->entry_env);\n");
+        self.w("    __maka_slab_free(f->slab);\n");
+        self.w("    free(f);\n");
+        self.w("    __maka_thread_unref(t);\n");
+        self.w("}\n");
+        // Dequeue: own lock-free deque (hot) -> group global overflow/cross-thread
+        // queue -> steal from a random peer (pool).  Lazily-cancelled fibers are
+        // reaped and skipped.
         self.w("static maka_fiber_t* __maka_ready_dequeue(void) {\n");
-        self.w("    MAKA_GRP_LOCK();\n");
-        self.w("    maka_fiber_t* f = maka_ready_head;\n");
-        self.w("    if (!f) { MAKA_GRP_UNLOCK(); return NULL; }\n");
-        self.w("    maka_ready_head = f->next;\n");
-        self.w("    if (!maka_ready_head) maka_ready_tail = NULL;\n");
-        self.w("    f->next = NULL;\n");
-        // Re-enqueueable: the fiber is leaving the queue, future wakes can push again.
-        self.w("    atomic_store(&f->in_queue, 0);\n");
-        self.w("    MAKA_GRP_UNLOCK();\n");
-        self.w("    return f;\n");
+        self.w("    for (;;) {\n");
+        self.w("        maka_fiber_t* f = NULL;\n");
+        self.w("        if (maka_my_frunq) f = __maka_frq_take(maka_my_frunq);\n");
+        self.w("        if (!f) {\n");
+        self.w("            MAKA_GRP_LOCK();\n");
+        self.w("            f = maka_ready_head;\n");
+        self.w("            if (f) { maka_ready_head = f->next; if (!maka_ready_head) maka_ready_tail = NULL; f->next = NULL; }\n");
+        self.w("            MAKA_GRP_UNLOCK();\n");
+        self.w("        }\n");
+        self.w("        if (!f && maka_sched_state->group->is_pool) {\n");
+        self.w("            maka_sched_group_t* g = maka_sched_state->group;\n");
+        self.w("            int n = g->n_workers;\n");
+        self.w("            if (n > 1 && g->frunqs) {\n");
+        self.w("                maka_steal_rng ^= maka_steal_rng << 13; maka_steal_rng ^= maka_steal_rng >> 17; maka_steal_rng ^= maka_steal_rng << 5;\n");
+        self.w("                int start = (int)(maka_steal_rng % (unsigned)n);\n");
+        self.w("                for (int i = 0; i < n; i++) {\n");
+        self.w("                    int v = (start + i) % n;\n");
+        self.w("                    if (v == maka_my_worker_id) continue;\n");
+        self.w("                    maka_frunq_t* vq = atomic_load_explicit(&g->frunqs[v], memory_order_relaxed);\n");
+        self.w("                    if (vq) { f = __maka_frq_take(vq); if (f) break; }\n");
+        self.w("                }\n");
+        self.w("            }\n");
+        self.w("        }\n");
+        self.w("        if (!f) return NULL;\n");
+        self.w("        atomic_store(&f->in_queue, 0);\n");
+        self.w("        if (f->completion && atomic_load(&f->completion->cancel_requested) && f != maka_anchor_fiber) {\n");
+        self.w("            __maka_reap_cancelled(f);\n");
+        self.w("            continue;\n");
+        self.w("        }\n");
+        self.w("        return f;\n");
+        self.w("    }\n");
         self.w("}\n");
         self.w("static int64_t __maka_now_ns(void) {\n");
         self.w("    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);\n");
@@ -2184,14 +2305,31 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         // has_work reads the shared run/sleep/fd lists, so compute it under the
         // group lock (serialized with dequeue's write); a no-op lock for a lone
         // worker keeps it race-free there too.
-        self.w("        if (__maka_my_tick) atomic_store(&__maka_my_tick->has_work, (maka_ready_head || maka_sleep_head || maka_fd_waiters) ? 1 : 0);\n");
+        self.w("        if (__maka_my_tick) atomic_store(&__maka_my_tick->has_work, (__maka_have_ready() || maka_sleep_head || maka_fd_waiters) ? 1 : 0);\n");
         self.w("        maka_fiber_t** prev = &maka_sleep_head;\n");
+        self.w("        int __woke = 0;\n");
         self.w("        while (*prev) {\n");
         self.w("            maka_fiber_t* sf = *prev;\n");
         self.w("            if (sf->wake_at_ns <= now) {\n");
         self.w("                *prev = sf->next; sf->next = NULL;\n");
-        self.w("                __maka_ready_enqueue(sf);\n");
+        // Wake to the group's GLOBAL run queue under the lock we already hold -
+        // NOT the lock-free per-worker deque.  The timer expiry runs on every
+        // worker, so keeping the sleep->ready transition fully under the group
+        // lock keeps it serialized with dequeue + the fd/close paths, instead of
+        // racing a peer's lock-free steal of a just-woken (and about-to-be-freed)
+        // sleeper.  Dedup on in_queue as usual.
+        self.w("                if (atomic_exchange(&sf->in_queue, 1) == 0) {\n");
+        self.w("                    sf->state = 0;\n");
+        self.w("                    if (maka_ready_tail) { maka_ready_tail->next = sf; maka_ready_tail = sf; }\n");
+        self.w("                    else { maka_ready_head = maka_ready_tail = sf; }\n");
+        self.w("                    __woke = 1;\n");
+        self.w("                }\n");
         self.w("            } else { prev = &sf->next; }\n");
+        self.w("        }\n");
+        // Wake idle/poll-owner peers so they pick up the newly-ready sleepers.
+        self.w("        if (__woke && maka_sched_state->group->is_pool) {\n");
+        self.w("            pthread_cond_broadcast(&maka_sched_state->group->cv);\n");
+        self.w("            if (maka_sched_state->group->polling && maka_sched_state->wake_pipe_w > 0) { char b = 1; (void)send(maka_sched_state->wake_pipe_w, &b, 1, 0); }\n");
         self.w("        }\n");
         self.w("        MAKA_GRP_UNLOCK();\n");
         self.w("        /* Is the awaited target done? */\n");
@@ -2219,6 +2357,11 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         // here, after the swap save has fully completed, we do the actual
         // push onto the target list under the appropriate lock.  Eliminates
         // the parker-unlock vs. swap-save race.
+        // Did the fiber PARK or YIELD (vs complete)?  If so, after the finalize
+        // re-queues/parks it, `f` belongs to the group again - a peer can steal,
+        // run, and FREE it - so this worker must NOT touch `f` afterward.  Only a
+        // fiber that did NOT park has completed and is still exclusively ours.
+        self.w("            int __parked = (maka_pending_park != NULL);\n");
         self.w("            if (maka_pending_park) {\n");
         self.w("                maka_park_req_t* p = maka_pending_park;\n");
         self.w("                maka_pending_park = NULL;\n");
@@ -2236,6 +2379,9 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("                    __maka_fd_recompute(f->waiting_fd);\n");
         self.w("                    if (maka_sched_state->group->is_pool && maka_sched_state->group->polling && maka_sched_state->wake_pipe_w > 0) { char b = 1; (void)send(maka_sched_state->wake_pipe_w, &b, 1, 0); }\n");
         self.w("                    MAKA_GRP_UNLOCK();\n");
+        self.w("                } else if (p->kind == 3) {\n");
+        // Deferred yield: re-enqueue as ready now that the context is saved.
+        self.w("                    __maka_ready_enqueue(f);\n");
         self.w("                } else {\n");
         self.w("                int __mp_enqueue_ready = 0;\n");
         self.w("                pthread_mutex_lock(p->lock);\n");
@@ -2258,7 +2404,9 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("                }\n");
         self.w("            }\n");
         self.w("            maka_current_fiber = NULL;\n");
-        self.w("            if (f->state == 4) {\n");
+        // Only a fiber that did NOT park/yield has completed and is still ours to
+        // touch (a parked/yielded fiber may already be running on a peer).
+        self.w("            if (!__parked && f->state == 4) {\n");
         // Pool bookkeeping: a submitted/spawned fiber in this group finished,
         // so pool_shutdown's drain condition (inflight==0) advances.  The
         // per-worker anchor is not a submitted fiber, so it is excluded.
@@ -2315,7 +2463,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("            maka_sched_group_t* g = maka_sched_state->group;\n");
         self.w("            MAKA_GRP_LOCK();\n");
         // Another worker may have enqueued between the dequeue and here.
-        self.w("            if (maka_ready_head) { MAKA_GRP_UNLOCK(); continue; }\n");
+        self.w("            if (__maka_have_ready()) { MAKA_GRP_UNLOCK(); continue; }\n");
         // Drained + closed + nothing parked anywhere -> this worker is done.
         // Wake the peers so they re-check the exit condition too.
         self.w("            if (g->closed && atomic_load(&g->inflight) == 0 && !maka_sleep_head && !maka_fd_waiters) {\n");
@@ -2360,10 +2508,17 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("                MAKA_GRP_UNLOCK();\n");
         self.w("                continue;\n");
         self.w("            } else {\n");
-        // Another worker is driving the reactor.  Wait until it (or an
-        // enqueue, or shutdown) signals.  cond_wait at lock depth 1 fully
-        // releases the recursive mutex; a spurious wake just re-checks.
-        self.w("                pthread_cond_wait(&g->cv, &g->lock);\n");
+        // Another worker drives the reactor.  Wait for a signal (enqueue,
+        // poll-owner finish, or shutdown).  BOUNDED wait: the enqueue cv-signal
+        // that wakes a stealer is not synchronized with this wait (the deque
+        // push is lock-free), so a signal can race this thread committing to the
+        // wait and be lost.  A short timeout makes a missed steal-wake self-heal
+        // (the worker re-checks + steals within the bound) - the same backstop
+        // the poll-owner's bounded epoll_wait uses.  cond_timedwait at lock
+        // depth 1 fully releases the recursive mutex.
+        self.w("                struct timespec __ts; clock_gettime(CLOCK_REALTIME, &__ts);\n");
+        self.w("                __ts.tv_nsec += 2000000L; if (__ts.tv_nsec >= 1000000000L) { __ts.tv_sec++; __ts.tv_nsec -= 1000000000L; }\n");
+        self.w("                pthread_cond_timedwait(&g->cv, &g->lock, &__ts);\n");
         self.w("                MAKA_GRP_UNLOCK();\n");
         self.w("                continue;\n");
         self.w("            }\n");
@@ -2566,7 +2721,12 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    { maka_fd_reg_t* r = s->fd_regs; while (r) { maka_fd_reg_t* nx = r->next; free(r); r = nx; } }\n");
         // Free the group (lone or shared Pool) — the sched_state owns it and the
         // last refcount drop lands here.
-        self.w("    if (s->group) { pthread_mutex_destroy(&s->group->lock); pthread_cond_destroy(&s->group->cv); free(s->group); }\n");
+        // Free the per-worker deques (empty by now: a Pool drains to inflight==0
+        // before its workers exit) + the deque array, then the group itself.
+        self.w("    if (s->group) {\n");
+        self.w("        if (s->group->frunqs) { for (int i = 0; i < s->group->n_workers; i++) free(atomic_load_explicit(&s->group->frunqs[i], memory_order_relaxed)); free(s->group->frunqs); }\n");
+        self.w("        pthread_mutex_destroy(&s->group->lock); pthread_cond_destroy(&s->group->cv); free(s->group);\n");
+        self.w("    }\n");
         self.w("    free(s);\n");
         self.w("}\n");
         self.w("static void __maka_sched_state_key_dtor_impl(void* p);\n");
@@ -2615,6 +2775,12 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    __maka_grp_mtx_init(&maka_sched_state->group->lock);\n");
         self.w("    pthread_cond_init(&maka_sched_state->group->cv, NULL);\n");
         self.w("    maka_sched_state->group->n_workers = 1;\n");
+        // Lone worker: one deque, this thread owns slot 0.
+        self.w("    maka_sched_state->group->frunqs = (_Atomic(maka_frunq_t*)*)calloc(1, sizeof(_Atomic(maka_frunq_t*)));\n");
+        self.w("    maka_my_frunq = (maka_frunq_t*)calloc(1, sizeof(maka_frunq_t));\n");
+        self.w("    atomic_store_explicit(&maka_sched_state->group->frunqs[0], maka_my_frunq, memory_order_relaxed);\n");
+        self.w("    maka_my_worker_id = 0;\n");
+        self.w("    atomic_store(&maka_sched_state->group->worker_seq, 1);\n");
         // Owner ref — released by sched_state_cleanup on thread exit.
         self.w("    atomic_init(&maka_sched_state->refcount, 1);\n");
         self.w("    maka_sched_state->epoch = atomic_fetch_add(&__maka_sched_epoch_ctr, 1);\n");
@@ -2907,6 +3073,14 @@ static void* __maka_pool_h_worker(void* arg) {
         __maka_sched_init();
         maka_sched_state->group->is_pool = 1;
         maka_sched_state->group->n_workers = pool->req_workers;
+        /* Grow the per-worker deque array to N slots (slot 0 is this creator's,
+           set by sched_init); peers claim slots 1..N-1 via worker_seq. */
+        {
+            _Atomic(maka_frunq_t*)* fr = (_Atomic(maka_frunq_t*)*)calloc((size_t)pool->req_workers, sizeof(_Atomic(maka_frunq_t*)));
+            atomic_store_explicit(&fr[0], atomic_load_explicit(&maka_sched_state->group->frunqs[0], memory_order_relaxed), memory_order_relaxed);
+            free(maka_sched_state->group->frunqs);
+            maka_sched_state->group->frunqs = fr;
+        }
         pthread_mutex_lock(&pool->init_mu);
         pool->sched = maka_sched_state;
         pthread_cond_broadcast(&pool->init_cv);
@@ -2921,6 +3095,10 @@ static void* __maka_pool_h_worker(void* arg) {
         maka_sched_state = shared;
         maka_sched_inited = 1;
         __maka_sched_state_ref(shared);
+        /* Claim a worker id + own deque slot in the shared group. */
+        maka_my_worker_id = atomic_fetch_add(&shared->group->worker_seq, 1);
+        maka_my_frunq = (maka_frunq_t*)calloc(1, sizeof(maka_frunq_t));
+        atomic_store_explicit(&shared->group->frunqs[maka_my_worker_id], maka_my_frunq, memory_order_relaxed);
         __maka_watchdog_register();
         __maka_sched_register_thread(shared);
         maka_anchor_fiber = (maka_fiber_t*)calloc(1, sizeof(maka_fiber_t));
@@ -3039,7 +3217,11 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("void __maka_yield_now(void) {\n");
         self.w("    if (!maka_current_fiber || maka_current_fiber == maka_anchor_fiber) return;\n");
         self.w("    maka_fiber_t* me = maka_current_fiber;\n");
-        self.w("    __maka_ready_enqueue(me);\n");
+        // Defer the re-enqueue to the finalize block (after this context is
+        // saved) - enqueueing before the switch would let a peer steal + run us
+        // on a half-saved context.  kind 3 = re-enqueue as ready.
+        self.w("    maka_timerfd_park.kind = 3;\n");
+        self.w("    maka_pending_park = &maka_timerfd_park;\n");
         self.w("    maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
         self.w("}\n");
         self.w("static void __maka_sleep_fiber(int64_t nanos) {\n");
@@ -3462,7 +3644,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("    } else if (!done) {\n");
         self.w("        /* If the scheduler has ready/sleeping/fd-waiting fibers, drive\n");
         self.w("           it instead of pthread-cond-waiting (which would freeze it). */\n");
-        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("        if (maka_sched_inited && (__maka_have_ready() || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            /* Walk ready/sleep queues to find the fiber whose completion is t. */\n");
         self.w("            maka_fiber_t* target = NULL;\n");
         self.w("            for (maka_fiber_t* f = maka_ready_head; f; f = f->next) {\n");
@@ -3509,7 +3691,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("                    int d = t->done_flag;\n");
         self.w("                    pthread_mutex_unlock(&t->done_mutex);\n");
         self.w("                    if (d) break;\n");
-        self.w("                    if (maka_ready_head || maka_sleep_head || maka_fd_waiters) {\n");
+        self.w("                    if (__maka_have_ready() || maka_sleep_head || maka_fd_waiters) {\n");
         self.w("                        maka_join_target = NULL;\n");
         // Sub-fiber-safe: re-enqueue ME as ready before yielding so the
         // scheduler picks it up again on the next iteration to re-check
@@ -3614,7 +3796,7 @@ void __maka_pool_free(maka_unit* poolv) {
         // (re-enqueue self, run the scheduler) and re-check the loop.
         self.w("        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
         self.w("            __maka_yield_now();\n");
-        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("        } else if (maka_sched_inited && (__maka_have_ready() || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
@@ -3901,7 +4083,7 @@ void __maka_pool_free(maka_unit* poolv) {
         // through the anchor context slot.
         self.w("        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
         self.w("            __maka_yield_now();\n");
-        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head)) {\n");
+        self.w("        } else if (maka_sched_inited && (__maka_have_ready() || maka_sleep_head)) {\n");
         self.w("            maka_anchor_wake_on_finish = 1;\n");
         self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_anchor_wake_on_finish = 0;\n");
@@ -3945,7 +4127,7 @@ void __maka_pool_free(maka_unit* poolv) {
         // through the anchor context slot.
         self.w("        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
         self.w("            __maka_yield_now();\n");
-        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("        } else if (maka_sched_inited && (__maka_have_ready() || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            maka_anchor_wake_on_finish = 1;\n");
         self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_anchor_wake_on_finish = 0;\n");
@@ -3977,7 +4159,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("    while (1) {\n");
         self.w("        int64_t now = __maka_now_ns();\n");
         self.w("        if (now >= deadline) { maka_anchor_deadline_ns = prev_anchor_deadline; return; }\n");
-        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("        if (maka_sched_inited && (__maka_have_ready() || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
@@ -4241,7 +4423,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("            maka_pending_park = &req;\n");
         self.w("            me->state = 2;\n");
         self.w("            maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
-        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("        } else if (maka_sched_inited && (__maka_have_ready() || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
@@ -4340,7 +4522,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("            maka_pending_park = &req;\n");
         self.w("            me->state = 2;\n");
         self.w("            maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
-        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("        } else if (maka_sched_inited && (__maka_have_ready() || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            pthread_mutex_unlock(&r->kw_mu);\n");
         self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
@@ -4368,7 +4550,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("            maka_pending_park = &req;\n");
         self.w("            me->state = 2;\n");
         self.w("            maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
-        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("        } else if (maka_sched_inited && (__maka_have_ready() || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            pthread_mutex_unlock(&r->kw_mu);\n");
         self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
@@ -4468,7 +4650,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("            maka_pending_park = &req;\n");
         self.w("            me->state = 2;\n");
         self.w("            maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
-        self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("        } else if (maka_sched_inited && (__maka_have_ready() || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            /* On the anchor: drive the scheduler so fibers can complete\n");
         self.w("               and call wg_done.  pthread_cond_wait would freeze them. */\n");
         self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
@@ -4572,7 +4754,7 @@ void __maka_pool_free(maka_unit* poolv) {
         // cond_wait - that would deadlock (the runner never resumes to publish
         // state=2).  Mirrors maka_fmutex_lock / maka_wg_wait.
         self.w("    while (atomic_load(&o->state) != 2) {\n");
-        self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("        if (maka_sched_inited && (__maka_have_ready() || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
@@ -4662,7 +4844,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("        }\n");
         self.w("        pthread_mutex_unlock(&c->m);\n");
         self.w("        if (maka_sched_inited && maka_current_fiber == maka_anchor_fiber\n");
-        self.w("            && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
+        self.w("            && (__maka_have_ready() || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("            continue;\n");
