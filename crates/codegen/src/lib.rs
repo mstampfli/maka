@@ -1256,6 +1256,117 @@ impl<'a> Cx<'a> {
         self.w("#define MAKA_FIBER_STACK_SIZE (64 * 1024)\n");
         self.w("#define MAKA_FIBER_SLAB_RESERVE (1024 * 1024) /* 1 MB VM per fiber */\n");
         self.w("#define MAKA_FIBER_GUARD_PAGE 4096\n");
+        // Lightweight fiber context switch: custom callee-saved-register swap on
+        // x86_64/aarch64 (Linux + macOS), ucontext / native-fiber fallback
+        // elsewhere (incl. Windows).  Drop-in for the old swapcontext.
+        self.w(r#"/* ---- maka_ctx_switch / maka_ctx_make ---------------------------------
+ * A hand-written callee-saved register swap replaces ucontext swapcontext
+ * (which does a sigprocmask syscall per switch, ~1us) with a ~15ns save and
+ * restore.  A context is just a saved stack pointer; all register state lives
+ * on the fiber's own stack.  x86_64 and aarch64 (Linux + macOS) take the asm
+ * path; Windows and every other arch fall back to ucontext / native OS fibers,
+ * so the runtime still builds and runs everywhere.  FP control state (x86
+ * MXCSR / aarch64 FPCR rounding mode) is thread-shared and intentionally NOT
+ * swapped per fiber - do not change the FP rounding mode across a yield. */
+#if (defined(__x86_64__) || defined(__aarch64__)) && !defined(_WIN32)
+#define MAKA_ASM_CTX 1
+typedef struct maka_mctx_s { void* sp; } maka_mctx_t;
+extern void maka_ctx_switch(maka_mctx_t* from, maka_mctx_t* to);
+#if defined(__APPLE__)
+#define MAKA_CTX_SYM "_maka_ctx_switch"
+#else
+#define MAKA_CTX_SYM "maka_ctx_switch"
+#endif
+#if defined(__x86_64__)
+__asm__(
+".text\n"
+".globl " MAKA_CTX_SYM "\n"
+".p2align 4\n"
+MAKA_CTX_SYM ":\n"
+"  pushq %rbp\n"
+"  pushq %rbx\n"
+"  pushq %r12\n"
+"  pushq %r13\n"
+"  pushq %r14\n"
+"  pushq %r15\n"
+"  movq  %rsp, (%rdi)\n"
+"  movq  (%rsi), %rsp\n"
+"  popq  %r15\n"
+"  popq  %r14\n"
+"  popq  %r13\n"
+"  popq  %r12\n"
+"  popq  %rbx\n"
+"  popq  %rbp\n"
+"  ret\n"
+);
+static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)(void)) {
+    uintptr_t top = ((uintptr_t)base + size) & ~(uintptr_t)0xF; /* 16-align top */
+    void** sp = (void**)top;
+    *(--sp) = (void*)0;       /* pad: keep the return slot 16-aligned */
+    *(--sp) = (void*)entry;   /* return address the switch `ret` pops */
+    *(--sp) = (void*)0;       /* rbp */
+    *(--sp) = (void*)0;       /* rbx */
+    *(--sp) = (void*)0;       /* r12 */
+    *(--sp) = (void*)0;       /* r13 */
+    *(--sp) = (void*)0;       /* r14 */
+    *(--sp) = (void*)0;       /* r15 */
+    c->sp = (void*)sp;
+}
+#else /* __aarch64__ */
+__asm__(
+".text\n"
+".globl " MAKA_CTX_SYM "\n"
+".p2align 4\n"
+MAKA_CTX_SYM ":\n"
+"  sub  sp, sp, #0xa0\n"
+"  stp  x19, x20, [sp, #0x00]\n"
+"  stp  x21, x22, [sp, #0x10]\n"
+"  stp  x23, x24, [sp, #0x20]\n"
+"  stp  x25, x26, [sp, #0x30]\n"
+"  stp  x27, x28, [sp, #0x40]\n"
+"  stp  x29, x30, [sp, #0x50]\n"
+"  stp  d8,  d9,  [sp, #0x60]\n"
+"  stp  d10, d11, [sp, #0x70]\n"
+"  stp  d12, d13, [sp, #0x80]\n"
+"  stp  d14, d15, [sp, #0x90]\n"
+"  mov  x2, sp\n"
+"  str  x2, [x0]\n"
+"  ldr  x2, [x1]\n"
+"  mov  sp, x2\n"
+"  ldp  x19, x20, [sp, #0x00]\n"
+"  ldp  x21, x22, [sp, #0x10]\n"
+"  ldp  x23, x24, [sp, #0x20]\n"
+"  ldp  x25, x26, [sp, #0x30]\n"
+"  ldp  x27, x28, [sp, #0x40]\n"
+"  ldp  x29, x30, [sp, #0x50]\n"
+"  ldp  d8,  d9,  [sp, #0x60]\n"
+"  ldp  d10, d11, [sp, #0x70]\n"
+"  ldp  d12, d13, [sp, #0x80]\n"
+"  ldp  d14, d15, [sp, #0x90]\n"
+"  add  sp, sp, #0xa0\n"
+"  ret\n"
+);
+static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)(void)) {
+    uintptr_t top = ((uintptr_t)base + size) & ~(uintptr_t)0xF;
+    top -= 0xa0;                              /* one 160-byte save frame */
+    uint64_t* fr = (uint64_t*)top;
+    for (int i = 0; i < 20; i++) fr[i] = 0;
+    fr[11] = (uint64_t)(uintptr_t)entry;      /* x30 (lr) slot -> entry */
+    c->sp = (void*)top;
+}
+#endif
+#else /* portable fallback: ucontext (Windows native fibers via the shims) */
+typedef ucontext_t maka_mctx_t;
+static inline void maka_ctx_switch(maka_mctx_t* from, maka_mctx_t* to) { swapcontext(from, to); }
+static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)(void)) {
+    getcontext(c);
+    c->uc_stack.ss_sp = base;
+    c->uc_stack.ss_size = size;
+    c->uc_link = NULL;
+    makecontext(c, entry, 0);
+}
+#endif
+"#);
         // Per-thread free-list of slabs.  Reusing a slab avoids the mmap/munmap
         // cost on every spawn — same trick goroutines use.
         self.w("typedef struct maka_slab_s {\n");
@@ -1312,7 +1423,7 @@ impl<'a> Cx<'a> {
         // must route through the home thread's remote-wake queue.
         self.w("struct maka_sched_state_s;\n");
         self.w("typedef struct maka_fiber_s {\n");
-        self.w("    ucontext_t ctx;\n");
+        self.w("    maka_mctx_t ctx;\n");
         self.w("    maka_slab_t* slab;    /* mmap'd 1 MB slab; stack lives at the top */\n");
         self.w("    int   state;          /* 0=ready 1=running 2=blocked-fiber 3=sleep 4=done */\n");
         self.w("    void  (*entry_code)(void*);\n");
@@ -1402,7 +1513,7 @@ impl<'a> Cx<'a> {
         self.w("} maka_sched_state_t;\n");
         self.w("static _Atomic int64_t __maka_sched_epoch_ctr = 1;\n");
         self.w("static __thread maka_sched_state_t* maka_sched_state = NULL;\n");
-        self.w("static __thread ucontext_t maka_sched_ctx;\n");
+        self.w("static __thread maka_mctx_t maka_sched_ctx;\n");
         self.w("static __thread maka_fiber_t* maka_current_fiber = NULL;\n");
         self.w("static __thread maka_fiber_t* maka_ready_head = NULL;\n");
         self.w("static __thread maka_fiber_t* maka_ready_tail = NULL;\n");
@@ -1931,7 +2042,7 @@ impl<'a> Cx<'a> {
         self.w("                maka_fiber_t* anchor = maka_anchor_fiber;\n");
         self.w("                maka_join_target = NULL;\n");
         self.w("                maka_current_fiber = anchor;\n");
-        self.w("                swapcontext(&maka_sched_ctx, &anchor->ctx);\n");
+        self.w("                maka_ctx_switch(&maka_sched_ctx, &anchor->ctx);\n");
         self.w("                continue;\n");
         self.w("            }\n");
         self.w("        }\n");
@@ -1940,7 +2051,7 @@ impl<'a> Cx<'a> {
         self.w("        if (f) {\n");
         self.w("            maka_current_fiber = f;\n");
         self.w("            f->state = 1;\n");
-        self.w("            swapcontext(&maka_sched_ctx, &f->ctx);\n");
+        self.w("            maka_ctx_switch(&maka_sched_ctx, &f->ctx);\n");
         // Finalize park: parkers set maka_pending_park before swapcontext-out;
         // here, after the swap save has fully completed, we do the actual
         // push onto the target list under the appropriate lock.  Eliminates
@@ -2000,7 +2111,7 @@ impl<'a> Cx<'a> {
         self.w("                /* If anchor is parked in a select loop, return so it can re-poll. */\n");
         self.w("                if (maka_anchor_wake_on_finish) {\n");
         self.w("                    maka_current_fiber = maka_anchor_fiber;\n");
-        self.w("                    swapcontext(&maka_sched_ctx, &maka_anchor_fiber->ctx);\n");
+        self.w("                    maka_ctx_switch(&maka_sched_ctx, &maka_anchor_fiber->ctx);\n");
         self.w("                }\n");
         self.w("            }\n");
         self.w("            continue;\n");
@@ -2047,7 +2158,7 @@ impl<'a> Cx<'a> {
         // without sleeping, which would spin until anchor checks its flag.
         self.w("            if (anchor_deadline_expired && maka_anchor_fiber) {\n");
         self.w("                maka_current_fiber = maka_anchor_fiber;\n");
-        self.w("                swapcontext(&maka_sched_ctx, &maka_anchor_fiber->ctx);\n");
+        self.w("                maka_ctx_switch(&maka_sched_ctx, &maka_anchor_fiber->ctx);\n");
         self.w("                continue;\n");
         self.w("            }\n");
         self.w("            if (have_fd_waiters && maka_epoll_fd >= 0) {\n");
@@ -2103,7 +2214,7 @@ impl<'a> Cx<'a> {
         self.w("               caller's timeout primitive can finish. */\n");
         self.w("            if (maka_anchor_deadline_ns != 0 && __maka_now_ns() >= maka_anchor_deadline_ns && maka_anchor_fiber) {\n");
         self.w("                maka_current_fiber = maka_anchor_fiber;\n");
-        self.w("                swapcontext(&maka_sched_ctx, &maka_anchor_fiber->ctx);\n");
+        self.w("                maka_ctx_switch(&maka_sched_ctx, &maka_anchor_fiber->ctx);\n");
         self.w("            }\n");
         self.w("            continue;\n");
         self.w("        }\n");
@@ -2116,7 +2227,7 @@ impl<'a> Cx<'a> {
         self.w("        /* No work, no joiner: hand back to anchor. */\n");
         self.w("        if (maka_anchor_fiber) {\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
-        self.w("            swapcontext(&maka_sched_ctx, &maka_anchor_fiber->ctx);\n");
+        self.w("            maka_ctx_switch(&maka_sched_ctx, &maka_anchor_fiber->ctx);\n");
         self.w("            continue;\n");
         self.w("        }\n");
         self.w("        return;\n");
@@ -2318,17 +2429,13 @@ impl<'a> Cx<'a> {
         self.w("    atomic_store_explicit(&maka_anchor_fiber->home_sched_epoch, maka_sched_state->epoch, memory_order_relaxed);\n");
         self.w("    atomic_store_explicit(&maka_anchor_fiber->home_sched, (void*)maka_sched_state, memory_order_release);\n");
         self.w("    maka_current_fiber = maka_anchor_fiber;\n");
-        self.w("    getcontext(&maka_sched_ctx);\n");
-        self.w("    maka_sched_ctx.uc_stack.ss_sp = maka_sched_stack;\n");
-        self.w("    maka_sched_ctx.uc_stack.ss_size = sizeof(maka_sched_stack);\n");
-        self.w("    maka_sched_ctx.uc_link = NULL;\n");
-        self.w("    makecontext(&maka_sched_ctx, __maka_scheduler_loop, 0);\n");
+        self.w("    maka_ctx_make(&maka_sched_ctx, maka_sched_stack, sizeof(maka_sched_stack), __maka_scheduler_loop);\n");
         self.w("}\n");
         self.w("static void __maka_fiber_entry(void) {\n");
         self.w("    maka_fiber_t* f = maka_current_fiber;\n");
         self.w("    f->entry_code(f->entry_env);\n");
         self.w("    f->state = 4;\n");
-        self.w("    swapcontext(&f->ctx, &maka_sched_ctx);\n");
+        self.w("    maka_ctx_switch(&f->ctx, &maka_sched_ctx);\n");
         self.w("}\n");
         // spawn(): create a userspace cooperative fiber.
         self.w("maka_unit* __maka_spawn_fiber(void* code, void* env, void* env_drop) {\n");
@@ -2367,11 +2474,7 @@ impl<'a> Cx<'a> {
         self.w("    atomic_store_explicit(&f->home_sched, (void*)maka_sched_state, memory_order_release);\n");
         self.w("    atomic_store_explicit(&t->home_sched_epoch, maka_sched_state->epoch, memory_order_relaxed);\n");
         self.w("    atomic_store_explicit((_Atomic(void*)*)&t->home_sched, (void*)maka_sched_state, memory_order_release);\n");
-        self.w("    getcontext(&f->ctx);\n");
-        self.w("    f->ctx.uc_stack.ss_sp = f->slab->stack_top;\n");
-        self.w("    f->ctx.uc_stack.ss_size = MAKA_FIBER_STACK_SIZE;\n");
-        self.w("    f->ctx.uc_link = &maka_sched_ctx;\n");
-        self.w("    makecontext(&f->ctx, __maka_fiber_entry, 0);\n");
+        self.w("    maka_ctx_make(&f->ctx, f->slab->stack_top, MAKA_FIBER_STACK_SIZE, __maka_fiber_entry);\n");
         self.w("    __maka_ready_enqueue(f);\n");
         self.w("    return (maka_unit*)t;\n");
         self.w("}\n");
@@ -2458,7 +2561,7 @@ impl<'a> Cx<'a> {
         self.w("        atomic_store_explicit((_Atomic(void*)*)&f->completion->home_sched, (void*)maka_sched_state, memory_order_release);\n");
         self.w("        __maka_ready_enqueue(f);\n");
         self.w("        /* Drive scheduler until our local queue is empty + nothing waiting. */\n");
-        self.w("        swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("        maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("        maka_current_fiber = maka_anchor_fiber;\n");
         self.w("    }\n");
         self.w("    return NULL;\n");
@@ -2517,11 +2620,7 @@ impl<'a> Cx<'a> {
         self.w("    f->state = 0;\n");
         self.w("    f->waiting_fd = -1; f->waiting_events = 0;\n");
         self.w("    f->wait_deadline_ns = 0; f->wait_timed_out = 0;\n");
-        self.w("    getcontext(&f->ctx);\n");
-        self.w("    f->ctx.uc_stack.ss_sp = f->slab->stack_top;\n");
-        self.w("    f->ctx.uc_stack.ss_size = MAKA_FIBER_STACK_SIZE;\n");
-        self.w("    f->ctx.uc_link = NULL;\n");
-        self.w("    makecontext(&f->ctx, __maka_fiber_entry, 0);\n");
+        self.w("    maka_ctx_make(&f->ctx, f->slab->stack_top, MAKA_FIBER_STACK_SIZE, __maka_fiber_entry);\n");
         self.w("    if (__maka_pool_q_push(f) != 0) {\n");
         // Pool refused (queue closed) — simulate immediate completion so
         // join() doesn't hang, free the fiber, drop the runner ref.
@@ -2539,7 +2638,7 @@ impl<'a> Cx<'a> {
         self.w("    if (!maka_current_fiber || maka_current_fiber == maka_anchor_fiber) return;\n");
         self.w("    maka_fiber_t* me = maka_current_fiber;\n");
         self.w("    __maka_ready_enqueue(me);\n");
-        self.w("    swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("    maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
         self.w("}\n");
         self.w("static void __maka_sleep_fiber(int64_t nanos) {\n");
         self.w("    maka_fiber_t* me = maka_current_fiber;\n");
@@ -2547,7 +2646,7 @@ impl<'a> Cx<'a> {
         self.w("    me->state = 3;\n");
         self.w("    me->next = maka_sleep_head;\n");
         self.w("    maka_sleep_head = me;\n");
-        self.w("    swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("    maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
         self.w("}\n");
         // ====================================================================
         // EPOLL REACTOR — IO primitives that yield through the scheduler.
@@ -2610,7 +2709,7 @@ impl<'a> Cx<'a> {
         self.w("    maka_current_fiber->next = maka_fd_waiters;\n");
         self.w("    maka_fd_waiters = maka_current_fiber;\n");
         self.w("    __maka_fd_recompute((int)fd);\n");
-        self.w("    swapcontext(&maka_current_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("    maka_ctx_switch(&maka_current_fiber->ctx, &maka_sched_ctx);\n");
         self.w("}\n");
         // Wall-clock helper used by every timeout primitive below.
         self.w("static int64_t __maka_now_ms(void) {\n");
@@ -2638,7 +2737,7 @@ impl<'a> Cx<'a> {
         self.w("    maka_current_fiber->next = maka_fd_waiters;\n");
         self.w("    maka_fd_waiters = maka_current_fiber;\n");
         self.w("    __maka_fd_recompute((int)fd);\n");
-        self.w("    swapcontext(&maka_current_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("    maka_ctx_switch(&maka_current_fiber->ctx, &maka_sched_ctx);\n");
         self.w("    /* Scheduler resumes us either on fd event or on deadline. */\n");
         self.w("    return maka_current_fiber->wait_timed_out ? 0 : 1;\n");
         self.w("}\n");
@@ -2968,9 +3067,9 @@ impl<'a> Cx<'a> {
         self.w("                                            .should_park = __maka_pp_join, .arg = t };\n");
         self.w("                    maka_pending_park = &req;\n");
         self.w("                    me->state = 2;\n");
-        self.w("                    swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("                    maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
         self.w("                } else {\n");
-        self.w("                    swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("                    maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("                    maka_current_fiber = maka_anchor_fiber;\n");
         self.w("                }\n");
         self.w("                maka_join_target = NULL;\n");
@@ -2991,9 +3090,9 @@ impl<'a> Cx<'a> {
         self.w("                        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
         self.w("                            maka_fiber_t* me = maka_current_fiber;\n");
         self.w("                            __maka_ready_enqueue(me);\n");
-        self.w("                            swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("                            maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
         self.w("                        } else {\n");
-        self.w("                            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("                            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("                            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("                        }\n");
         self.w("                    } else {\n");
@@ -3089,7 +3188,7 @@ impl<'a> Cx<'a> {
         self.w("        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
         self.w("            __maka_yield_now();\n");
         self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
-        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
         self.w("            int64_t rem_ms = deadline_ms - now;\n");
@@ -3369,7 +3468,7 @@ impl<'a> Cx<'a> {
         self.w("            __maka_yield_now();\n");
         self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head)) {\n");
         self.w("            maka_anchor_wake_on_finish = 1;\n");
-        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_anchor_wake_on_finish = 0;\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
@@ -3413,7 +3512,7 @@ impl<'a> Cx<'a> {
         self.w("            __maka_yield_now();\n");
         self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            maka_anchor_wake_on_finish = 1;\n");
-        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_anchor_wake_on_finish = 0;\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
@@ -3444,7 +3543,7 @@ impl<'a> Cx<'a> {
         self.w("        int64_t now = __maka_now_ns();\n");
         self.w("        if (now >= deadline) { maka_anchor_deadline_ns = prev_anchor_deadline; return; }\n");
         self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
-        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
         self.w("            int64_t rem = deadline - now;\n");
@@ -3706,9 +3805,9 @@ impl<'a> Cx<'a> {
         self.w("                                    .inflight = &m->inflight_parkers, .drained_cv = &m->drained_cv };\n");
         self.w("            maka_pending_park = &req;\n");
         self.w("            me->state = 2;\n");
-        self.w("            swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
         self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
-        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
         self.w("            pthread_mutex_lock(&m->kw_mu);\n");
@@ -3805,10 +3904,10 @@ impl<'a> Cx<'a> {
         self.w("                                    .inflight = &r->inflight_parkers, .drained_cv = &r->drained_cv };\n");
         self.w("            maka_pending_park = &req;\n");
         self.w("            me->state = 2;\n");
-        self.w("            swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
         self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            pthread_mutex_unlock(&r->kw_mu);\n");
-        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
         self.w("            r->pth_waiters++;\n");
@@ -3833,10 +3932,10 @@ impl<'a> Cx<'a> {
         self.w("                                    .inflight = &r->inflight_parkers, .drained_cv = &r->drained_cv };\n");
         self.w("            maka_pending_park = &req;\n");
         self.w("            me->state = 2;\n");
-        self.w("            swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
         self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            pthread_mutex_unlock(&r->kw_mu);\n");
-        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
         self.w("            r->pth_waiters++;\n");
@@ -3933,11 +4032,11 @@ impl<'a> Cx<'a> {
         self.w("                                    .inflight = &w->inflight_parkers, .drained_cv = &w->drained_cv };\n");
         self.w("            maka_pending_park = &req;\n");
         self.w("            me->state = 2;\n");
-        self.w("            swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
         self.w("        } else if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
         self.w("            /* On the anchor: drive the scheduler so fibers can complete\n");
         self.w("               and call wg_done.  pthread_cond_wait would freeze them. */\n");
-        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
         self.w("            pthread_mutex_lock(&w->kw_mu);\n");
@@ -4029,7 +4128,7 @@ impl<'a> Cx<'a> {
         self.w("                                .inflight = &o->inflight_parkers, .drained_cv = &o->drained_cv };\n");
         self.w("        maka_pending_park = &req;\n");
         self.w("        me->state = 2;\n");
-        self.w("        swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("        maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
         self.w("        return;\n");
         self.w("    }\n");
         // Anchor (or no scheduler): the once RUNNER may be a spawned, co-resident
@@ -4039,7 +4138,7 @@ impl<'a> Cx<'a> {
         // state=2).  Mirrors maka_fmutex_lock / maka_wg_wait.
         self.w("    while (atomic_load(&o->state) != 2) {\n");
         self.w("        if (maka_sched_inited && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
-        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("        } else {\n");
         self.w("            pthread_mutex_lock(&o->mu);\n");
@@ -4123,13 +4222,13 @@ impl<'a> Cx<'a> {
         self.w("                                    .inflight = &c->inflight_parkers, .drained_cv = &c->drained_cv };\n");
         self.w("            maka_pending_park = &req;\n");
         self.w("            me->state = 2;\n");
-        self.w("            swapcontext(&me->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&me->ctx, &maka_sched_ctx);\n");
         self.w("            continue;\n");
         self.w("        }\n");
         self.w("        pthread_mutex_unlock(&c->m);\n");
         self.w("        if (maka_sched_inited && maka_current_fiber == maka_anchor_fiber\n");
         self.w("            && (maka_ready_head || maka_sleep_head || maka_fd_waiters)) {\n");
-        self.w("            swapcontext(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
+        self.w("            maka_ctx_switch(&maka_anchor_fiber->ctx, &maka_sched_ctx);\n");
         self.w("            maka_current_fiber = maka_anchor_fiber;\n");
         self.w("            continue;\n");
         self.w("        }\n");
