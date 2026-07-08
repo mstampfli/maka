@@ -600,7 +600,9 @@ impl<'a> Cx<'a> {
         // in much later in the scheduler block; an incomplete-type typedef
         // here is enough for pointer use in the close shim.
         self.w("typedef struct maka_fiber_s maka_fiber_t;\n");
-        self.w("extern __thread struct maka_fiber_s* maka_fd_waiters;\n");
+        // maka_fd_waiters is now a maka_sched_state field (shared across a
+        // Pool's workers); its accessor macro is defined after the struct, and
+        // the close shim that used to reference it early is relocated below it.
         self.w("extern __thread int maka_sched_inited;\n");
         self.w("static void __maka_ready_enqueue(struct maka_fiber_s* f);\n");
         // Forward decls for sched_state ref helpers — ready_enqueue calls
@@ -1458,31 +1460,9 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    struct maka_fiber_s* waiters;     /* fibers blocked on this fiber */\n");
         self.w("    struct maka_fiber_s* next_waiter; /* waiter list link */\n");
         self.w("} maka_fiber_t;\n");
-        // __maka_winsock_close body (forward-declared earlier; deferred to
-        // here so it can see the full maka_fiber_s field layout).
-        self.w("#ifdef _WIN32\n");
-        self.w("static int __maka_winsock_close(int fd) {\n");
-        self.w("    if (maka_sched_inited) {\n");
-        self.w("        maka_fiber_t** prev = &maka_fd_waiters;\n");
-        self.w("        while (*prev) {\n");
-        self.w("            maka_fiber_t* w = *prev;\n");
-        self.w("            if (w->waiting_fd == fd) {\n");
-        self.w("                *prev = w->next; w->next = NULL;\n");
-        self.w("                w->waiting_fd = -1; w->waiting_events = 0;\n");
-        self.w("                w->wait_deadline_ns = 0; w->wait_timed_out = 0;\n");
-        self.w("                __maka_ready_enqueue(w);\n");
-        self.w("            } else {\n");
-        self.w("                prev = &(*prev)->next;\n");
-        self.w("            }\n");
-        self.w("        }\n");
-        self.w("    }\n");
-        self.w("    __maka_fd_arm(fd, 0);\n");
-        self.w("    __maka_fd_reg_drop(fd);\n");
-        self.w("    if (closesocket((SOCKET)fd) == 0) return 0;\n");
-        self.w("    if (WSAGetLastError() == WSAENOTSOCK) return _close(fd);\n");
-        self.w("    return -1;\n");
-        self.w("}\n");
-        self.w("#endif\n");
+        // __maka_winsock_close body is relocated below the maka_sched_state
+        // struct + accessor macros (it walks maka_fd_waiters, now a struct
+        // field reached through maka_sched_state).
         // Per-pthread scheduler state, addressable from other threads.
         // remote_wake_head is the cross-thread inbox protected by remote_mu;
         // wake_pipe_w is the self-pipe write end the remote pusher pings so
@@ -1544,6 +1524,14 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         // scheduler that lived at the same address.
         self.w("    int64_t epoch;\n");
         self.w("    maka_sched_group_t* group;   /* shared ready queue for this worker's group */\n");
+        // Reactor + timer state.  Moved out of per-thread TLS so a Pool's
+        // workers, which share one sched_state, share one reactor: a fiber
+        // parked on sleep/IO is serviced by whichever worker owns the poll,
+        // so it does NOT pin the worker it parked on.  For a lone worker this
+        // is its own private reactor exactly as before.
+        self.w("    maka_fiber_t* sleep_head;    /* timer list (min-deadline scan) */\n");
+        self.w("    maka_fiber_t* fd_waiters;    /* fibers parked on an fd */\n");
+        self.w("    int epoll_fd;                /* shared reactor fd (-1 until first use) */\n");
         self.w("} maka_sched_state_t;\n");
         self.w("static _Atomic int64_t __maka_sched_epoch_ctr = 1;\n");
         self.w("static __thread maka_sched_state_t* maka_sched_state = NULL;\n");
@@ -1554,7 +1542,37 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         // group is size 1, so this is the current per-thread queue verbatim.
         self.w("#define maka_ready_head (maka_sched_state->group->run_head)\n");
         self.w("#define maka_ready_tail (maka_sched_state->group->run_tail)\n");
-        self.w("static __thread maka_fiber_t* maka_sleep_head = NULL;\n");
+        // Reactor/timer accessors — reach the (possibly shared) sched_state
+        // fields.  Every existing access site stays textually unchanged; a lone
+        // worker's sched_state is private, so this is the old TLS behavior.
+        self.w("#define maka_sleep_head (maka_sched_state->sleep_head)\n");
+        self.w("#define maka_fd_waiters (maka_sched_state->fd_waiters)\n");
+        self.w("#define maka_epoll_fd (maka_sched_state->epoll_fd)\n");
+        // Relocated close shim (see forward note above): now that the struct +
+        // accessors are in scope it can walk maka_fd_waiters correctly.
+        self.w("#ifdef _WIN32\n");
+        self.w("static int __maka_winsock_close(int fd) {\n");
+        self.w("    if (maka_sched_inited) {\n");
+        self.w("        maka_fiber_t** prev = &maka_fd_waiters;\n");
+        self.w("        while (*prev) {\n");
+        self.w("            maka_fiber_t* w = *prev;\n");
+        self.w("            if (w->waiting_fd == fd) {\n");
+        self.w("                *prev = w->next; w->next = NULL;\n");
+        self.w("                w->waiting_fd = -1; w->waiting_events = 0;\n");
+        self.w("                w->wait_deadline_ns = 0; w->wait_timed_out = 0;\n");
+        self.w("                __maka_ready_enqueue(w);\n");
+        self.w("            } else {\n");
+        self.w("                prev = &(*prev)->next;\n");
+        self.w("            }\n");
+        self.w("        }\n");
+        self.w("    }\n");
+        self.w("    __maka_fd_arm(fd, 0);\n");
+        self.w("    __maka_fd_reg_drop(fd);\n");
+        self.w("    if (closesocket((SOCKET)fd) == 0) return 0;\n");
+        self.w("    if (WSAGetLastError() == WSAENOTSOCK) return _close(fd);\n");
+        self.w("    return -1;\n");
+        self.w("}\n");
+        self.w("#endif\n");
         // Non-static so the forward decl in the top of the prologue can find it.
         self.w("__thread int maka_sched_inited = 0;\n");
         // Park-request mechanism: parker arms maka_pending_park before
@@ -1606,7 +1624,6 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("static __thread Thread* maka_join_target = NULL;\n");
         self.w("static __thread maka_fiber_t* maka_anchor_fiber = NULL;\n");
         self.w("static __thread int maka_anchor_wake_on_finish = 0;\n");
-        self.w("static __thread int maka_epoll_fd = -1;\n");
         self.w("static __thread int64_t maka_anchor_deadline_ns = 0; /* 0 = none; otherwise scheduler caps its timeout so anchor wakes by this */\n");
         // Reactor backend selection.  Three backends:
         //   * Linux           — epoll(7) used directly.
@@ -1835,7 +1852,6 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("        prev = &(*prev)->next;\n");
         self.w("    }\n");
         self.w("}\n");
-        self.w("__thread maka_fiber_t* maka_fd_waiters = NULL;\n");
         self.w("#define MAKA_EV_READ  1\n");
         self.w("#define MAKA_EV_WRITE 2\n");
         self.w("static __thread char maka_sched_stack[256 * 1024];\n");
@@ -2419,6 +2435,9 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("#endif\n");
         self.w("#endif\n");
         self.w("    maka_sched_state = (maka_sched_state_t*)calloc(1, sizeof(maka_sched_state_t));\n");
+        // epoll_fd defaults to 0 under calloc, but 0 is a valid fd; the lazy
+        // reactor create keys off (epoll_fd < 0), so it must start at -1.
+        self.w("    maka_sched_state->epoll_fd = -1;\n");
         self.w("    pthread_mutex_init(&maka_sched_state->remote_mu, NULL);\n");
         // Lone-worker group (size 1): its own ready queue, no locking.  A Pool
         // (slice 2) will replace this with a shared group of N workers.
