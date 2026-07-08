@@ -1502,6 +1502,19 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    int closed_fd;\n");
         self.w("    struct maka_close_req_s* next;\n");
         self.w("} maka_close_req_t;\n");
+        // Scheduler group (GMP slice 1): the set of worker threads that share a
+        // ready queue.  n_workers==1 is a lone worker (cooperative `spawn`, or a
+        // pool worker not yet grouped) - the hot path never locks.  A Pool will
+        // (slice 2) create ONE group of N workers sharing `run_head`, at which
+        // point `lock` guards it.  PERF NOTE: the scalable end state is per-worker
+        // Chase-Lev deques with stealing (as the `job` pool already uses); this
+        // single shared queue is the correctness-first step, optimized afterward.
+        self.w("typedef struct maka_sched_group_s {\n");
+        self.w("    pthread_mutex_t lock;\n");
+        self.w("    int n_workers;\n");
+        self.w("    maka_fiber_t* run_head;\n");
+        self.w("    maka_fiber_t* run_tail;\n");
+        self.w("} maka_sched_group_t;\n");
         self.w("typedef struct maka_sched_state_s {\n");
         self.w("    pthread_mutex_t remote_mu;\n");
         self.w("    maka_fiber_t* remote_wake_head;\n");
@@ -1524,13 +1537,17 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         // passing validation against a fiber that was bound to the old
         // scheduler that lived at the same address.
         self.w("    int64_t epoch;\n");
+        self.w("    maka_sched_group_t* group;   /* shared ready queue for this worker's group */\n");
         self.w("} maka_sched_state_t;\n");
         self.w("static _Atomic int64_t __maka_sched_epoch_ctr = 1;\n");
         self.w("static __thread maka_sched_state_t* maka_sched_state = NULL;\n");
         self.w("static __thread maka_mctx_t maka_sched_ctx;\n");
         self.w("static __thread maka_fiber_t* maka_current_fiber = NULL;\n");
-        self.w("static __thread maka_fiber_t* maka_ready_head = NULL;\n");
-        self.w("static __thread maka_fiber_t* maka_ready_tail = NULL;\n");
+        // The ready queue lives in the worker's group (shared across a Pool's
+        // workers).  Macros keep every access site unchanged; a lone worker's
+        // group is size 1, so this is the current per-thread queue verbatim.
+        self.w("#define maka_ready_head (maka_sched_state->group->run_head)\n");
+        self.w("#define maka_ready_tail (maka_sched_state->group->run_tail)\n");
         self.w("static __thread maka_fiber_t* maka_sleep_head = NULL;\n");
         // Non-static so the forward decl in the top of the prologue can find it.
         self.w("__thread int maka_sched_inited = 0;\n");
@@ -2363,6 +2380,9 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("        if (s->wake_pipe_w >= 0) close(s->wake_pipe_w);\n");
         self.w("    }\n");
         self.w("    pthread_mutex_destroy(&s->remote_mu);\n");
+        // Free a lone-worker (thread-owned) group.  A shared Pool group is owned
+        // and freed by the pool, not here.
+        self.w("    if (s->group && s->group->n_workers == 1) { pthread_mutex_destroy(&s->group->lock); free(s->group); }\n");
         self.w("    free(s);\n");
         self.w("}\n");
         self.w("static void __maka_sched_state_key_dtor_impl(void* p);\n");
@@ -2394,6 +2414,11 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("#endif\n");
         self.w("    maka_sched_state = (maka_sched_state_t*)calloc(1, sizeof(maka_sched_state_t));\n");
         self.w("    pthread_mutex_init(&maka_sched_state->remote_mu, NULL);\n");
+        // Lone-worker group (size 1): its own ready queue, no locking.  A Pool
+        // (slice 2) will replace this with a shared group of N workers.
+        self.w("    maka_sched_state->group = (maka_sched_group_t*)calloc(1, sizeof(maka_sched_group_t));\n");
+        self.w("    pthread_mutex_init(&maka_sched_state->group->lock, NULL);\n");
+        self.w("    maka_sched_state->group->n_workers = 1;\n");
         // Owner ref — released by sched_state_cleanup on thread exit.
         self.w("    atomic_init(&maka_sched_state->refcount, 1);\n");
         self.w("    maka_sched_state->epoch = atomic_fetch_add(&__maka_sched_epoch_ctr, 1);\n");
