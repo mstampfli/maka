@@ -479,6 +479,11 @@ pub struct Param {
     pub name: String,
     pub ty: Type,
     pub span: Span,
+    /// `consume T name` - calling the function moves the caller's argument (the
+    /// callee takes ownership / frees it), so any later use of that argument is
+    /// a use-after-move.  Used by handle-freeing stdlib fns (pool_shutdown, the
+    /// `_destroy` family) to make use-after-free a compile error.
+    pub consume: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -1,0 +1,7 @@
+// atomic_destroy consumes the Atomic handle; reading it afterward is rejected.
+import std.{ Atomic, atomic_new, atomic_get, atomic_destroy };
+unit main() {
+    Atomic<int> a = atomic_new(5);
+    atomic_destroy(a);
+    log(atomic_get(a));   // <- use after consume
+}

@@ -1,0 +1,9 @@
+// pool_shutdown consumes the Pool (it frees it), so using the handle after is a
+// compile-time use-after-move - never a runtime use-after-free.
+import std.{ Pool, pool, pool_shutdown };
+unit main() {
+    Pool p = pool(2);
+    pool_shutdown(p);
+    *Thread t = spawn_on(p, unit() { log("x"); });   // <- use after consume
+    join(t);
+}

@@ -40,7 +40,7 @@ A `.maka` source file consists of:
 ### 1.4 Keywords
 
 ```
-mut const constexpr unsafe inline propagate
+mut const constexpr unsafe inline propagate consume
 extern cinclude cblock clink rblock rdep raw own alloc free
 data enum attr has where dyn some type
 if else while for in break continue match yield return
@@ -690,6 +690,16 @@ own &Node b = a;                  // move
 
 Returning an owning value moves it to the caller. Passing it as a `own *T` /
 `own &T` argument moves it into the callee.
+
+**`consume` parameters.** A function parameter marked `consume T name` moves the
+caller's argument into the callee even when `T` is an ordinary (copyable) value
+type: the callee takes ownership (typically frees the underlying resource), so
+any later use of that argument is a compile-time use-after-move.  This is how a
+handle-freeing stdlib function makes reuse-after-free impossible - `pool_shutdown(consume Pool p)`,
+and the whole `_destroy` family (`atomic_destroy`, `wg_destroy`, `chan_*_destroy`,
+`mutex_destroy`, `rwlock_destroy`, `once_destroy`) - so `spawn_on(p, ...)` after
+`pool_shutdown(p)`, or a double `pool_shutdown(p)`, is rejected at compile time
+rather than being a runtime use-after-free / double-free.
 
 **Implicit reborrow.** Inside a function with `&mut T` (or `&T`) parameter
 `g`, writing `&mut g` (or `&g`) at a call site that wants `&mut T` would

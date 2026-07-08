@@ -4903,6 +4903,7 @@ impl<'a> TypeChecker<'a> {
         sig_param_tys.extend(resolved_params.clone());
         self.synth_sigs.push(FuncSig {
             name: lifted_name.clone(),
+            param_consume: vec![false; sig_param_tys.len()],
             param_tys: sig_param_tys,
             param_names: sig_param_names,
             ret: resolved_ret.clone(),

@@ -1304,6 +1304,23 @@ impl<'a> Analyzer<'a> {
                         }
                     }
                 }
+                // `consume` parameters: calling the function moves the caller's
+                // argument in that position (the callee takes ownership / frees
+                // it - e.g. pool_shutdown, the `_destroy` family), so any later
+                // use is a use-after-move.  Skip builtin sentinels (huge FuncIds)
+                // and generic placeholders (out of range).
+                if (callee.0 as usize) < self.sym.sigs.len() {
+                    let pc: Vec<bool> = self.sym.func_sig(*callee).param_consume.clone();
+                    for (i, a) in args.iter().enumerate() {
+                        if pc.get(i).copied().unwrap_or(false) {
+                            if let Some(id) = root_local(a) {
+                                if !self.state[id.0 as usize].moved {
+                                    self.mark_moved(id, a.span);
+                                }
+                            }
+                        }
+                    }
+                }
                 // push(container, element): storing a borrow of a local into a
                 // container that OUTLIVES this function (one reached through a
                 // parameter, or a global) leaves a dangling reference once the

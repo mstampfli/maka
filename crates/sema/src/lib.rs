@@ -463,6 +463,7 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                     name: template_sig.name.clone(),
                     param_tys: new_param_tys,
                     param_names: template_sig.param_names.clone(),
+                    param_consume: template_sig.param_consume.clone(),
                     ret: new_ret,
                     is_extern: false,
                     c_name,
