@@ -4732,6 +4732,25 @@ impl<'a> TypeChecker<'a> {
                     }
                     CastKind::Reinterpret
                 }
+                // `raw *T` / `*T`  as  `own *T` is the FFI ADOPT: claim ownership
+                // of a pointer whose provenance the compiler can't see.  You vouch
+                // it is yours to free - the allocator matches (Maka frees the block
+                // with libc `free`) or the pointee type carries a `Drop` that is
+                // its destructor.  A tightening (ownership-claiming) cast, so it
+                // requires `unsafe { }`.
+                (RawPtr { inner: ai, .. }, OwnPtr { inner: bi, .. })
+                | (Ptr { inner: ai, .. }, OwnPtr { inner: bi, .. }) => {
+                    if !type_eq(ai, bi) {
+                        self.err(format!("invalid adopt cast: {:?} as {:?} - pointee types differ", from, to), sp);
+                    } else if self.in_unsafe == 0 {
+                        self.err(
+                            "adopting a `raw *T` / `*T` into an owning `own *T` claims ownership \
+                             the compiler cannot verify; wrap it in an `unsafe { ... }` block".to_string(),
+                            sp,
+                        );
+                    }
+                    CastKind::Reinterpret
+                }
                 (Heap { .. }, Ptr { .. }) => {
                     if let (Heap { inner: ai }, Ptr { mutable: _, inner: bi }) = (from, to) {
                         if !type_eq(ai, bi) {

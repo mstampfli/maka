@@ -784,9 +784,55 @@ to `null`) clears the warning state.
 Borrowing references (`&T`, `&mut T`) outliving their referent are a **hard
 compile error** (`poisoned`).
 
+### 6.4b `Drop` - per-type destructor
+
+A `data`/`enum` type that implements the prelude attr `Drop` (`unit drop(&mut _
+self)`) becomes **owning + move-only** (§6.1 applies to it exactly as to `own
+*T`), and its `drop` runs **once** at scope exit - before the compiler
+recursively frees the value's owning fields.  `Drop` is the per-type override of
+the free step: it does the logical teardown the compiler cannot infer.
+
+```maka
+data Guard { own *Log log; }
+Guard has Drop { unit drop(&mut Guard self) { self.log.flush(); } }
+// scope exit: Guard::drop (flush) runs, THEN the compiler frees `log`.
+```
+
+`Drop` may only be implemented on a nominal `data`/`enum` type - on a
+primitive/pointer it would be a silent no-op (never on the owning path) and is
+rejected.  A moved-out value does not drop (the destination owns it); a
+use-after-move is a compile error, so a resource is released exactly once.
+
+**FFI handles** wrap a foreign resource in a Drop type; two shapes cover the two
+deallocation regimes:
+
+- **libc `free` reclaims the block** - adopt the C pointer into an `own *Body`
+  (the `unsafe` cast `raw *T as own *T`, §6.5) and give `Body` a `Drop` for any
+  logical teardown; the compiler runs that `drop`, then libc-frees the block:
+
+  ```maka
+  data Body { }
+  Body has Drop { unit drop(&mut Body self) { /* logical teardown */ } }
+  data Handle { own *Body h; }             // owning + move-only via the field
+  Handle open() { unsafe { return Handle { h = c_alloc() as raw *Body as own *Body }; } }
+  ```
+
+- **a foreign destructor frees it** (`fclose`, `close`, a library `*_free`) -
+  hold the handle in a **non-owning** `raw` field, so the compiler frees
+  nothing and `drop` does the whole teardown:
+
+  ```maka
+  data File { raw *unit fd; }
+  File has Drop { unit drop(&mut File self) { unsafe { c_fclose(self.fd); } } }
+  ```
+
+Either way the handle is move-only and tears down exactly once - automatically
+at scope exit, or via a function that takes it by value (consuming it), which
+makes any later use a compile-time use-after-move.
+
 ### 6.5 `unsafe { }`
 
-`unsafe { ... }` permits exactly six operations otherwise forbidden:
+`unsafe { ... }` permits exactly seven operations otherwise forbidden:
 
 1. Casting an integer to a pointer (`usize as *T`, `int as *T`).
 2. Casting a reference to `raw *T` (`&T as raw *T` — drops borrow tracking).
@@ -806,6 +852,10 @@ compile error** (`poisoned`).
 6. Casting between pointer types whose inner types are not structurally
    prefix-compatible (`*Foo → *Bar` where `Bar`'s fields are not a prefix
    of `Foo`'s).  Safe in-prefix casts are documented in §6.6.
+7. Adopting a foreign pointer into an owning one (`raw *T as own *T`, or
+   `*T as own *T`): claims ownership the compiler cannot verify across the FFI
+   boundary (you vouch the allocator matches, or the pointee's `Drop` is its
+   destructor).  After the adopt the value is an ordinary owning `own *T` (§6.4b).
 
 Inside `unsafe`, `raw *T` still has to be narrowed (forced-handling — §6.3)
 before deref.  `unsafe` does not turn off the lifetime pass; it just unlocks

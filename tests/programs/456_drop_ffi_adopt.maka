@@ -1,0 +1,15 @@
+import std.{ Drop };
+cblock "
+    #include <stdlib.h>
+    maka_unit* __body_alloc(void) { return (maka_unit*)malloc(16); }
+";
+data Body { }
+Body has Drop { unit drop(&mut Body self) { log(42); } }
+extern "__body_alloc" raw *unit c_alloc();
+data Handle { own *Body h; }
+Handle mk() { unsafe { own *Body b = c_alloc() as raw *Body as own *Body; Handle x = { h = b }; return x; } }
+unit main() {
+    { Handle x = mk(); }
+    { Handle y = mk(); }
+    log(0);
+}
