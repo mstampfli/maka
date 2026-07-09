@@ -816,12 +816,27 @@ free is `free(NULL)` and the resource is released exactly once by the new owner.
 
 **FFI handles:** declare the resource as an opaque pointee, put `Drop` on it, and
 hand it around as `own *T` (adopting the C pointer with the `unsafe`
-`raw *T as own *T` cast, §6.5).  When libc `free` reclaims the block, that is all
-- the compiler runs the `drop`, then frees the block (the `Pool` in the stdlib is
-exactly this: `data Pool {}` + `Pool has Drop`, held as `own *Pool`).  A resource
-whose *own C destructor* frees the block (`fclose`, `close`) needs a foreign
-opaque pointee whose `own *` cleanup runs the drop but emits no libc-free; that
-regime is not yet in the language.
+`raw *T as own *T` cast, §6.5).  Two regimes, by how the block is reclaimed:
+
+- **libc `free` reclaims the block** - declare a plain `data Body {}`, give it a
+  `Drop` for any logical teardown; `own *Body`'s cleanup runs the `drop`, then
+  libc-frees the block.  (The stdlib `Pool` is exactly this: `data Pool {}` +
+  `Pool has Drop`, held as `own *Pool`.)
+- **the resource's own C destructor frees the block** (`fclose`, `close`, a
+  library `*_free`) - declare it as an opaque **`extern data Body;`** (a foreign
+  pointee, never Maka-allocated).  `own *Body`'s cleanup runs the `drop` (which
+  calls the C destructor) and emits **no** libc-free:
+
+  ```maka
+  extern data FileBody;
+  FileBody has Drop { unit drop(&mut FileBody self) { unsafe { c_fclose(self as raw *unit); } } }
+  own *FileBody open() { unsafe { return c_fopen(...) as raw *FileBody as own *FileBody; } }
+  ```
+
+**Handing a pointer back to C** needs no `raw` and no "forget": declare the C
+function's parameter as `own *T`.  Passing your `own *T` to it MOVES it (auto-nulls
+the source), so Maka never frees it - C owns it now.  This is the mirror of the
+`raw *T as own *T` adopt.
 
 ### 6.5 `unsafe { }`
 

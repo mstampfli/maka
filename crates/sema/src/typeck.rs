@@ -4918,6 +4918,7 @@ impl<'a> TypeChecker<'a> {
             module_path: Vec::new(),
             span: sp,
             where_bounds: Vec::new(),
+            is_foreign: false,
         });
 
         // 3. Resolve lambda's params and ret types in a fresh scope, then typecheck body

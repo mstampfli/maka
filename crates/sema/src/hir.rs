@@ -459,6 +459,10 @@ pub struct StructInfo {
     pub is_pub: bool,
     pub module_path: Vec<String>,
     pub span: Span,
+    /// `extern data Name;` - an opaque FOREIGN pointee: `own *Name`'s cleanup runs
+    /// the pointee's `Drop` (the C destructor frees the block) but emits NO
+    /// libc-free.  Never Maka-allocated (only adopted via `raw *T as own *T`).
+    pub is_foreign: bool,
     /// `where` clauses on the data decl — enforced at concrete instantiation time
     /// just like function where-bounds.  Each entry is `(attr_name, type_args)` and
     /// the position-0 substituted type must have a visible `has` impl.

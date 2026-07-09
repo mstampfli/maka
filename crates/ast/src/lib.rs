@@ -527,6 +527,11 @@ pub struct DataDecl {
     pub fields: Vec<FieldDecl>,
     pub where_clauses: Vec<WhereClause>,
     pub is_pub: bool,
+    /// `extern data Name;` - an opaque FOREIGN pointee: never allocated or freed
+    /// by Maka (only obtained via a `raw *T as own *T` adopt).  When such a type
+    /// has a `Drop`, its `own *T` cleanup runs the drop (the C destructor frees
+    /// the block) and emits NO libc-free.
+    pub is_foreign: bool,
     pub span: Span,
 }
 

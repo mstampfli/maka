@@ -1,0 +1,18 @@
+// A foreign resource NOT libc-freeable (static storage): Maka must call the
+// drop (the C destructor) but NEVER libc-free it.
+extern data FileBody;
+cblock "
+    static char g_file[8] = {0};
+    static int  g_closed = 0;
+    maka_unit* c_open(void)   { return (maka_unit*)g_file; }
+    void  c_close(maka_unit* p){ g_closed = 1; }         /* NOT free() */
+    maka_int c_was_closed(void){ return g_closed; }
+";
+extern "c_open"       raw *unit c_open();
+extern "c_close"      unit      c_close(raw *unit p);
+extern "c_was_closed" int       c_was_closed();
+FileBody has Drop { unit drop(&mut FileBody self) { unsafe { c_close(self as raw *unit); } } }
+unit main() {
+    { unsafe { own *FileBody f = c_open() as raw *FileBody as own *FileBody; } }  // drop runs here
+    log(c_was_closed());   // 1 - drop's c_close ran
+}

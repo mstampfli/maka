@@ -5874,7 +5874,12 @@ void __maka_pool_free(maka_unit* poolv) {
                 self.wl(&format!("if ({}) {{", lv));
                 self.open();
                 self.emit_pointee_drop(lv, inner, depth);
-                self.wl(&format!("free({});", lv));
+                // A FOREIGN opaque pointee (`extern data`) is freed by its own
+                // Drop (the C destructor), not by Maka - emit no libc-free.
+                let foreign = matches!(inner.as_ref(), HType::Struct(sid) if self.sym.struct_info(*sid).is_foreign);
+                if !foreign {
+                    self.wl(&format!("free({});", lv));
+                }
                 self.close();
                 self.wl("}");
             }

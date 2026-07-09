@@ -698,6 +698,7 @@ impl SymTab {
             module_path: Vec::new(),
             span: maka_lexer::Span::dummy(),
             where_bounds: Vec::new(),
+            is_foreign: false,
         });
 
         // Pass 1: enums and struct names
@@ -728,6 +729,7 @@ impl SymTab {
                         module_path: item_module.clone(),
                         span: d.span,
                         where_bounds,
+                        is_foreign: d.is_foreign,
                     });
                 }
                 ast::Item::Enum(e) => {
@@ -964,6 +966,7 @@ impl SymTab {
                     module_path: template.module_path.clone(),
                     span: template.span,
                     where_bounds: Vec::new(),
+                    is_foreign: template.is_foreign,
                 });
                 sym.struct_instantiations.insert((name.clone(), key), new_id.0);
             } else if let Some(template) = enum_template {

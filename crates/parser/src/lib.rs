@@ -665,6 +665,8 @@ impl Parser {
         match &kind {
             TokKind::Data => Ok(Item::Data(self.parse_data()?)),
             TokKind::Enum => Ok(Item::Enum(self.parse_enum()?)),
+            // `extern data Name;` - an opaque FOREIGN pointee (see DataDecl.is_foreign).
+            TokKind::Extern if matches!(self.peek_at(1), TokKind::Data) => Ok(Item::Data(self.parse_foreign_data()?)),
             TokKind::Extern => Ok(Item::Extern(self.parse_extern()?)),
             TokKind::Cinclude => self.parse_cinclude(),
             TokKind::Cblock => self.parse_cblock(),
@@ -1080,7 +1082,18 @@ impl Parser {
             fields.push(self.parse_field()?);
         }
         self.expect(&TokKind::RBrace, "`}`")?;
-        Ok(DataDecl { name, type_params, fields, where_clauses, is_pub: false, span: kw.span })
+        Ok(DataDecl { name, type_params, fields, where_clauses, is_pub: false, is_foreign: false, span: kw.span })
+    }
+
+    /// `extern data Name;` - an opaque foreign pointee (no fields, no body): a
+    /// type Maka only ever holds behind `own *Name` (adopted from C) and never
+    /// allocates or libc-frees.  Its `Drop` (if any) is the total teardown.
+    fn parse_foreign_data(&mut self) -> Result<DataDecl, ParseError> {
+        self.expect(&TokKind::Extern, "`extern`")?;
+        let kw = self.expect(&TokKind::Data, "`data`")?;
+        let (name, _) = self.expect_ident("foreign type name")?;
+        self.expect(&TokKind::Semicolon, "`;` after `extern data Name`")?;
+        Ok(DataDecl { name, type_params: Vec::new(), fields: Vec::new(), where_clauses: Vec::new(), is_pub: false, is_foreign: true, span: kw.span })
     }
 
     fn parse_field(&mut self) -> Result<FieldDecl, ParseError> {

@@ -2060,6 +2060,7 @@ fn build_container_data_decls(insts: &[ContainerInst]) -> Vec<DataDecl> {
             fields,
             where_clauses: Vec::new(),
             is_pub: true,
+            is_foreign: false,
             span: sp,
         });
     }
@@ -2098,6 +2099,7 @@ fn build_data_decl(s: &RustStruct) -> DataDecl {
         fields,
         where_clauses: Vec::new(),
         is_pub: true,
+        is_foreign: false,
         span: sp,
     }
 }
