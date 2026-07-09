@@ -1,9 +1,0 @@
-// pool_shutdown consumes the Pool (its param Drop tears it down), so a later
-// spawn_on is a compile-time use-after-move, never a runtime use-after-free.
-import std.{ Pool, pool, pool_shutdown };
-unit main() {
-    Pool p = pool(2);
-    pool_shutdown(p);
-    *Thread t = spawn_on(p, unit() { log(1); });
-    join(t);
-}

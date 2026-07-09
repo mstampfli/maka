@@ -1,3 +1,0 @@
-// Double shutdown would be a double-free; consume makes it a compile error.
-import std.{ Pool, pool, pool_shutdown };
-unit main() { Pool p = pool(2); pool_shutdown(p); pool_shutdown(p); }

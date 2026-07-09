@@ -2663,7 +2663,9 @@ impl<'a> TypeChecker<'a> {
                 self.err(format!("{} expects (Pool, `unit()` closure)", name), sp);
                 return HExpr { kind: HExprKind::LitUnit, ty: ret_ty, span: sp };
             }
-            let pool_ok = matches!(&hargs[0].ty, HType::Struct(sid) if self.sym.struct_info(*sid).name == "Pool");
+            let pool_ok = matches!(&hargs[0].ty,
+                HType::OwnPtr { inner, .. } | HType::Ptr { inner, .. } | HType::Ref { inner, .. } | HType::Heap { inner }
+                if matches!(inner.as_ref(), HType::Struct(sid) if self.sym.struct_info(*sid).name == "Pool"));
             if !pool_ok {
                 self.err(format!("{} expects a `Pool` as its first argument, got `{}`", name, type_str(&hargs[0].ty)), sp);
             }

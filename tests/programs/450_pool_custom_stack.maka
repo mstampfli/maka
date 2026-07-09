@@ -6,7 +6,7 @@
 import std.{ Pool, pool_stack, pool_shutdown, WaitGroup, wg_new, wg_add, wg_done, wg_wait, wg_destroy, Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy };
 int deep(int n) { if (n <= 0) { return 0; } [4096]int big = [n; 4096]; return big[0] + deep(n - 1); }
 unit main() {
-    Pool p = pool_stack(2, 1024);
+    own *Pool p = pool_stack(2, 1024);
     Atomic<int> a = atomic_new(0);
     WaitGroup wg = wg_new(); wg_add(wg, 4);
     for (int i in 0..4) { *Thread t = spawn_on(p, unit() [wg, a] { _ = atomic_add(a, deep(10)); wg_done(wg); }); detach(t); }

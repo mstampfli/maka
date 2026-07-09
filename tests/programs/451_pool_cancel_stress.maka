@@ -6,7 +6,7 @@
 import std.{ Pool, pool, pool_shutdown };
 import std.sleep_us;
 unit main() {
-    Pool p = pool(3);
+    own *Pool p = pool(3);
     for (int i in 0..60) { *Thread t = spawn_on(p, unit() { sleep_us(50); }); cancel(t); }
     log("ok");
     pool_shutdown(p);

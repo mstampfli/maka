@@ -334,27 +334,28 @@ pub unit  mutex_unlock (Mutex m)       { __fmutex_unlock(m.h); }
 pub unit  mutex_destroy(Mutex m)       { __fmutex_destroy(m.h); }
 
 // === Pool (explicit worker pool for spawn_on) ===
-// `Pool p = pool(N)` creates N worker threads; `spawn_on(p, closure)` (a
-// builtin, so its captures are checked at the call site) runs a fiber on the
-// pool.  A Pool is owning + move-only via its `Drop`: it tears down (drains,
-// joins the workers, frees) exactly once - either automatically at scope exit,
-// or explicitly via `pool_shutdown(p)`, which CONSUMES the pool so any
-// use-after-shutdown or double-shutdown is a compile-time use-after-move.
-pub data Pool { *unit h; }
-extern "__maka_pool_new"  *unit __pool_new_h(int n, int stack_bytes);
-extern "__maka_pool_free" unit  __pool_free_h(*unit p);
-Pool has Drop { unit drop(&mut Pool self) { __pool_free_h(self.h); } }
+// `Pool` is the opaque worker pool itself (the C-side state); you hold it as an
+// owning pointer `own *Pool p = pool(N)` and borrow it as `&Pool`.  No wrapper -
+// the pointer IS the handle.  Its `Drop` tears the pool down (drains, joins the
+// workers, destroys) exactly once; Maka then frees the block - so it releases
+// automatically at scope exit, or explicitly via `pool_shutdown(p)`, which
+// CONSUMES the pool so a later `spawn_on(p, ...)` / double-shutdown is a
+// compile-time use-after-move.  `spawn_on`/`job_on` BORROW the pool.
+pub data Pool {}
+extern "__maka_pool_new"  raw *unit __pool_new_h(int n, int stack_bytes);
+extern "__maka_pool_free" unit      __pool_teardown_h(raw *unit p);
+pub Pool has Drop { unit drop(&mut Pool self) { unsafe { __pool_teardown_h(self as raw *unit); } } }
 
 // `pool(N)` uses the default 64 KB fiber stack; `pool_stack(N, kb)` sets a
 // custom per-fiber stack size (KB, rounded to a page, floored at the default)
 // for every spawn_on/job_on fiber on that pool - use it for deeply-recursive
 // or large-frame fiber bodies.
-pub Pool pool(int n)                     { Pool p = { h = __pool_new_h(n, 0) }; return p; }
-pub Pool pool_stack(int n, int stack_kb) { Pool p = { h = __pool_new_h(n, stack_kb * 1024) }; return p; }
-// Explicit early shutdown: consumes the pool (its param `Drop` does the
-// teardown), so a later `spawn_on(p, ...)` or a second `pool_shutdown(p)` is
-// rejected at compile time rather than being a use-after-free / double-free.
-pub unit pool_shutdown(Pool p) { }
+pub own *Pool pool(int n)                     { unsafe { return __pool_new_h(n, 0) as raw *Pool as own *Pool; } }
+pub own *Pool pool_stack(int n, int stack_kb) { unsafe { return __pool_new_h(n, stack_kb * 1024) as raw *Pool as own *Pool; } }
+// Explicit early shutdown: consumes the pool (its `Drop` does the teardown), so
+// a later `spawn_on(p, ...)` or a second `pool_shutdown(p)` is rejected at
+// compile time rather than being a use-after-free / double-free.
+pub unit pool_shutdown(own *Pool p) { }
 
 // === WaitGroup ===
 pub data WaitGroup { *unit h; }

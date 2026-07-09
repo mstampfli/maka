@@ -3208,6 +3208,13 @@ void __maka_pool_free(maka_unit* poolv) {
     if (!pool) return;
     pthread_mutex_lock(&pool->init_mu);
     pool->closed = 1;
+    /* Wait for worker setup to finish (the first worker publishes pool->sched)
+       so we close the group they actually run the scheduler loop under.  A pool
+       torn down immediately after creation (never spawned on) would otherwise
+       read a NULL sched, skip the group-close below, and the workers - which
+       enter the scheduler loop right after publishing pool->sched - would never
+       see the close, so their join here would hang. */
+    while (!pool->sched && pool->n_workers > 0) pthread_cond_wait(&pool->init_cv, &pool->init_mu);
     maka_sched_state_t* sched = pool->sched;
     pthread_cond_broadcast(&pool->init_cv);  /* release a spawn_on awaiting sched */
     pthread_mutex_unlock(&pool->init_mu);
@@ -3228,7 +3235,9 @@ void __maka_pool_free(maka_unit* poolv) {
     pthread_mutex_destroy(&pool->init_mu);
     pthread_cond_destroy(&pool->init_cv);
     free(pool->workers);
-    free(pool);
+    /* NOT free(pool): the `own *PoolBody` handle owns the maka_pool_t block, so
+       Maka libc-frees it after this teardown (drop = logical teardown, allocator
+       frees the block - the Rust model).  Freeing it here would double-free. */
 }
 "#);
         // Cooperative sleep / yield primitives.
@@ -10556,7 +10565,7 @@ void __maka_pool_free(maka_unit* poolv) {
             if args.len() == 2 {
                 let s = self.emit_sub(f, &args[0]);
                 let pool = self.emit_sub(f, &args[1]);
-                return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_pool_spawn_on(({}).h, __cb.code, __cb.env, {}); }}))", s, pool, self.spawn_env_drop(&args[0]));
+                return format!("(__extension__ ({{ Callable_unit_ __cb = ({}); (Thread*)__maka_pool_spawn_on((maka_unit*)({}), __cb.code, __cb.env, {}); }}))", s, pool, self.spawn_env_drop(&args[0]));
             }
             return "NULL".into();
         }

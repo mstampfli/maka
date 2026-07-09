@@ -3,7 +3,7 @@
 // (nothing dropped on the overflow path).  Sum = 500.
 import std.{ Pool, pool, pool_shutdown, Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy, WaitGroup, wg_new, wg_add, wg_done, wg_wait, wg_destroy };
 unit main() {
-    Pool p = pool(1);
+    own *Pool p = pool(1);
     Atomic<int> a = atomic_new(0);
     WaitGroup wg = wg_new(); wg_add(wg, 1);
     *Thread parent = spawn_on(p, unit() [a, wg] {

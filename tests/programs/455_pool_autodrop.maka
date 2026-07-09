@@ -4,7 +4,7 @@ unit main() {
     Atomic<int> a = atomic_new(0);
     WaitGroup wg = wg_new();
     {
-        Pool p = pool(3);
+        own *Pool p = pool(3);
         wg_add(wg, 6);
         for (int i in 0..6) {
             *Thread t = spawn_on(p, unit() [a, wg] { _ = atomic_add(a, 1); wg_done(wg); });

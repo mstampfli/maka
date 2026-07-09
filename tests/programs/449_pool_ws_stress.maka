@@ -6,7 +6,7 @@
 import std.{ Pool, pool, pool_shutdown, Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy, WaitGroup, wg_new, wg_add, wg_done, wg_wait, wg_destroy };
 import std.sleep_us;
 unit main() {
-    Pool p = pool(4);
+    own *Pool p = pool(4);
     Atomic<int> a = atomic_new(0);
     WaitGroup wg = wg_new();
     wg_add(wg, 300);
