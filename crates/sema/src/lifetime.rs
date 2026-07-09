@@ -2815,12 +2815,6 @@ fn check_scoped_thread_borrows(f: &HFunc, errors: &mut Vec<SemaError>) {
     walk(&f.body, &f.locals, &caps, errors);
 }
 
-/// Does the nominal type named `name` carry a user `Drop` impl?  Such a type is
-/// move-only and gets scope-exit drop glue even if it owns no heap fields (the
-/// `drop` is the resource release).  Mirrors codegen's `type_impls_drop`.
-pub(crate) fn type_impls_drop(sym: &SymTab, name: &str) -> bool {
-    sym.trait_impls.get("Drop").is_some_and(|s| s.contains(name))
-}
 
 /// A struct all of whose owning fields are `own *T` (nullable): a field-granular
 /// stack VALUE.  Copying it copies the plain fields and moves (auto-nulls) only
@@ -2844,8 +2838,10 @@ pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
             // `Rust<T>` owns a boxed Rust value (dropped via a generated shim).
             HType::RustOpaque(_) => true,
             HType::Struct(id) => {
-                // A `has Drop` type is owning/move-only by its destructor alone.
-                if type_impls_drop(sym, &sym.struct_info(*id).name) { return true; }
+                // NOTE: `has Drop` does NOT make a value type owning/move-only.
+                // Only `own *T`/`own &T` (or a struct containing one) move; a
+                // type's `Drop` runs via the `own *T` cleanup (pointee), so put
+                // Drop on the resource and hold it as `own *T`.
                 let k = id.0 as u64;
                 if seen.contains(&k) { return false; }
                 seen.push(k);
@@ -2859,7 +2855,6 @@ pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
                 r
             }
             HType::Enum(id) => {
-                if type_impls_drop(sym, &sym.enum_info(*id).name) { return true; }
                 let k = (id.0 as u64) | (1u64 << 32);
                 if seen.contains(&k) { return false; }
                 seen.push(k);

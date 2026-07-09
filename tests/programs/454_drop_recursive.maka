@@ -1,17 +1,16 @@
-// Drop: a `has Drop` type is owning + move-only, and its `drop` runs once at
-// scope exit before the recursive field-free.  Covers single, recursive
-// (own *Container), by-value, and move (no double-drop).
+// Drop on a pointee `R`: `own *R` cleanup calls R's drop then frees. Recursive
+// through an owning container; a moved own*R drops once (source auto-nulled).
+// A `has Drop` type is NOT owning by-value - you hold it as `own *R`.
 import std.{ Drop };
 
 data R { int id; }
 R has Drop { unit drop(&mut R self) { log(self.id); } }
 
-data Two { own *R a; own *R b; }   // two owning fields, each a Drop type
+data Two { own *R a; own *R b; }   // two owning pointers, each drops via own*
 
 unit main() {
-    { own *R x = alloc R { id = 1 }; }                                            // single own *R
-    { own *Two t = alloc Two { a = alloc R { id = 2 }, b = alloc R { id = 3 } }; } // own *Container recurses -> both
-    { R v = R { id = 4 }; log(99); }                                              // by-value drops at scope exit
-    { own *R p = alloc R { id = 5 }; own *R q = p; }                              // move: drops ONCE (p -> q)
+    { own *R x = alloc R { id = 1 }; }                                            // 1
+    { own *Two t = alloc Two { a = alloc R { id = 2 }, b = alloc R { id = 3 } }; } // 2 3
+    { own *R p = alloc R { id = 5 }; own *R q = p; }                              // 5 once (p -> q)
     log(0);
 }

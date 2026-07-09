@@ -784,51 +784,44 @@ to `null`) clears the warning state.
 Borrowing references (`&T`, `&mut T`) outliving their referent are a **hard
 compile error** (`poisoned`).
 
-### 6.4b `Drop` - per-type destructor
+### 6.4b `Drop` - per-pointee destructor
 
-A `data`/`enum` type that implements the prelude attr `Drop` (`unit drop(&mut _
-self)`) becomes **owning + move-only** (§6.1 applies to it exactly as to `own
-*T`), and its `drop` runs **once** at scope exit - before the compiler
-recursively frees the value's owning fields.  `Drop` is the per-type override of
-the free step: it does the logical teardown the compiler cannot infer.
+`Drop` (the prelude attr `unit drop(&mut _ self)`) is a **destructor hook on the
+`own *T` cleanup**, NOT a move mechanism.  It has **no effect on move semantics**
+- only `own *T`/`own &T` (or a struct containing one) move (§6.1).  A `has Drop`
+type is not made move-only or owning by having `Drop`; you put `Drop` on the
+**resource type** and hold it as `own *T`.
+
+When an `own *T` (whose pointee `T` has a `Drop`) is cleaned up - at scope exit,
+or when the owner is dropped/reassigned - the compiler calls `T`'s `drop` (which
+does the logical teardown the compiler can't infer), then recursively frees `T`'s
+owning fields, then frees the block:
 
 ```maka
-data Guard { own *Log log; }
-Guard has Drop { unit drop(&mut Guard self) { self.log.flush(); } }
-// scope exit: Guard::drop (flush) runs, THEN the compiler frees `log`.
+data Body { }
+Body has Drop { unit drop(&mut Body self) { /* logical teardown */ } }
+own *Body b = alloc Body { };   // scope exit: Body::drop(b) runs, THEN free(b)
 ```
 
-`Drop` may only be implemented on a nominal `data`/`enum` type - on a
-primitive/pointer it would be a silent no-op (never on the owning path) and is
-rejected.  A moved-out value does not drop (the destination owns it); a
-use-after-move is a compile error, so a resource is released exactly once.
+Owning/move-only-ness rides the `own *` pointer, so a **wrapper needs no `Drop`**
+- it is owning simply by containing an `own *T` field:
 
-**FFI handles** wrap a foreign resource in a Drop type; two shapes cover the two
-deallocation regimes:
+```maka
+data Guard { own *Log log; }    // owning + move-only via the field (no Drop on Guard)
+```
 
-- **libc `free` reclaims the block** - adopt the C pointer into an `own *Body`
-  (the `unsafe` cast `raw *T as own *T`, §6.5) and give `Body` a `Drop` for any
-  logical teardown; the compiler runs that `drop`, then libc-frees the block:
+`Drop` may only be implemented on a nominal `data`/`enum` type (on a
+primitive/pointer it is rejected).  A moved-out `own *T` auto-nulls, so its later
+free is `free(NULL)` and the resource is released exactly once by the new owner.
 
-  ```maka
-  data Body { }
-  Body has Drop { unit drop(&mut Body self) { /* logical teardown */ } }
-  data Handle { own *Body h; }             // owning + move-only via the field
-  Handle open() { unsafe { return Handle { h = c_alloc() as raw *Body as own *Body }; } }
-  ```
-
-- **a foreign destructor frees it** (`fclose`, `close`, a library `*_free`) -
-  hold the handle in a **non-owning** `raw` field, so the compiler frees
-  nothing and `drop` does the whole teardown:
-
-  ```maka
-  data File { raw *unit fd; }
-  File has Drop { unit drop(&mut File self) { unsafe { c_fclose(self.fd); } } }
-  ```
-
-Either way the handle is move-only and tears down exactly once - automatically
-at scope exit, or via a function that takes it by value (consuming it), which
-makes any later use a compile-time use-after-move.
+**FFI handles:** declare the resource as an opaque pointee, put `Drop` on it, and
+hand it around as `own *T` (adopting the C pointer with the `unsafe`
+`raw *T as own *T` cast, §6.5).  When libc `free` reclaims the block, that is all
+- the compiler runs the `drop`, then frees the block (the `Pool` in the stdlib is
+exactly this: `data Pool {}` + `Pool has Drop`, held as `own *Pool`).  A resource
+whose *own C destructor* frees the block (`fclose`, `close`) needs a foreign
+opaque pointee whose `own *` cleanup runs the drop but emits no libc-free; that
+regime is not yet in the language.
 
 ### 6.5 `unsafe { }`
 
