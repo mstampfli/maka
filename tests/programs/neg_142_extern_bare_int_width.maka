@@ -1,0 +1,12 @@
+// FFI signatures must state the C width explicitly: a bare `int`/`float`/`char`
+// hides the C ABI (`int` lowers to int64_t, mismatching a C `int`).  The extern
+// below must be rejected with a hint to use i64/i32/... - the programmer has to
+// pick the width that matches the real C function.
+extern "some_c_lib_fn" int frobnicate(int x, *int out);
+
+unit main() {
+    unsafe {
+        mut int v = 0;
+        _ = frobnicate(3, &mut v);
+    }
+}

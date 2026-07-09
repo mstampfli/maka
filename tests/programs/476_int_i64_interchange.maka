@@ -20,4 +20,6 @@ unit main() {
     log(e);                              // 6
     log(f);                              // 10
     log(bx.hi + bx.lo);                  // 10
+    // (the `i64 as *T` / `*T as i64` address-cast consistency this enables is
+    // exercised by 204_atomic_ptr, whose AtomicPtr stores a `*T` in an atomic i64)
 }

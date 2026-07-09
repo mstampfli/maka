@@ -22,7 +22,7 @@ cblock "
 extern *unit __mk_input();
 extern i32   __mk_pair_size();
 extern i32   __mk_int_size();
-extern int   __mk_out_at(*unit p, i32 i);
+extern i64   __mk_out_at(*unit p, i32 i);
 extern unit  __mk_pair_sum(*mut unit in_item, *mut unit out_item);
 extern unit  __mk_free_buf(*mut unit p);
 

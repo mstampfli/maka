@@ -6,8 +6,8 @@ cinclude "stdio.h";
 
 cblock "static double sq(double x) { return x * x; }";
 
-extern float sqrt(float x);
-extern float sq(float x);
+extern f64 sqrt(f64 x);
+extern f64 sq(f64 x);
 extern i32 printf(string fmt, ...);
 
 unit main() {

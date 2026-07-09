@@ -4,7 +4,7 @@
 // CLI `--link`.  Paths resolve relative to the invocation directory, like `--link`.
 clink "tests/programs/420_clink_helper.c";
 
-extern int clink_answer();   // defined in the clinked C file
+extern i64 clink_answer();   // defined in the clinked C file
 
 unit main() {
     log(clink_answer());     // 42 - only links because `clink` fed the .c file

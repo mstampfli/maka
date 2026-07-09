@@ -6,7 +6,7 @@
 // platform).  Before the f32/Float split this collapsed to `maka_float`
 // (= double) and silently mis-called libc.
 extern f32 sqrtf(f32 x);
-extern float sqrt(float x);    // C double — Maka `float` ≡ HType::Float ≡ double
+extern f64 sqrt(f64 x);        // C double - `f64` is the explicit spelling of Maka's binary64 (a bare `float` is rejected at an FFI boundary, §5.3)
 
 unit main() {
     f32 a = 16.0f32;

@@ -4,6 +4,31 @@ use crate::hir::*;
 use crate::SemaError;
 use maka_ast::{self as ast, Mutness};
 
+/// FFI-boundary width check.  In an `extern` signature the C ABI is real, so a
+/// width-ambiguous scalar keyword hides a marshalling bug: `int` lowers to
+/// `int64_t` (mismatches a C `int`), `float` to `double` (mismatches a C
+/// `float`), `char` to `uint8_t`.  Require the explicit-width spelling so the
+/// programmer STATES the C type.  This checks the SOURCE spelling, not the
+/// resolved type, because `float` and `f64` resolve to the same `HType::Float`
+/// (both binary64) - the only way to force the choice is to reject the bare
+/// keyword and accept the sized spelling.  Peels pointer/slice/array wrappers so
+/// `*int` is caught too; `string` (a C `char*`) is a distinct, unambiguous type
+/// and is exempt.  Returns `(found_spelling, suggested_fix, span)`.
+fn ffi_ambiguous_scalar(ty: &ast::Type) -> Option<(&'static str, &'static str, maka_lexer::Span)> {
+    match ty {
+        ast::Type::Named(n, sp) => match n.as_str() {
+            "int" => Some(("int", "i64 (what `int` lowers to) - or i32/i16/i8/u32/usize/... to match the actual C type", *sp)),
+            "float" => Some(("float", "f64 (= C `double`) or f32 (= C `float`)", *sp)),
+            "char" => Some(("char", "u8 (what `char` lowers to) or i8", *sp)),
+            _ => None,
+        },
+        ast::Type::Ref { inner, .. } | ast::Type::Ptr { inner, .. } | ast::Type::RawPtr { inner, .. }
+        | ast::Type::OwnPtr { inner, .. } | ast::Type::Heap { inner, .. } => ffi_ambiguous_scalar(inner),
+        ast::Type::Array { elem, .. } | ast::Type::Slice { elem, .. } | ast::Type::Vec { elem, .. } => ffi_ambiguous_scalar(elem),
+        _ => None,
+    }
+}
+
 pub fn resolve_type(sym: &SymTab, t: &ast::Type, errors: &mut Vec<SemaError>) -> HType {
     resolve_type_in(sym, t, &[], errors)
 }
@@ -1090,10 +1115,33 @@ impl SymTab {
                         errors.push(SemaError { msg: format!("duplicate extern `{}`", e.name), span: e.span });
                         continue;
                     }
+                    // The width check targets HAND-WRITTEN FFI, where the author
+                    // must state the C width.  Compiler-SYNTHESIZED externs (the
+                    // Rust-interop bridge, §12) are derived from typed Rust
+                    // signatures - already ABI-correct, no width for a human to
+                    // choose - and carry a dummy span (line 0); source externs
+                    // always have a real 1-indexed line.  Skip the synthesized ones.
+                    let ffi_checked = e.span.line != 0;
+                    if ffi_checked {
+                        if let Some((found, fix, sp)) = ffi_ambiguous_scalar(&e.ret) {
+                            errors.push(SemaError {
+                                msg: format!("extern `{}` return type is `{}`, which is width-ambiguous at the C boundary; use {}", e.name, found, fix),
+                                span: sp,
+                            });
+                        }
+                    }
                     let ret = resolve_type(&sym, &e.ret, &mut errors);
                     let mut param_tys = Vec::new();
                     let mut param_names = Vec::new();
                     for p in &e.params {
+                        if ffi_checked {
+                            if let Some((found, fix, sp)) = ffi_ambiguous_scalar(&p.ty) {
+                                errors.push(SemaError {
+                                    msg: format!("extern `{}` parameter `{}` is `{}`, which is width-ambiguous at the C boundary; use {}", e.name, p.name, found, fix),
+                                    span: sp,
+                                });
+                            }
+                        }
                         param_tys.push(resolve_type(&sym, &p.ty, &mut errors));
                         param_names.push(p.name.clone());
                     }

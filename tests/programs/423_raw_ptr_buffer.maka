@@ -9,7 +9,7 @@ cblock "
 static unsigned char* rb_alloc(long n){ extern void* malloc(unsigned long); return (unsigned char*)malloc((unsigned long)n); }
 static void rb_free(unsigned char* p){ extern void free(void*); free(p); }
 ";
-extern raw *mut u8 rb_alloc(int n);
+extern raw *mut u8 rb_alloc(i64 n);
 extern unit rb_free(raw *mut u8 p);
 
 // Fill a byte buffer through a raw pointer parameter.

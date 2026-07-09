@@ -1047,6 +1047,9 @@ fn rust_prim_to_maka(s: &str) -> &'static str {
     // Rust int widths normalise to Maka `int` (= int64) at the boundary, with
     // narrowing inside the shim.  Floats normalise to Maka `float` (= f64).
     // This keeps Maka call sites ergonomic — int literals work without casts.
+    // These synthesized externs are exempt from the FFI-width check (§5.3): they
+    // are derived from typed Rust signatures, not hand-written, so there is no
+    // width for a human to state (see `ffi_ambiguous_scalar`'s dummy-span guard).
     match s {
         "f32" | "f64" => "float",
         _ => "int",

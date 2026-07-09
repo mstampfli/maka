@@ -729,8 +729,8 @@ still accepted and additive). `-lm` is always linked, so it needs no `clink`.
 ### 5.3 `extern` and variadic FFI
 
 ```maka
-extern float sqrt(float x);                    // libm
-extern gate unit thread_spawn_with_buf(*unit buf, int n);
+extern f64 sqrt(f64 x);                        // libm (C double)
+extern gate unit thread_spawn_with_buf(*unit buf, i64 n);
 extern i32 printf(string fmt, ...);            // variadic
 ```
 
@@ -739,6 +739,17 @@ extern i32 printf(string fmt, ...);            // variadic
 overrides the C link name. Trailing `...` marks a variadic. Variadic call sites
 require at least the fixed-arity prefix to match; trailing args type-check
 without coercion.
+
+**FFI signatures must state the C width.** The width-ambiguous keywords `int`,
+`float`, and `char` are **rejected** in an `extern` signature (return, params,
+and through any `*`/`&`/`[]` wrapper) - at a real C boundary the ABI is concrete,
+and a bare `int` silently lowers to `int64_t` (which mismatches a C `int`),
+`float` to `double`, `char` to `uint8_t`.  Use the explicit spelling: `i64`
+(what `int` lowers to) or `i32`/`i16`/`u32`/... to match the actual C type;
+`f64` (= C `double`) or `f32` (= C `float`); `u8`/`i8` for `char`.  `string`
+(a C `char*`) is unambiguous and exempt.  Since `int` and `i64` are
+interchangeable (§2.1), callers still pass ordinary `int` values to an `i64`
+extern parameter with no cast.
 
 **Emitted C type names.** An `extern` prototype (and any `cblock` that defines the
 same symbol) uses Maka's emitted C typedef names, which must match EXACTLY or the C
@@ -2144,24 +2155,25 @@ explicitly — codegen lowers the type the user wrote, nothing more.
 | `double` | `float` (or `f64`) |
 | `void*`, `T*` | `*unit` (in extern decls), `*T` (when typed) |
 
-The two foot-guns:
+The two foot-guns - now **compiler-enforced**: a bare `int`/`float`/`char` in an
+`extern` signature is a hard error (§5.3), so neither can be written by accident:
 
-1. **Maka `int` is always 64-bit.**  Writing `extern int read(int fd, ...)`
-   declares `int64_t read(int64_t, …)` on the C side, which mismatches
-   libc's `int read(int, …)` and will silently corrupt arguments and
-   return values.  Use `i32` for any C function whose signature mentions
-   `int`.
+1. **Maka `int` is always 64-bit.**  `extern int read(int fd, ...)` is rejected;
+   it would have declared `int64_t read(int64_t, …)`, mismatching libc's
+   `int read(int, …)` and silently corrupting arguments and return values.
+   Write `i32` for a C `int` (or `i64` when the C side really is 64-bit).
 
 2. **Maka `float` is double.**  `float`/`f64`/native lower to C `double`
    (8 bytes); `f32` is the dedicated 4-byte float.  `extern f32 sqrtf(f32 x)`
-   correctly calls libc's `float sqrtf(float)`; writing `extern float sqrtf(float x)`
-   compiles to `double sqrtf(double)` — ABI mismatch, garbage results.
+   correctly calls libc's `float sqrtf(float)`; `extern float sqrtf(float x)`
+   is rejected (it would compile to `double sqrtf(double)` - ABI mismatch).
 
 The sized-int family (`i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64`) and
-the new `f32` ARE ABI-exact — what you write is what gets emitted.
-Default `int` / `float` are convenient inside Maka but risky at the
-boundary; the safe rule is "use sized types in every `extern` signature
-and `cblock` shim."
+`f32` ARE ABI-exact - what you write is what gets emitted.  Default `int` /
+`float` are convenient inside Maka but forbidden at the boundary; the rule
+"use sized types in every `extern` signature and `cblock` shim" is enforced,
+not merely advised.  (`int` and `i64` interconvert, §2.1, so callers still
+pass ordinary `int` values to an `i64` extern with no cast.)
 
 A worked test lives at `tests/programs/175_float_ffi_abi.maka`.
 

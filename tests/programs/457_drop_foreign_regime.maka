@@ -10,7 +10,7 @@ cblock "
 ";
 extern "c_open"       raw *unit c_open();
 extern "c_close"      unit      c_close(raw *unit p);
-extern "c_was_closed" int       c_was_closed();
+extern "c_was_closed" i64       c_was_closed();
 FileBody has Drop { unit drop(&mut FileBody self) { unsafe { c_close(self as raw *unit); } } }
 unit main() {
     { unsafe { own *FileBody f = c_open() as raw *FileBody as own *FileBody; } }  // drop runs here

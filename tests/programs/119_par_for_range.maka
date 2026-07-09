@@ -8,8 +8,8 @@ static void bump(int64_t i) { atomic_fetch_add(&g_sum, i); }
 static int64_t read_sum(void) { return atomic_load(&g_sum); }
 ";
 
-extern "bump"     unit bump(int i);
-extern "read_sum" int  read_sum();
+extern "bump"     unit bump(i64 i);
+extern "read_sum" i64  read_sum();
 
 unit main() {
     par_for_range(0, 1000, unit(int i) {

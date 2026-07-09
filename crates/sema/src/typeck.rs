@@ -4682,6 +4682,14 @@ impl<'a> TypeChecker<'a> {
 
     fn classify_cast(&mut self, from: &HType, to: &HType, checked: bool, sp: Span) -> CastKind {
         use HType::*;
+        // `int` and `i64` are the same type (§2.1): canonicalize an `i64` operand
+        // to `Int` for cast CLASSIFICATION, so every rule that accepts `int`
+        // (numeric, address reinterpret `int <-> *T`, enum tag) accepts `i64`
+        // identically.  Only the chosen `CastKind` is affected here - the cast's
+        // result type is the written `to`, set by the caller.
+        let canon = |t: &HType| if matches!(t, SizedInt { signed: true, bits: 64 }) { Int } else { t.clone() };
+        let (from_c, to_c) = (canon(from), canon(to));
+        let (from, to) = (&from_c, &to_c);
         if !checked {
             match (from, to) {
                 (Int, Int) | (Float, Float) | (Int, Float) | (Float, Int) => CastKind::Numeric,
@@ -5981,6 +5989,20 @@ impl<'a> TypeChecker<'a> {
         // node - identical `int64_t` representation at the C level).
         if int_i64_interchangeable(&e.ty, target) {
             return HExpr { ty: target.clone(), ..e };
+        }
+        // ...and through a matching `&mut`/`&`/`*` wrapper: `&mut int` <-> `&mut
+        // i64` is a no-op reinterpret (identical referent representation).  Needed
+        // for FFI out-params - an `&mut i64` extern param taking a caller's
+        // `&mut int`.  (`param_compatible` already allows this via its recursion;
+        // `coerce` is the assignment/direct-arg path and needs it too.)
+        match (target, &e.ty) {
+            (HType::Ref { mutable: tm, inner: ti }, HType::Ref { mutable: am, inner: ai })
+                if tm == am && int_i64_interchangeable(ti, ai) =>
+                return HExpr { ty: target.clone(), ..e },
+            (HType::Ptr { mutable: tm, inner: ti }, HType::Ptr { mutable: am, inner: ai })
+                if tm == am && int_i64_interchangeable(ti, ai) =>
+                return HExpr { ty: target.clone(), ..e },
+            _ => {}
         }
 
         // Pack a concrete homogeneous `Vec<T>` into a dense existential column

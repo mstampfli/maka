@@ -2,8 +2,8 @@
 // reached through the raw extern surface.  *unit is banned in safe code,
 // so the raw-handle bindings live inside `unsafe { }`.
 extern *unit maka_channel_new();
-extern unit maka_channel_send(*unit ch, int v);
-extern int  maka_channel_recv(*unit ch);
+extern unit maka_channel_send(*unit ch, i64 v);
+extern i64  maka_channel_recv(*unit ch);
 extern unit maka_channel_destroy(*unit ch);
 extern *unit maka_rwlock_new();
 extern unit maka_rwlock_read_lock(*unit r);

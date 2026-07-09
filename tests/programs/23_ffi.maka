@@ -1,6 +1,6 @@
 // §22 — FFI: extern decls that bind to a Maka-linkable C library.
-extern int maka_demo_abs(int x);
-extern int maka_demo_add(int a, int b);
+extern i64 maka_demo_abs(i64 x);
+extern i64 maka_demo_add(i64 a, i64 b);
 
 unit main() {
     log(maka_demo_abs(-7));        // 7

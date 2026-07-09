@@ -1,8 +1,8 @@
 // D11 — concurrency surface: atomics, fence, transfer/share, thread_local keywords.
-extern int maka_atomic_load_i64(&int p);
-extern unit maka_atomic_store_i64(&mut int p, int v);
-extern int maka_atomic_fetch_add_i64(&mut int p, int delta);
-extern unit maka_fence(int ord);
+extern i64 maka_atomic_load_i64(&i64 p);
+extern unit maka_atomic_store_i64(&mut i64 p, i64 v);
+extern i64 maka_atomic_fetch_add_i64(&mut i64 p, i64 delta);
+extern unit maka_fence(i64 ord);
 
 enum Ordering {
     Relaxed,

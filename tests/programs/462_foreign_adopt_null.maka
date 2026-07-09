@@ -9,9 +9,9 @@ cblock "
     void       body_kill(maka_unit* p) { g_killed = g_killed + 1; free(p); }
     maka_int   body_kills(void) { return g_killed; }
 ";
-extern "body_maybe" raw *unit body_maybe(int ok);
+extern "body_maybe" raw *unit body_maybe(i64 ok);
 extern "body_kill"  unit body_kill(raw *unit p);
-extern "body_kills" int  body_kills();
+extern "body_kills" i64  body_kills();
 Body has Drop { unit drop(&mut Body self) { unsafe { body_kill(self as raw *unit); } } }
 unit main() {
     { unsafe { own *Body b = body_maybe(0) as raw *Body as own *Body; } }  // b is NULL: no drop

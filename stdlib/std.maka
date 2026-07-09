@@ -126,7 +126,7 @@ pub bool  str_eq (string a, string b)    { return __str_cmp(a, b) == 0; }
 // concurrency model — `spawn` / `thread` / `job` plus this composition
 // surface.
 
-extern "__maka_sleep_ns" unit __sleep_ns(int nanos);
+extern "__maka_sleep_ns" unit __sleep_ns(i64 nanos);
 
 // Sleep the current task/thread for the given number of milliseconds.
 pub unit sleep_ms(int ms) {
@@ -144,21 +144,21 @@ pub constexpr int EV_WRITE = 2;
 
 // IO primitives.  See CONCURRENCY.md.  Inside a fiber these yield to the
 // scheduler; outside they fall back to poll() / blocking read/write.
-extern "__maka_wait_fd"          unit __wait_fd(int fd, int events);
-extern "__maka_wait_fd_timeout"  int  __wait_fd_timeout(int fd, int events, int ms);
-extern "__maka_set_nonblock"     int  __set_nonblock(int fd);
-extern "__maka_read_async"       int  __read_async(int fd, *mut unit buf, int cap);
-extern "__maka_write_async"      int  __write_async(int fd, *mut unit buf, int len);
-extern "__maka_tcp_listen"       int  __tcp_listen(int port, int backlog);
-extern "__maka_tcp_listen_any"   int  __tcp_listen_any(int port, int backlog);
-extern "__maka_tcp_accept_async" int  __tcp_accept(int listen_fd);
-extern "__maka_tcp_connect_v4"   int  __tcp_connect_v4(int a, int b, int c, int d, int port);
-extern "__maka_close_fd"         int  __close_fd(int fd);
-extern "__maka_dns_resolve_v4"   int  __dns_resolve_v4(string host);
-extern "__maka_unix_listen"      int  __unix_listen(string path, int backlog);
-extern "__maka_unix_connect"     int  __unix_connect(string path);
-extern "__maka_pipe_create"      int  __pipe_create();
-extern "__maka_pipe_write_fd"    int  __pipe_write_fd();
+extern "__maka_wait_fd"          unit __wait_fd(i64 fd, i64 events);
+extern "__maka_wait_fd_timeout"  i64  __wait_fd_timeout(i64 fd, i64 events, i64 ms);
+extern "__maka_set_nonblock"     i64  __set_nonblock(i64 fd);
+extern "__maka_read_async"       i64  __read_async(i64 fd, *mut unit buf, i64 cap);
+extern "__maka_write_async"      i64  __write_async(i64 fd, *mut unit buf, i64 len);
+extern "__maka_tcp_listen"       i64  __tcp_listen(i64 port, i64 backlog);
+extern "__maka_tcp_listen_any"   i64  __tcp_listen_any(i64 port, i64 backlog);
+extern "__maka_tcp_accept_async" i64  __tcp_accept(i64 listen_fd);
+extern "__maka_tcp_connect_v4"   i64  __tcp_connect_v4(i64 a, i64 b, i64 c, i64 d, i64 port);
+extern "__maka_close_fd"         i64  __close_fd(i64 fd);
+extern "__maka_dns_resolve_v4"   i64  __dns_resolve_v4(string host);
+extern "__maka_unix_listen"      i64  __unix_listen(string path, i64 backlog);
+extern "__maka_unix_connect"     i64  __unix_connect(string path);
+extern "__maka_pipe_create"      i64  __pipe_create();
+extern "__maka_pipe_write_fd"    i64  __pipe_write_fd();
 
 // Non-blocking pipe pair.  Returns the read fd; immediately after, call
 // `pipe_write_fd()` to grab the matching write fd.  Both fds are O_NONBLOCK
@@ -171,12 +171,12 @@ pub int pipe_write_fd() { return __pipe_write_fd(); }
 // TLS client (OpenSSL).  Requires the C source to be compiled with
 // -DMAKA_TLS and linked with `-l ssl -l crypto` — otherwise these
 // helpers return -1 / NULL so user programs still compile cleanly.
-extern "__maka_tls_server_init"        int   __tls_server_init(string cert_pem, string key_pem);
-extern "__maka_tls_server_accept_new"  *unit __tls_server_accept_new(int fd);
-extern "__maka_tls_client_new"         *unit __tls_client_new(int fd, string hostname);
-extern "__maka_tls_handshake"   int  __tls_handshake(*unit ssl);
-extern "__maka_tls_read"        int  __tls_read(*unit ssl, *mut unit buf, int cap);
-extern "__maka_tls_write"       int  __tls_write(*unit ssl, *mut unit buf, int len);
+extern "__maka_tls_server_init"        i64   __tls_server_init(string cert_pem, string key_pem);
+extern "__maka_tls_server_accept_new"  *unit __tls_server_accept_new(i64 fd);
+extern "__maka_tls_client_new"         *unit __tls_client_new(i64 fd, string hostname);
+extern "__maka_tls_handshake"   i64  __tls_handshake(*unit ssl);
+extern "__maka_tls_read"        i64  __tls_read(*unit ssl, *mut unit buf, i64 cap);
+extern "__maka_tls_write"       i64  __tls_write(*unit ssl, *mut unit buf, i64 len);
 extern "__maka_tls_close"       unit __tls_close(*unit ssl);
 
 pub data TlsConn { *unit ssl; }
@@ -200,13 +200,13 @@ pub int unix_connect(string path)               { return __unix_connect(path); }
 // are available via the getter calls below — they read from per-thread
 // state set by the most recent parse, so don't call other http_parse
 // concurrently on the same thread.
-extern "__maka_http_parse"               int __http_parse(string buf, int len);
-extern "__maka_http_method_off_g"        int __http_method_off();
-extern "__maka_http_method_len_g"        int __http_method_len();
-extern "__maka_http_path_off_g"          int __http_path_off();
-extern "__maka_http_path_len_g"          int __http_path_len();
-extern "__maka_http_body_off_g"          int __http_body_off();
-extern "__maka_http_content_length_g"    int __http_content_length();
+extern "__maka_http_parse"               i64 __http_parse(string buf, i64 len);
+extern "__maka_http_method_off_g"        i64 __http_method_off();
+extern "__maka_http_method_len_g"        i64 __http_method_len();
+extern "__maka_http_path_off_g"          i64 __http_path_off();
+extern "__maka_http_path_len_g"          i64 __http_path_len();
+extern "__maka_http_body_off_g"          i64 __http_body_off();
+extern "__maka_http_content_length_g"    i64 __http_content_length();
 
 pub int http_parse           (string buf, int len) { return __http_parse(buf, len); }
 pub int http_method_off      ()                    { return __http_method_off(); }
@@ -215,9 +215,9 @@ pub int http_path_off        ()                    { return __http_path_off(); }
 pub int http_path_len        ()                    { return __http_path_len(); }
 pub int http_body_off        ()                    { return __http_body_off(); }
 pub int http_content_length  ()                    { return __http_content_length(); }
-extern "__maka_file_open"        int  __file_open(string path, int flags, int mode);
-extern "__maka_file_read_async"  int  __file_read_async(int fd, *mut unit buf, int cap, int offset);
-extern "__maka_file_write_async" int  __file_write_async(int fd, *mut unit buf, int len, int offset);
+extern "__maka_file_open"        i64  __file_open(string path, i64 flags, i64 mode);
+extern "__maka_file_read_async"  i64  __file_read_async(i64 fd, *mut unit buf, i64 cap, i64 offset);
+extern "__maka_file_write_async" i64  __file_write_async(i64 fd, *mut unit buf, i64 len, i64 offset);
 
 // File async IO via an offload thread per request.  open() is synchronous
 // (regular file opens are quick); read/write yield via an eventfd that a
@@ -237,19 +237,19 @@ pub int file_write_async(int fd, *mut unit buf, int len, int offset)        { re
 // Synchronous — wrap in spawn_pool() if you don't want the calling
 // fiber to block.
 pub int dns_resolve_v4(string host) { return __dns_resolve_v4(host); }
-extern "__maka_udp_open"         int  __udp_open(int port);
-extern "__maka_udp_send_v4"      int  __udp_send_v4(int fd, int a, int b, int c, int d, int port, *mut unit buf, int len);
-extern "__maka_udp_recv_async"   int  __udp_recv_async(int fd, *mut unit buf, int cap);
-extern "__maka_signalfd_open"    int  __signalfd_open(int signum);
-extern "__maka_signalfd_recv"    int  __signalfd_recv(int fd);
-extern "__maka_timerfd_create"   int  __timerfd_create(int initial_ns, int interval_ns);
-extern "__maka_timerfd_recv"     int  __timerfd_recv(int fd);
-extern "__maka_eventfd_create"   int  __eventfd_create(int initial);
-extern "__maka_eventfd_signal"   int  __eventfd_signal(int fd, int n);
-extern "__maka_eventfd_recv"     int  __eventfd_recv(int fd);
-extern "__maka_inotify_open"     int  __inotify_open();
-extern "__maka_inotify_add"      int  __inotify_add(int fd, string path, int mask);
-extern "__maka_inotify_recv"     int  __inotify_recv(int fd);
+extern "__maka_udp_open"         i64  __udp_open(i64 port);
+extern "__maka_udp_send_v4"      i64  __udp_send_v4(i64 fd, i64 a, i64 b, i64 c, i64 d, i64 port, *mut unit buf, i64 len);
+extern "__maka_udp_recv_async"   i64  __udp_recv_async(i64 fd, *mut unit buf, i64 cap);
+extern "__maka_signalfd_open"    i64  __signalfd_open(i64 signum);
+extern "__maka_signalfd_recv"    i64  __signalfd_recv(i64 fd);
+extern "__maka_timerfd_create"   i64  __timerfd_create(i64 initial_ns, i64 interval_ns);
+extern "__maka_timerfd_recv"     i64  __timerfd_recv(i64 fd);
+extern "__maka_eventfd_create"   i64  __eventfd_create(i64 initial);
+extern "__maka_eventfd_signal"   i64  __eventfd_signal(i64 fd, i64 n);
+extern "__maka_eventfd_recv"     i64  __eventfd_recv(i64 fd);
+extern "__maka_inotify_open"     i64  __inotify_open();
+extern "__maka_inotify_add"      i64  __inotify_add(i64 fd, string path, i64 mask);
+extern "__maka_inotify_recv"     i64  __inotify_recv(i64 fd);
 
 // File-watch via inotify (Linux).  Common masks:
 //   1     = IN_ACCESS   (file was accessed)
@@ -361,7 +361,7 @@ pub unit  mutex_destroy(Mutex m)       { __fmutex_destroy(m.h); }
 // CONSUMES the pool so a later `spawn_on(p, ...)` / double-shutdown is a
 // compile-time use-after-move.  `spawn_on`/`job_on` BORROW the pool.
 pub data Pool {}
-extern "__maka_pool_new"  raw *unit __pool_new_h(int n, int stack_bytes);
+extern "__maka_pool_new"  raw *unit __pool_new_h(i64 n, i64 stack_bytes);
 extern "__maka_pool_free" unit      __pool_teardown_h(raw *unit p);
 pub Pool has Drop { unit drop(&mut Pool self) { unsafe { __pool_teardown_h(self as raw *unit); } } }
 
@@ -379,7 +379,7 @@ pub unit pool_shutdown(own *Pool p) { }
 // === WaitGroup ===
 pub data WaitGroup { *unit h; }
 extern "maka_wg_new"     *unit __wg_new();
-extern "maka_wg_add"     unit                 __wg_add(*unit w, int n);
+extern "maka_wg_add"     unit                 __wg_add(*unit w, i64 n);
 extern "maka_wg_done"    unit                 __wg_done(*unit w);
 extern "maka_wg_wait"    unit                 __wg_wait(*unit w);
 extern "maka_wg_destroy" unit                 __wg_destroy(*unit w);
@@ -415,11 +415,11 @@ pub bool has AtomicWord { int to_word(&bool self) { if (self) { return 1; } retu
 pub char has AtomicWord { int to_word(&char self) { return self as int; }     char from_word(int w) { return w as char; } }
 
 pub data Atomic<T> { *unit h; }
-extern "maka_atomic_i64_new"     *unit __atomic_new_raw(int v);
-extern "maka_atomic_i64_load"    int   __atomic_load_raw(*unit a);
-extern "maka_atomic_i64_store"   unit  __atomic_store_raw(*unit a, int v);
-extern "maka_atomic_i64_add"     int   __atomic_add_raw(*unit a, int delta);
-extern "maka_atomic_i64_cas"     int   __atomic_cas_raw(*unit a, int expected, int desired);
+extern "maka_atomic_i64_new"     *unit __atomic_new_raw(i64 v);
+extern "maka_atomic_i64_load"    i64   __atomic_load_raw(*unit a);
+extern "maka_atomic_i64_store"   unit  __atomic_store_raw(*unit a, i64 v);
+extern "maka_atomic_i64_add"     i64   __atomic_add_raw(*unit a, i64 delta);
+extern "maka_atomic_i64_cas"     i64   __atomic_cas_raw(*unit a, i64 expected, i64 desired);
 extern "maka_atomic_i64_destroy" unit  __atomic_destroy_raw(*unit a);
 
 pub Atomic<T> atomic_new<T>(T v) where T has AtomicWord {
@@ -460,10 +460,10 @@ pub unit atomic_ptr_destroy<T>(AtomicPtr<T> a)    { __atomic_destroy_raw(a.h); }
 // `&mut out as raw *mut unit` for recv.  v1: unbounded, blocks pthread on
 // empty recv (not yet fiber-aware — use spawn_pool on receiver to keep
 // the fiber scheduler running).
-extern "maka_chan_bytes_new"     *unit __chan_bytes_new(int item_size);
+extern "maka_chan_bytes_new"     *unit __chan_bytes_new(i64 item_size);
 extern "maka_chan_bytes_send"    unit  __chan_bytes_send(*unit ch, *unit src);
 extern "maka_chan_bytes_recv"    unit  __chan_bytes_recv(*unit ch, *unit dst);
-extern "maka_chan_bytes_count"   int   __chan_bytes_count(*unit ch);
+extern "maka_chan_bytes_count"   i64   __chan_bytes_count(*unit ch);
 extern "maka_chan_bytes_close"   unit  __chan_bytes_close(*unit ch);
 extern "maka_chan_bytes_destroy" unit  __chan_bytes_destroy(*unit ch);
 
@@ -533,8 +533,8 @@ pub unit      chan_float_destroy(FloatChan c)        { __chan_bytes_destroy(c.h)
 // =====================================================================
 // Time + sleep — high-resolution monotonic clock + sleep helpers.
 // =====================================================================
-extern "__maka_now_ns" int __now_ns();
-extern "__maka_now_ms" int __now_ms();
+extern "__maka_now_ns" i64 __now_ns();
+extern "__maka_now_ms" i64 __now_ms();
 pub int  now_ns()                  { return __now_ns(); }
 pub int  now_ms()                  { return __now_ms(); }
 pub unit sleep_ns(int nanos)       { __sleep_ns(nanos); }
@@ -567,12 +567,12 @@ pub unit   rwlock_destroy   (RwLock r)         { __rwlock_destroy(r.h); }
 // file_read_async / file_write_async tier.  All return 0 on success and
 // -1 on error (POSIX convention); file_size returns the size or -1.
 // =====================================================================
-extern "__maka_rt_file_unlink"   int __file_unlink  (string path);
-extern "__maka_rt_file_rename"   int __file_rename  (string from, string to);
-extern "__maka_rt_file_mkdir"    int __file_mkdir   (string path, int mode);
-extern "__maka_rt_file_size"     int __file_size    (string path);
-extern "__maka_rt_file_sync"     int __file_sync    (int fd);
-extern "__maka_rt_file_truncate" int __file_truncate(int fd, int len);
+extern "__maka_rt_file_unlink"   i64 __file_unlink  (string path);
+extern "__maka_rt_file_rename"   i64 __file_rename  (string from, string to);
+extern "__maka_rt_file_mkdir"    i64 __file_mkdir   (string path, i64 mode);
+extern "__maka_rt_file_size"     i64 __file_size    (string path);
+extern "__maka_rt_file_sync"     i64 __file_sync    (i64 fd);
+extern "__maka_rt_file_truncate" i64 __file_truncate(i64 fd, i64 len);
 pub int file_unlink  (string path)          { return __file_unlink(path); }
 pub int file_rename  (string from, string to) { return __file_rename(from, to); }
 pub int file_mkdir   (string path, int mode){ return __file_mkdir(path, mode); }
@@ -590,14 +590,14 @@ pub int file_truncate(int fd, int len)      { return __file_truncate(fd, len); }
 // splitting is plain Maka on top.
 // =====================================================================
 extern "__maka_rt_read_file"     own *string __rt_read_file (string path);
-extern "__maka_rt_write_file"    int    __rt_write_file(string path, string content, int len);
-extern "__maka_rt_str_byte"      int    __rt_str_byte  (string s, int i);
-extern "__maka_rt_str_hash"      int    __rt_str_hash  (string s);
+extern "__maka_rt_write_file"    i64    __rt_write_file(string path, string content, i64 len);
+extern "__maka_rt_str_byte"      i64    __rt_str_byte  (string s, i64 i);
+extern "__maka_rt_str_hash"      i64    __rt_str_hash  (string s);
 // Owned substring - the C side mallocs, so the result is an owned own *string that
 // auto-frees.  Takes the caller-known source length `slen` to skip an O(n) strlen
 // (str_dup / split_lines already have it); `str_substring` is the public form that
 // computes the length itself.
-extern "__maka_rt_substr_owned"  own *string __rt_substr    (string s, int start, int len, int slen);
+extern "__maka_rt_substr_owned"  own *string __rt_substr    (string s, i64 start, i64 len, i64 slen);
 
 // Byte at index `i` of a string (0..len-1), or -1 if out of range.  Strings
 // are not indexable with `s[i]`; this is the byte-level read accessor.
@@ -968,10 +968,10 @@ pub int hm_len<V>(&HashMap<V> m) { return m.count; }
 // =====================================================================
 // Filesystem queries + environment + process control.
 // =====================================================================
-extern "__maka_rt_file_exists"  int  __file_exists (string path);
-extern "__maka_rt_file_is_dir"  int  __file_is_dir (string path);
+extern "__maka_rt_file_exists"  i64  __file_exists (string path);
+extern "__maka_rt_file_is_dir"  i64  __file_is_dir (string path);
 extern "__maka_rt_env_get"      own *string __env_get_raw(string name);
-extern "__maka_rt_process_exit" unit __process_exit(int code);
+extern "__maka_rt_process_exit" unit __process_exit(i64 code);
 pub bool file_exists (string path)  { return __file_exists(path) != 0; }
 pub bool file_is_dir (string path)  { return __file_is_dir(path) != 0; }
 // Returns an OWNED copy of the env var's value (`own *string`), or an owned empty
@@ -983,9 +983,9 @@ pub unit   process_exit(int code)   { __process_exit(code); }
 // =====================================================================
 // own *string conversions + search.
 // =====================================================================
-extern "__maka_rt_str_to_int"   int    __str_to_int (string s);
-extern "__maka_rt_int_to_str"   own *string __int_to_str (int n);
-extern "__maka_rt_str_find"     int    __str_find   (string s, string needle);
+extern "__maka_rt_str_to_int"   i64    __str_to_int (string s);
+extern "__maka_rt_int_to_str"   own *string __int_to_str (i64 n);
+extern "__maka_rt_str_find"     i64    __str_find   (string s, string needle);
 pub int    str_to_int(string s)            { return __str_to_int(s); }
 /// Format an integer as a freshly allocated string (always non-null).
 pub own *string int_to_str(int n)               { return __int_to_str(n); }
@@ -995,25 +995,25 @@ pub int    str_find  (string s, string needle) { return __str_find(s, needle); }
 // Random — xorshift64* per-thread, seeded from monotonic clock + stack
 // address on first use.  Not cryptographically secure.
 // =====================================================================
-extern "__maka_rt_random_int"   int   __random_int  (int lo, int hi);
-extern "__maka_rt_random_float" float __random_float();
+extern "__maka_rt_random_int"   i64   __random_int  (i64 lo, i64 hi);
+extern "__maka_rt_random_float" f64 __random_float();
 pub int   random_int  (int lo, int hi) { return __random_int(lo, hi); }
 pub float random_float()               { return __random_float(); }
 
 // =====================================================================
 // Channel non-blocking receive (int).
 // =====================================================================
-extern "__maka_rt_chan_try_recv_int"   int __chan_try_recv_int_raw  (*unit h, &mut int out);
-extern "__maka_rt_chan_try_recv_float" int __chan_try_recv_float_raw(*unit h, &mut float out);
+extern "__maka_rt_chan_try_recv_int"   i64 __chan_try_recv_int_raw  (*unit h, &mut i64 out);
+extern "__maka_rt_chan_try_recv_float" i64 __chan_try_recv_float_raw(*unit h, &mut f64 out);
 pub int chan_try_recv_int  (IntChan c,   &mut int out)   { return __chan_try_recv_int_raw  (c.h, out); }
 pub int chan_try_recv_float(FloatChan c, &mut float out) { return __chan_try_recv_float_raw(c.h, out); }
 
 // =====================================================================
 // Process: env_set, args.
 // =====================================================================
-extern "__maka_rt_env_set"     int    __env_set   (string name, string value);
-extern "__maka_rt_args_count"  int    __args_count();
-extern "__maka_rt_arg_at"      string __arg_at    (int i);
+extern "__maka_rt_env_set"     i64    __env_set   (string name, string value);
+extern "__maka_rt_args_count"  i64    __args_count();
+extern "__maka_rt_arg_at"      string __arg_at    (i64 i);
 pub int    env_set   (string name, string value) { return __env_set(name, value); }
 pub int    args_count()                          { return __args_count(); }
 pub string arg_at    (int i)                     { return __arg_at(i); }
@@ -1021,24 +1021,24 @@ pub string arg_at    (int i)                     { return __arg_at(i); }
 // =====================================================================
 // TCP convenience: connect by hostname, TCP_NODELAY toggle.
 // =====================================================================
-extern "__maka_rt_tcp_connect_host" int __tcp_connect_host(string host, int port);
-extern "__maka_rt_tcp_set_nodelay"  int __tcp_set_nodelay (int fd, int on);
+extern "__maka_rt_tcp_connect_host" i64 __tcp_connect_host(string host, i64 port);
+extern "__maka_rt_tcp_set_nodelay"  i64 __tcp_set_nodelay (i64 fd, i64 on);
 pub int tcp_connect    (string host, int port) { return __tcp_connect_host(host, port); }
 pub int tcp_set_nodelay(int fd, bool on) { if (on) { return __tcp_set_nodelay(fd, 1); } else { return __tcp_set_nodelay(fd, 0); } }
 
 // =====================================================================
 // Random bytes (xorshift64*, non-cryptographic).
 // =====================================================================
-extern "__maka_rt_random_bytes" int __random_bytes_raw(*mut unit buf, int len);
+extern "__maka_rt_random_bytes" i64 __random_bytes_raw(*mut unit buf, i64 len);
 pub int random_bytes(*mut unit buf, int len) { return __random_bytes_raw(buf, len); }
 
 // =====================================================================
 // More string + filesystem helpers.
 // =====================================================================
-extern "__maka_rt_str_substring"   own *string __str_substring  (string s, int start, int len);
-extern "__maka_rt_file_mtime_ns"   int    __file_mtime_ns  (string path);
-extern "__maka_rt_str_starts_with" int    __str_starts_with(string s, string prefix);
-extern "__maka_rt_str_ends_with"   int    __str_ends_with  (string s, string suffix);
+extern "__maka_rt_str_substring"   own *string __str_substring  (string s, i64 start, i64 len);
+extern "__maka_rt_file_mtime_ns"   i64    __file_mtime_ns  (string path);
+extern "__maka_rt_str_starts_with" i64    __str_starts_with(string s, string prefix);
+extern "__maka_rt_str_ends_with"   i64    __str_ends_with  (string s, string suffix);
 extern "__maka_rt_str_to_upper"    own *string __str_to_upper   (string s);
 extern "__maka_rt_str_to_lower"    own *string __str_to_lower   (string s);
 extern "__maka_rt_str_trim"        own *string __str_trim       (string s);
@@ -1059,13 +1059,13 @@ pub own *string str_replace    (string s, string from, string to) { return __str
 // =====================================================================
 // Process control + file admin + UDP recvfrom.
 // =====================================================================
-extern "__maka_rt_process_id"    int    __process_id();
-extern "__maka_rt_env_remove"    int    __env_remove(string name);
-extern "__maka_rt_process_run"   int    __process_run(int argc, **string argv);
-extern "__maka_rt_file_copy"     int    __file_copy   (string src, string dst);
-extern "__maka_rt_file_chmod"    int    __file_chmod  (string path, int mode);
+extern "__maka_rt_process_id"    i64    __process_id();
+extern "__maka_rt_env_remove"    i64    __env_remove(string name);
+extern "__maka_rt_process_run"   i64    __process_run(i64 argc, **string argv);
+extern "__maka_rt_file_copy"     i64    __file_copy   (string src, string dst);
+extern "__maka_rt_file_chmod"    i64    __file_chmod  (string path, i64 mode);
 extern "__maka_rt_file_realpath" own *string __file_realpath(string path);
-extern "__maka_rt_udp_recv_from" int    __udp_recv_from(int fd, *mut unit buf, int cap, &mut int peer_v4, &mut int peer_port);
+extern "__maka_rt_udp_recv_from" i64    __udp_recv_from(i64 fd, *mut unit buf, i64 cap, &mut i64 peer_v4, &mut i64 peer_port);
 pub int    process_id    ()                       { return __process_id(); }
 pub int    env_remove    (string name)            { return __env_remove(name); }
 // `argv` is a C `char**` (array of strings); spell it `**string` (a pointer to a
@@ -1087,7 +1087,7 @@ pub int    udp_recv_from (int fd, *mut unit buf, int cap, &mut int peer_v4, &mut
 //   json_num_val, json_str_val, json_bool_val, json_len, json_kind,
 //   json_null, json_bool, json_num, json_str, json_arr_of, json_obj_of};`
 
-extern "atof" float __atof(string s);
+extern "atof" f64 __atof(string s);
 // Parse the leading number of `s` (0.0 if none) - C `atof`.
 pub float str_to_float(string s) { return __atof(s); }
 
