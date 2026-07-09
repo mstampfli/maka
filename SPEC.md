@@ -40,13 +40,17 @@ A `.maka` source file consists of:
 ### 1.4 Keywords
 
 ```
-mut const constexpr unsafe inline propagate
+mut const constexpr unsafe inline propagate as
 extern cinclude cblock clink rblock rdep raw own alloc free
-data enum attr has where dyn some type
+data enum embed attr has where dyn some type export
 if else while for in break continue match yield return
 gate transfer share thread_local module import use pub
-spawn thread job spawn_pool join detach cancel select
 ```
+
+`spawn` / `thread` / `job` / `spawn_pool` / `join` / `detach` / `cancel` /
+`select` are **not** keywords - they are built-in function names (below), callable
+like any function.  There is **no `let` and no `fn` keyword**: a local binding is
+`Type name = value` (§4) and a function is `RetType name(params) { ... }` (§5).
 
 The `_` identifier is a reserved placeholder usable only as a type inside
 `attr` / `has` blocks (it refers to the implementing type).
@@ -238,7 +242,15 @@ For Maka-managed memory there is no `free`:
 - `data Name<T, U> { fields }` - generic struct, monomorphized at use sites.
 - `enum Name { Variant, Variant{int field, ...} }` - tagged union. Variants
   without payload are tag-only (C-style); with payload use the union layout.
-- `[N]T` - fixed-length array (C `T[N]`).
+- `[N]T` - fixed-length array, a **VALUE** (like `int`/a `data` value): bind
+  (`[N]T b = a`) and pass-by-value (`f([N]T p)`) COPY the whole array, so the
+  callee's writes never reach the caller.  To share/mutate in place, borrow with
+  `&[N]T` / `&mut [N]T` (a pointer), exactly as for any value.  An array whose
+  element type owns heap (`[N]own *T`) MOVES instead of copies (owners can't be
+  cloned), consistent with every owning aggregate.  Backed by a C `T[N]`; at an
+  FFI boundary it decays to `T*` (a backend detail - the Maka semantics are
+  value-copy).  Returning one by value is rejected (a C array is not an
+  assignable value) - return a `Vec`/`data`, or fill a `&mut [N]T` out-param.
 - `[]T` / `[]mut T` - slice (pointer + length).
 - `[*]T` - vector payload (only inside `own &[*]T`).
 - `Name<T, U>` - generic instantiation. Monomorphized at compile time.
@@ -441,8 +453,9 @@ yield_stmt  := yield expr;                                // inside expr-blocks
 propagate_stmt := propagate [expr] ;                      // inside inline fn
 ```
 
-`Let` requires an explicit type. `mut int x = 5;` for a writable binding;
-without `mut`, the binding is immutable.
+A local binding is spelled `Type name = value` - there is no `let` keyword and
+no type inference; the type is **always** written. `mut int x = 5;` for a
+writable binding; without `mut`, the binding is immutable.
 
 **Positional destructuring bind.** `(q, r) = divmod(17, 5);` binds each name to
 the corresponding field (by declaration order) of the struct the right side
@@ -992,7 +1005,7 @@ the source), so Maka never frees it - C owns it now.  This is the mirror of the
    - `free p;` — bare-word keyword statement, lowers to a C `free` call;
      accepts only `raw *T`.  `free deep p;` also runs the recursive drop glue
      on the target first, reclaiming an owned graph parked behind the pointer.
-5. Mentioning `*unit` (the untyped opaque pointer) in a let binding,
+5. Mentioning `*unit` (the untyped opaque pointer) in a binding,
    function parameter, or return type.  In safe code `*unit` is rejected
    outright — typed handles from the stdlib (`Atomic`, `Mutex`,
    `TlsConn`, etc.) carry the runtime handle.  Inside `unsafe { }` the
@@ -1008,7 +1021,7 @@ the source), so Maka never frees it - C owns it now.  This is the mirror of the
 
 Inside `unsafe`, `raw *T` still has to be narrowed (forced-handling — §6.3)
 before deref.  `unsafe` does not turn off the lifetime pass; it just unlocks
-those six operations.
+those seven operations.
 
 ### 6.6 Pointer-kind conversions and the `&(p!)` pattern
 
@@ -1106,7 +1119,7 @@ A function declared `gate` is a synchronization-boundary crossing. At every
 direct call site, each argument may carry a modifier:
 
 ```maka
-gate fn worker(int payload, *int data) { /* ... */ }
+gate unit worker(int payload, *int data) { /* ... */ }
 
 unit main() {
     int x = 10;
@@ -1119,8 +1132,12 @@ unit main() {
 
 `share X`: the type of `X` must be `Shareable`. `Shareable` is a **marker attr**
 (`pub attr Shareable {}`, §14) - a type is Shareable if it declares `has Shareable`
-OR every field is Shareable (structural auto-derive). Primitives are Shareable;
-`*T` to mutable data and `raw *T` are NOT. Opt-in is by IMPL, not by name: the
+OR every field is Shareable (structural auto-derive). Primitives are Shareable.
+**No `*T` is Shareable** - neither `*T` nor `*const T` nor `raw *T`, regardless of
+pointee mutability: a `*const T` aliases a local WITHOUT freezing it (the owner
+keeps mutating the pointee), so sharing it into a thread races. Only the `&const T`
+immutable BORROW crosses a thread boundary (it freezes the referent for the borrow;
+`&mut T` does not). §7.2 is authoritative on capture. Opt-in is by IMPL, not by name: the
 stdlib sync handles (`Mutex`, `Atomic<T>`, ...) declare `has Shareable` because
 their opaque handle wraps a thread-safe C object, and a user type the programmer
 vouches is thread-safe opts in the same way (an explicit safety assertion,
@@ -1745,7 +1762,7 @@ extra storage, but they live behind the named slot.  Composition is
 preferred over hidden injection; see §10.7 below for the rationale.
 
 **Abstract vs concrete typing.**  An unmonomorphized generic function
-with a bound — `fn f<T: Stored>() { let x: T::Slot = ...; }` — type-
+with a bound — `unit f<T: Stored>() { T::Slot x = ...; }` — type-
 checks `T::Slot` **abstractly**: sema verifies the assoc type is
 declared in the bound attr and treats the path as an opaque type
 parameter throughout the body.  Operations applicable to an abstract
@@ -1906,7 +1923,7 @@ attr AtomicCell {
     *T  atomic_load_cell (&_ self)               { return atomic_load(self); }
     unit atomic_store_cell(&mut _ self, *T v)    { atomic_store(self, v); }
     *T  atomic_swap_cell (&mut _ self, *T v) {
-        let old = atomic_load(self);
+        *T old = atomic_load(self);
         atomic_store(self, v);
         return old;
     }

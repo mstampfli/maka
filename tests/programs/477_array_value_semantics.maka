@@ -1,0 +1,31 @@
+// `[N]T` is a VALUE: bind and pass-by-value COPY the whole array (the callee's
+// writes never reach the caller); `&mut [N]T` is the borrow for in-place edits.
+unit clobber([3]int p) { p[0] = 999; }            // by-value param: local copy
+unit fill(&mut [3]int p) { p[0] = 777; }          // borrow: writes through
+
+int sum([3]int p) { return p[0] + p[1] + p[2]; }
+
+unit main() {
+    mut [3]int a = [1, 2, 3];
+
+    mut [3]int b = a;         // COPY
+    b[0] = 50;
+    log(a[0]);                // 1  - b is independent
+    log(b[0]);                // 50
+
+    clobber(a);               // by-value param mutates its own copy
+    log(a[0]);                // 1  - caller unaffected
+
+    log(sum(a));              // 6  - pass by value, not moved
+    log(a[1]);                // 2  - `a` still usable after the call
+
+    fill(&mut a);             // borrow writes through
+    log(a[0]);                // 777
+
+    // nested arrays copy element-wise too
+    mut [2][2]int g = [[1, 2], [3, 4]];
+    mut [2][2]int h = g;
+    h[0][0] = 9;
+    log(g[0][0]);             // 1
+    log(h[0][0]);             // 9
+}

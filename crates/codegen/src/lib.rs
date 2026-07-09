@@ -6935,7 +6935,18 @@ void __maka_pool_free(maka_unit* poolv) {
             // For heap params we still use T* (heap-storage). Use c_decl on the heap-wrapped type instead.
             let parts2: Vec<String> = f.params.iter().map(|id| {
                 let li = &f.locals[id.0 as usize];
-                self.c_decl(&li.ty, &self.local_name(*id, &li.name))
+                let n = self.local_name(*id, &li.name);
+                // A by-value array param can't be a real value in a C signature
+                // (arrays decay to pointers), so it arrives as a decayed pointer
+                // under a mangled name; the function BODY copies it into a real
+                // local array (value semantics - the callee's mutations do not
+                // touch the caller).  `&[N]T` / `&mut [N]T` are `Ref`s, genuine
+                // borrows, and are left untouched.
+                if matches!(&li.ty, HType::Array { .. }) {
+                    self.c_decl(&li.ty, &format!("{}__pv", n))
+                } else {
+                    self.c_decl(&li.ty, &n)
+                }
             }).collect();
             let _ = parts;
             out.push_str(&parts2.join(", "));
@@ -8746,6 +8757,18 @@ void __maka_pool_free(maka_unit* poolv) {
         let sig = self.func_signature(f);
         self.wl(&format!("{} {{", sig));
         self.open();
+        // By-value array params: copy the incoming decayed pointer (`<name>__pv`,
+        // see func_signature) into a real local array, so the callee works on an
+        // INDEPENDENT copy (value semantics - a `[N]T` param is a copy, like any
+        // array; mutations never reach the caller).  `&[N]T` borrows are untouched.
+        for &pid in &f.params {
+            let li = &f.locals[pid.0 as usize];
+            if matches!(&li.ty, HType::Array { .. }) {
+                let n = self.local_name(pid, &li.name);
+                self.wl(&format!("{};", self.c_decl(&li.ty, &n)));
+                self.wl(&format!("memcpy({0}, {0}__pv, sizeof({0}));", n));
+            }
+        }
         // For lifted capturing lambdas, emit env-extraction statements at the function entry.
         let s = self.sym.func_sig(f.id);
         if s.name.starts_with("__lambda_cap_") {
@@ -9446,12 +9469,14 @@ void __maka_pool_free(maka_unit* poolv) {
             let pname = inline_local_name(&inline_f, pid, &tag);
             let arg_s = arg_strs.get(i).cloned().unwrap_or_else(|| "0".into());
             match &li.ty {
-                // An array parameter decays to a pointer, matching the non-inline
-                // `T a[N]` signature (an alias, not a copy) - a C array is neither
-                // declarable as `T[N] name` nor `=`-assignable in this binding.
-                // Reads (`a[i]`) then index the caller's array directly.
-                HType::Array { elem, .. } => {
-                    out.push_str(&format!("{}* {} = ({}); ", self.c_type(elem), pname, arg_s));
+                // A by-value array param is an independent COPY (value semantics,
+                // like any array).  In the inline splice, declare a real local
+                // array and memcpy the caller's array into it, so writes to the
+                // param don't reach the caller.  `&[N]T` borrows are `Ref`s and
+                // hit the `_` arm (a plain pointer copy), untouched.
+                HType::Array { .. } => {
+                    out.push_str(&format!("{0}; memcpy({1}, ({2}), sizeof({1})); ",
+                        self.c_decl(&li.ty, &pname), pname, arg_s));
                 }
                 _ => {
                     let ty = self.c_type(&li.ty);
@@ -10380,7 +10405,17 @@ void __maka_pool_free(maka_unit* poolv) {
             }
             HType::Array { .. } => {
                 let value_s = self.emit_expr(f, init);
-                self.wl(&format!("{} = {};", self.c_decl(&li.ty, &name), value_s));
+                // A C array is not `=`-initializable from another array VALUE, and
+                // it must copy (value semantics - `[N]T b = a` is an independent
+                // copy, like any array).  An array LITERAL brace-inits directly;
+                // anything else (another array local/field/index) declares then
+                // memcpy's the bytes.  (Reassignment already memcpy's, ~10438.)
+                if matches!(&init.kind, HExprKind::ArrayLit(_)) {
+                    self.wl(&format!("{} = {};", self.c_decl(&li.ty, &name), value_s));
+                } else {
+                    self.wl(&format!("{};", self.c_decl(&li.ty, &name)));
+                    self.wl(&format!("memcpy({}, {}, sizeof({}));", name, value_s, name));
+                }
             }
             _ => {
                 let value_s = self.emit_expr(f, init);
