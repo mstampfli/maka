@@ -1,0 +1,21 @@
+// Non-happy path: adopting a NULL C pointer into `own *Foreign`.  Scope exit
+// must NOT call the foreign drop (the C destructor) on NULL, and the skipped
+// libc-free is a no-op - so this runs clean with no crash and no double-free.
+extern data Body;
+cblock "
+    #include <stdlib.h>
+    static maka_int g_killed = 0;
+    maka_unit* body_maybe(maka_int ok) { return ok ? (maka_unit*)malloc(16) : (maka_unit*)0; }
+    void       body_kill(maka_unit* p) { g_killed = g_killed + 1; free(p); }
+    maka_int   body_kills(void) { return g_killed; }
+";
+extern "body_maybe" raw *unit body_maybe(int ok);
+extern "body_kill"  unit body_kill(raw *unit p);
+extern "body_kills" int  body_kills();
+Body has Drop { unit drop(&mut Body self) { unsafe { body_kill(self as raw *unit); } } }
+unit main() {
+    { unsafe { own *Body b = body_maybe(0) as raw *Body as own *Body; } }  // b is NULL: no drop
+    log(body_kills());   // 0 - the C destructor was never called on NULL
+    { unsafe { own *Body b = body_maybe(1) as raw *Body as own *Body; } }  // real: drop frees
+    log(body_kills());   // 1
+}
