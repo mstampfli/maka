@@ -1,0 +1,10 @@
+data A { int v; }
+unit main() {
+    own *A a = alloc A { v = 5 };
+    if (a) { log(a!.v); } else { log(-1); }   // a non-null -> 5, narrows a
+    own *A b = null;
+    if (b) { log(9); } else { log(-9); }        // b null -> -9
+    int n = 3;
+    if (n) { log(n); }                          // 3 (n != 0)
+    if (0) { log(100); } else { log(0); }        // 0 -> else -> 0
+}

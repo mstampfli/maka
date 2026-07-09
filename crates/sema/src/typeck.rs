@@ -514,11 +514,13 @@ impl<'a> TypeChecker<'a> {
             }
             ast::Stmt::Assign { op, place, value, span } => self.check_assign(*op, place, value, *span),
             ast::Stmt::ExprStmt(e, span) => {
+                let _ = span;
                 let h = self.check_expr(e, None);
-                // Non-unit values cannot be silently discarded.
-                if !matches!(h.ty, HType::Unit) {
-                    self.err(format!("non-unit return value discarded; use `_ = expr;` to discard"), *span);
-                }
+                // A bare expression-statement may discard its value (C-like): a
+                // plain value is dropped; an owning value is a temporary that the
+                // drop pass frees at scope exit (no leak).  `_ = expr;` is still
+                // accepted and equivalent - the explicit discard is no longer
+                // required.
                 HStmt::ExprStmt(h)
             }
             ast::Stmt::Return(e, span) => {
@@ -956,6 +958,26 @@ impl<'a> TypeChecker<'a> {
 
     fn check_expr_coerce(&mut self, e: &ast::Expr, target: &HType) -> HExpr {
         let h = self.check_expr(e, Some(target));
+        // Truthiness: a pointer or integer in a bool context tests non-null /
+        // non-zero.  Lowered to the `!= null` / `!= 0` comparison the narrowing
+        // already detects, so `if (p) { p! }` narrows `p` non-null in the branch.
+        if matches!(target, HType::Bool) && !matches!(h.ty, HType::Bool | HType::NullT) {
+            let sp = h.span;
+            let rhs = if matches!(h.ty, HType::Ptr { .. } | HType::OwnPtr { .. } | HType::RawPtr { .. } | HType::Heap { .. }) {
+                Some(HExpr { kind: HExprKind::LitNull, ty: HType::NullT, span: sp })
+            } else if matches!(h.ty, HType::Int | HType::SizedInt { .. } | HType::Char) {
+                Some(HExpr { kind: HExprKind::LitInt(0), ty: h.ty.clone(), span: sp })
+            } else {
+                None
+            };
+            if let Some(rhs) = rhs {
+                return HExpr {
+                    kind: HExprKind::Bin { op: HBinOp::Ne, lhs: Box::new(h), rhs: Box::new(rhs) },
+                    ty: HType::Bool,
+                    span: sp,
+                };
+            }
+        }
         self.coerce(h, target)
     }
 
