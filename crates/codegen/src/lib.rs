@@ -386,7 +386,7 @@ impl<'a> Cx<'a> {
     /// log, and panic hooks become extern symbols the OS author defines.
     /// User cblocks are pasted verbatim as in the regular path.
     fn emit_freestanding_prologue(&mut self) {
-        self.w("// freestanding mode — no libc, no stdio, no malloc.\n");
+        self.w("// freestanding mode - no libc, no stdio, no malloc.\n");
         self.w("// User must provide: __maka_alloc, __maka_free, __maka_panic, __maka_log_int, __maka_log_str.\n");
         self.w("#include <stdint.h>\n");
         self.w("#include <stdbool.h>\n");
@@ -1878,7 +1878,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("    struct timespec ts; struct timespec* pts = NULL;\n");
         self.w("    if (timeout_ms >= 0) { ts.tv_sec = timeout_ms/1000; ts.tv_nsec = (timeout_ms%1000)*1000000; pts = &ts; }\n");
         self.w("    int n;\n");
-        self.w("    /* Retry on EINTR — otherwise the scheduler treats a signal\n");
+        self.w("    /* Retry on EINTR - otherwise the scheduler treats a signal\n");
         self.w("       interrupt as a full quantum elapsed and busy-loops. */\n");
         self.w("    do { n = kevent(ep, NULL, 0, kevs, max, pts); }\n");
         self.w("    while (n < 0 && errno == EINTR);\n");
@@ -2231,7 +2231,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("            if (!atomic_load(&t->has_work)) { atomic_store(&t->warned, 0); continue; }\n");
         self.w("            int64_t last = atomic_load(&t->last_tick_ns);\n");
         self.w("            if (now - last > threshold && !atomic_load(&t->warned)) {\n");
-        self.w("                fprintf(stderr, \"maka: scheduler stuck — fibers haven't yielded for %.2fs (likely a blocking syscall inside a fiber)\\n\", (double)(now - last) / 1e9);\n");
+        self.w("                fprintf(stderr, \"maka: scheduler stuck - fibers haven't yielded for %.2fs (likely a blocking syscall inside a fiber)\\n\", (double)(now - last) / 1e9);\n");
         self.w("                atomic_store(&t->warned, 1);\n");
         self.w("            }\n");
         self.w("            if (now - last <= threshold && atomic_load(&t->warned)) atomic_store(&t->warned, 0);\n");
@@ -2501,7 +2501,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("                }\n");
         self.w("                /* Drop the runner-side ref; last drop frees.\n");
         self.w("                   Both joiner + detacher race against this on\n");
-        self.w("                   __maka_thread_unref — refcount makes it safe. */\n");
+        self.w("                   __maka_thread_unref - refcount makes it safe. */\n");
         self.w("                __maka_thread_unref(fcompl);\n");
         self.w("                /* If anchor is parked in a select loop, return so it can re-poll. */\n");
         self.w("                if (maka_anchor_wake_on_finish) {\n");
@@ -2511,7 +2511,7 @@ static void maka_ctx_make(maka_mctx_t* c, void* base, size_t size, void (*entry)
         self.w("            }\n");
         self.w("            continue;\n");
         self.w("        }\n");
-        self.w("        /* No ready fibers — wait for sleepers, fd events, or fall out. */\n");
+        self.w("        /* No ready fibers - wait for sleepers, fd events, or fall out. */\n");
         // Pool-mode idle (n_workers>1): the group shares one reactor, so exactly
         // one worker (the poll-owner) drives epoll_wait while the rest cv-wait.
         // A worker exits only when the pool is closed AND fully drained.
@@ -3412,7 +3412,7 @@ void __maka_pool_free(maka_unit* poolv) {
         // function name) doesn't escape into user code.  We define the
         // runtime functions inside `extern "C"`-equivalent scope and
         // reference them by their __maka_ names from the rest of the file.
-        self.w("/* TCP runtime — scoped includes to avoid name clashes. */\n");
+        self.w("/* TCP runtime - scoped includes to avoid name clashes. */\n");
         self.w("static inline int64_t __maka_tcp_listen(int64_t port, int64_t backlog);\n");
         self.w("static inline int64_t __maka_tcp_listen_any(int64_t port, int64_t backlog);\n");
         self.w("static inline int64_t __maka_udp_open(int64_t port);\n");
@@ -3523,7 +3523,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("}\n");
         self.w("static __thread unsigned int __maka_ws_rng = 0;\n");
         self.w("static unsigned int __maka_ws_rand(void) {\n");
-        self.w("    /* xorshift32 — fast, no global state contention */\n");
+        self.w("    /* xorshift32 - fast, no global state contention */\n");
         self.w("    unsigned int x = __maka_ws_rng ? __maka_ws_rng : (unsigned int)(uintptr_t)&__maka_ws_rng;\n");
         self.w("    x ^= x << 13; x ^= x >> 17; x ^= x << 5;\n");
         self.w("    __maka_ws_rng = x;\n");
@@ -3549,7 +3549,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("    }\n");
         self.w("    *out = dq->buf[b % MAKA_WS_CAP];\n");
         self.w("    if (t == b) {\n");
-        self.w("        /* Last item — race with a stealer. */\n");
+        self.w("        /* Last item - race with a stealer. */\n");
         self.w("        int64_t expected = t;\n");
         self.w("        int won = atomic_compare_exchange_strong_explicit(\n");
         self.w("            &dq->top, &expected, t + 1,\n");
@@ -3659,7 +3659,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("    t->env_drop = (void(*)(void*))env_drop;\n");
         self.w("    __maka_job_entry_t item = { code, env, t };\n");
         self.w("    if (__maka_ws_worker_id >= 0) {\n");
-        self.w("        /* Caller is a worker — push to own deque (LIFO, cache-warm). */\n");
+        self.w("        /* Caller is a worker - push to own deque (LIFO, cache-warm). */\n");
         self.w("        if (__maka_ws_push(&__maka_ws_deques[__maka_ws_worker_id], item)) {\n");
         self.w("            atomic_fetch_add(&__maka_ws_pending, 1);\n");
         self.w("            __maka_ws_notify();\n");
@@ -3758,7 +3758,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("                }\n");
         self.w("                maka_join_target = NULL;\n");
         self.w("            } else {\n");
-        self.w("                /* Not a fiber we own — it's a pthread thread or a job. Drive\n");
+        self.w("                /* Not a fiber we own - it's a pthread thread or a job. Drive\n");
         self.w("                   scheduler ALSO so any waiting fibers can still progress\n");
         self.w("                   while we periodically poll the foreign handle. */\n");
         self.w("                while (1) {\n");
@@ -4105,7 +4105,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("            if (out_index) *out_index = (int64_t)i;\n");
         self.w("            /* Cancel losers and reap.  Fibers: walk the scheduler queues and\n");
         self.w("               remove without resuming.  pthread threads: pthread_cancel +\n");
-        self.w("               pthread_join.  Jobs: just wait — cancellation isn't supported. */\n");
+        self.w("               pthread_join.  Jobs: just wait - cancellation isn't supported. */\n");
         self.w("            for (int64_t j = 0; j < n; j++) {\n");
         self.w("                if (j == i) continue;\n");
         self.w("                Thread* l = (Thread*)handles[j];\n");
@@ -4153,7 +4153,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("            (void)__maka_join_result(handles[i]);\n");
         self.w("            return r;\n");
         self.w("        }\n");
-        self.w("        /* No winner yet — drive scheduler so fibers can progress. */\n");
+        self.w("        /* No winner yet - drive scheduler so fibers can progress. */\n");
         // Non-anchor fiber: yield as a fiber (see join_timeout) instead of driving
         // through the anchor context slot.
         self.w("        if (maka_current_fiber && maka_current_fiber != maka_anchor_fiber) {\n");
@@ -7576,7 +7576,7 @@ void __maka_pool_free(maka_unit* poolv) {
         self.w("    if (flags & 64)    wf |= _O_CREAT;\n");
         self.w("    if (flags & 512)   wf |= _O_TRUNC;\n");
         self.w("    if (flags & 1024)  wf |= _O_APPEND;\n");
-        self.w("    /* O_NONBLOCK (2048) has no mingw equivalent — silently ignored. */\n");
+        self.w("    /* O_NONBLOCK (2048) has no mingw equivalent - silently ignored. */\n");
         self.w("    wf |= _O_BINARY;\n");
         self.w("    WCHAR* wpath = __maka_path_to_w(path);\n");
         self.w("    if (!wpath) return -1;\n");

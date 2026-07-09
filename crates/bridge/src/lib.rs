@@ -1299,7 +1299,7 @@ fn parse_rust_surface(src: &str) -> Result<RustSurface, String> {
             }
             syn::Item::Impl(im) => {
                 if im.trait_.is_some() {
-                    continue; // skip trait impls — those are reachable through the type, not the trait
+                    continue; // skip trait impls - those are reachable through the type, not the trait
                 }
                 // Get the impl-target type name (`impl Foo { ... }` → "Foo").
                 let recv_name = match &*im.self_ty {

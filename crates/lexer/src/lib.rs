@@ -83,10 +83,10 @@ pub enum TokKind {
     Else,
     While,
     Return,
-    As,        // `as` — the cast operator (target's nullability decides whether the cast can fail)
+    As,        // `as` - the cast operator (target's nullability decides whether the cast can fail)
     Unit,      // the keyword `unit`
-    Type,      // the keyword `type` — used in `attr { type Name; }` and `has { type Name = T; }`
-    ColonColon,// `::` — path separator for `T::Slot` assoc-type paths
+    Type,      // the keyword `type` - used in `attr { type Name; }` and `has { type Name = T; }`
+    ColonColon,// `::` - path separator for `T::Slot` assoc-type paths
     // primitive type names left as plain Idents handled by parser/types
 
     // punctuation
@@ -357,7 +357,7 @@ impl<'a> Lexer<'a> {
                     b'.' => TokKind::Dot,
                     b':' => TokKind::Colon,
                     b'?' => return Err(LexError {
-                        msg: "'?' is not part of the language; nullability lives in the type (`*T`), not in a sigil. For a cast that can fail, write `expr as *Type` — the result is nullable and you get `null` on failure.".into(),
+                        msg: "'?' is not part of the language; nullability lives in the type (`*T`), not in a sigil. For a cast that can fail, write `expr as *Type` - the result is nullable and you get `null` on failure.".into(),
                         span: self.span_from(start, sline, scol),
                     }),
                     other => return Err(LexError {

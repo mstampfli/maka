@@ -238,7 +238,7 @@ impl<'a> TypeChecker<'a> {
                 self.err(
                     format!(
                         "`{0}` captures a value of type `{1}` which is not Shareable and can't \
-                         cross a thread boundary — its pointee lifetime is unknown to the lifetime \
+                         cross a thread boundary - its pointee lifetime is unknown to the lifetime \
                          pass.  Capture an owning binding (`own *T` / `own &T`) so ownership \
                          transfers, or use a Shareable handle (e.g. an atomic, a `Mutex`, or \
                          `&const T` where `T: Shareable`).",
@@ -1105,7 +1105,7 @@ impl<'a> TypeChecker<'a> {
                         if self.in_unsafe == 0 {
                             self.err(
                                 "`alloc` into `raw *T` is the manual-memory escape hatch and requires \
-                                 `unsafe { ... }` — landing an allocation in a `raw *T` opts out of \
+                                 `unsafe { ... }` - landing an allocation in a `raw *T` opts out of \
                                  the auto-free machinery, so the caller must release it explicitly \
                                  (`free p;`) inside the same `unsafe` block.",
                                 *span,
@@ -1115,7 +1115,7 @@ impl<'a> TypeChecker<'a> {
                     }
                     Some(HType::Ptr { .. }) => {
                         self.err(
-                            "`alloc value` must land in an owning slot (`own *T` or `own &T`) — \
+                            "`alloc value` must land in an owning slot (`own *T` or `own &T`) - \
                              assigning an allocation to a non-owning `*T` would leak with no auto-free. \
                              Declare the binding as `own *T` or downgrade explicitly later.",
                             *span,
@@ -1141,7 +1141,7 @@ impl<'a> TypeChecker<'a> {
                     self.err(
                         format!(
                             "`free` only accepts `raw *T` (the manual-memory escape hatch); got `{}`. \
-                             Maka-managed allocations (`own *T` / `own &T`) auto-free at scope exit — \
+                             Maka-managed allocations (`own *T` / `own &T`) auto-free at scope exit - \
                              assign `null` to the owner to release one early.",
                             type_str(&h.ty),
                         ),
@@ -1150,7 +1150,7 @@ impl<'a> TypeChecker<'a> {
                 }
                 if self.in_unsafe == 0 {
                     self.err(
-                        "`free p;` requires `unsafe { ... }` — manual deallocation through a `raw *T` \
+                        "`free p;` requires `unsafe { ... }` - manual deallocation through a `raw *T` \
                          is unsafe (the lifetime pass can't prove the pointer is still live or that \
                          no other view aliases it).",
                         *span,
@@ -1807,7 +1807,7 @@ impl<'a> TypeChecker<'a> {
             HType::RawPtr { mutable: _, inner } => {
                 if self.in_unsafe == 0 {
                     self.err(
-                        "deref of `raw *T` requires `unsafe { ... }` — this pointer's provenance \
+                        "deref of `raw *T` requires `unsafe { ... }` - this pointer's provenance \
                          is unknown to the lifetime pass, so the user must vouch for its validity"
                             .to_string(),
                         sp,
@@ -2047,7 +2047,7 @@ impl<'a> TypeChecker<'a> {
             Err(n) => {
                 self.err(
                     format!(
-                        "field `{}` is ambiguous in `{}` — {} embedded paths reach it; qualify with the embed name (e.g. `value.embed_field.{}`)",
+                        "field `{}` is ambiguous in `{}` - {} embedded paths reach it; qualify with the embed name (e.g. `value.embed_field.{}`)",
                         name, info.name, n, name,
                     ),
                     sp,
@@ -2760,7 +2760,7 @@ impl<'a> TypeChecker<'a> {
                 "thread"     => FuncId(u32::MAX - 15),
                 "job"        => FuncId(u32::MAX - 16),
                 "spawn_pool" => FuncId(u32::MAX - 37),
-                _            => FuncId(u32::MAX - 3),    // spawn (fiber) — keeps legacy id
+                _            => FuncId(u32::MAX - 3),    // spawn (fiber) - keeps legacy id
             };
             return HExpr {
                 kind: HExprKind::Call { callee: fid, args: hargs },
@@ -4175,7 +4175,7 @@ impl<'a> TypeChecker<'a> {
                     n => {
                         self.err(
                             format!(
-                                "call to `{}` is ambiguous via embed promotion — {} reachable impls; qualify the receiver to pick one (e.g. `value.embed_field.{}()`)",
+                                "call to `{}` is ambiguous via embed promotion - {} reachable impls; qualify the receiver to pick one (e.g. `value.embed_field.{}()`)",
                                 name, n, name,
                             ),
                             sp,
@@ -4559,7 +4559,7 @@ impl<'a> TypeChecker<'a> {
         // obligation.  `&T` targets are handled per-arm by classify_cast
         // (only allowed from `own &T`; nullable sources must use `&(p!)`).
         if matches!(to, HType::Heap { .. }) {
-            self.err("cannot cast to `own &T` — owning bindings come only from `alloc` or moves", sp);
+            self.err("cannot cast to `own &T` - owning bindings come only from `alloc` or moves", sp);
         }
         // `some`-column downcast: `<Vec<some X>> as *Vec<T>` -> a nullable
         // `*Vec<T>` that aliases the column iff its hidden type is `T` (a runtime
@@ -4746,7 +4746,7 @@ impl<'a> TypeChecker<'a> {
                         self.err(
                             format!(
                                 "cast `{}` → `{}` is not a structural prefix and requires \
-                                 `unsafe {{ ... }}` — target must be a `data` whose fields are \
+                                 `unsafe {{ ... }}` - target must be a `data` whose fields are \
                                  a prefix (same names, types, order) of the source's `data`",
                                 type_str(from), type_str(to),
                             ),

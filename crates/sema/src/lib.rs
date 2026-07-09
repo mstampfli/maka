@@ -440,7 +440,7 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                         );
                         let msg = if exists {
                             format!(
-                                "type `{}` has a `has {}` impl but it is not visible here — either move it to this module, mark it `pub`, or add `use {}.{}.{};`",
+                                "type `{}` has a `has {}` impl but it is not visible here - either move it to this module, mark it `pub`, or add `use {}.{}.{};`",
                                 pretty, trait_name,
                                 sym.has_impls.iter().find(|h| h.attr_name == *trait_name && h.type_key == pretty)
                                     .map(|h| if h.module_path.is_empty() { "<root>".to_string() } else { h.module_path.join(".") })

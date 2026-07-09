@@ -527,7 +527,7 @@ pub fn resolve_type_in(
                 }
                 if other == "_" {
                     errors.push(SemaError {
-                        msg: "`_` placeholder type is only valid inside `attr` / `has` blocks — it refers to the implementing type".into(),
+                        msg: "`_` placeholder type is only valid inside `attr` / `has` blocks - it refers to the implementing type".into(),
                         span: *sp,
                     });
                     return HType::Int;
@@ -1320,7 +1320,7 @@ impl SymTab {
                         ) {
                             errors.push(SemaError {
                                 msg: format!(
-                                    "overlapping `has {}` impls for receiver `{}` and `{}` — receivers unify with a common concrete type, which makes method dispatch ambiguous (§10.4)",
+                                    "overlapping `has {}` impls for receiver `{}` and `{}` - receivers unify with a common concrete type, which makes method dispatch ambiguous (§10.4)",
                                     h.attr_name, prior.type_key, h.type_name,
                                 ),
                                 span: h.span,
@@ -1379,7 +1379,7 @@ impl SymTab {
                         if !attr_info.methods.iter().any(|m| m.name == f.name) {
                             errors.push(SemaError {
                                 msg: format!(
-                                    "method `{}` not declared by attr `{}` — `has` blocks may only implement attr-declared methods",
+                                    "method `{}` not declared by attr `{}` - `has` blocks may only implement attr-declared methods",
                                     f.name, h.attr_name,
                                 ),
                                 span: f.span,

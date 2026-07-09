@@ -1192,7 +1192,7 @@ impl LanguageServer for Backend {
         };
         // Primitives / keywords: a short note without a full analysis.
         if PRIMS.contains(&name.as_str()) {
-            return Ok(Some(hover_md(format!("{} — built-in type", name))));
+            return Ok(Some(hover_md(format!("{} - built-in type", name))));
         }
         let a = self.analyze(&uri);
         // Determine the hover markdown and where the definition lives, so a `///`

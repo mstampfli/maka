@@ -2142,7 +2142,7 @@ impl Parser {
                     }
                     self.expect(&TokKind::Gt, "`>` to close the type arguments")?;
                     let span = self.peek_span();
-                    self.expect(&TokKind::LParen, "`(` — `::<...>` type arguments are only valid on a call")?;
+                    self.expect(&TokKind::LParen, "`(` - `::<...>` type arguments are only valid on a call")?;
                     let mut args = Vec::new();
                     if !self.at(&TokKind::RParen) {
                         loop {
@@ -2266,7 +2266,7 @@ impl Parser {
                     if ok && self.at(&TokKind::LBrace) && Self::is_struct_lit_context(self) {
                         return Ok(self.parse_struct_lit(Some(name), span)?);
                     }
-                    self.pos = save; // not a generic struct literal — `<` is comparison
+                    self.pos = save; // not a generic struct literal - `<` is comparison
                 }
                 // `Attr::method(args)` — attr-qualified prefix call (§10.5).
                 // Distinct from `Attr.method(args)`: `::` bypasses local
