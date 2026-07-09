@@ -116,11 +116,13 @@ transferred via assignment. It is non-null by construction and accessed without
 `!`. The legacy keyword `heap` has been removed; write `own &T` instead.
 
 `*T` is the flexible escape valve: nullable, freely rebindable, and **flow-tracked
-exactly like `&T`** - the difference is only the invalidation mechanism. When the
-owner a `*T` views moves / dies / is null-assigned, the compiler follows the alias
-and AUTO-NULLS it (a runtime `= NULL`, then the next deref needs a fresh non-null
-proof); where a `&T` in the same situation POISONS (a hard compile error). So `*T`
-is not "untracked" - it is a tracked, nullable alias. Linked-list `next` pointers,
+like `&T`** - the difference is the invalidation mechanism. When the owner a `*T`
+views moves / dies / is null-assigned, the compiler follows the alias and AUTO-NULLS
+it (a runtime `= NULL`, then the next deref needs a fresh non-null proof); where a
+`&T` in the same situation POISONS (a hard compile error).  Where the alias's
+owner-provenance can't be proven (a view laundered through a stored-pointer read),
+the compiler is CONSERVATIVE and nulls it at any owner death anyway (§6.4) - never
+silently dangling.  So `*T` is not "untracked" - it is a tracked, nullable alias. Linked-list `next` pointers,
 optional struct fields, downgrades of `own *T` for read-only views - all `*T`.  `*T` does **not** own; it cannot be `alloc`'d into
 directly, and there is no `free()` builtin you can call on it - either the owner
 auto-frees it at its scope exit, or you go through an FFI shim for C-allocated
@@ -131,8 +133,10 @@ memory.
 inside an `unsafe { }` block. It is what extern C functions are typically
 declared with when the C side controls the pointer's lifetime.
 
-**Indexing as a buffer.** A runtime-length `raw *T` (T a scalar or `#[repr(C)]`
-struct, not an aggregate) may be indexed with `p![i]`, which is C pointer indexing
+**Indexing as a buffer.** A runtime-length `raw *T` (T a scalar or a flat `data`
+struct - every Maka `data` is C-layout by construction, so no annotation is needed;
+the Rust `#[repr(C)]` spelling belongs only to rblock structs, §12) may be indexed
+with `p![i]`, which is C pointer indexing
 `*(p + i)` - so a Maka function can read and WRITE a caller-provided FFI buffer,
 the core encoder shape. The `!` marks the unsafe deref (index has no bounds check;
 the user vouches for length and provenance); a bare `p[i]` is rejected with a hint
@@ -201,10 +205,13 @@ with no owned fields it is identical to a shallow `free`.
 
 For Maka-managed memory there is no `free`:
 
-- `own *T` and `own &T` auto-free at scope exit.  The free is **recursive**:
-  freeing a value also frees the owned pointers it contains (struct fields,
-  enum-variant payloads, array elements), all the way down - so a heap tree,
-  linked list, or recursive enum AST frees completely when its root drops.
+- `own *T` and `own &T` auto-free at scope exit.  The free frees the owned
+  pointers a value contains (struct fields, enum-variant payloads, array elements),
+  all the way down - so a heap tree, linked list, or recursive enum AST frees
+  completely when its root drops.  A **linked-list spine** (a struct with a single
+  self-referential `own *Self` field) is freed ITERATIVELY (a loop over the chain,
+  O(1) stack) rather than recursively, so a long list does not overflow the C stack
+  at drop time; a tree (more than one self field) still frees recursively.
 - **Owning temporaries are freed too.** A freshly-owned value consumed inline -
   e.g. `log(format(...))`, `f(a + b)`, or a discarded `_ = alloc ...` - is
   hoisted into a hidden owning binding and freed at scope exit; passing it to an
@@ -392,7 +399,9 @@ Standard infix and unary operators with conventional precedence. Maka-specific:
   `match` arm and for `format`-style display.
 - `format(fmt, ...)` - typed string interpolation builtin.  `fmt` must be a
   string literal containing `{}` placeholders; each `{}` consumes one trailing
-  argument.  Result is `own *char` (`String`) and is auto-freed at scope exit.
+  argument.  Result is an **always-allocated owning string** (`own *string` - a
+  heap string value, NOT the growable `String` data type of §14) and is auto-freed
+  at scope exit; because it is always non-null it derefs without a guard.
   Per-argument types are routed through generated to-string helpers:
   `int`/`usize` → `__maka_int_to_str`, `bool` → `__maka_bool_to_str`,
   `float` → `__maka_float_to_str`, `char` → `__maka_char_to_str`, `string` /
@@ -807,15 +816,17 @@ emits `free(binding)` automatically. `own *T` also auto-frees on reassignment
 
 Reassigning an owning PLACE (a local, a field, or an indexed element) is
 drop-then-move: the previous value is freed exactly once before the new one
-is stored. When the RHS references the same root as a projected place
-(`bs[i] = bs[j]`, `s.f = make(s.x)`, `p.a = p.b`), the compiler emits the
-aliasing-safe order - compute the new value into a temporary, null any slot
-the RHS moved out of, drop the old value (a no-op when the RHS was the place
-itself), then move the temporary in - so self-assignment is a no-op and
-swap-remove compaction frees the removed element exactly once. Exception:
-a bare owning LOCAL whose RHS derives from its own old value
-(`node = node.next`, the list-walk idiom) leaves the old value untouched;
-a walker does not own the nodes it visits.
+is stored. When the RHS moves a sub-value out of the same root - a projected
+place (`bs[i] = bs[j]`, `s.f = make(s.x)`, `p.a = p.b`) OR a bare owning local
+that derives from its own old value (`node = node!.next`) - the compiler emits
+the aliasing-safe order: compute the new value into a temporary (which moves the
+sub-value out and NULLs its slot), drop the old value (whose moved-out slot is now
+null, so its recursive drop does NOT cascade), then move the temporary in. So
+self-assignment / swap-remove frees the removed element exactly once, and
+`own *Node node; node = node!.next` is a correct free-as-you-go iterative consume.
+Ownership decides the walk-vs-consume meaning: a `*T` (non-owning) walker takes the
+plain no-drop path (it never owns the nodes), an `own *T` cursor consumes as it
+advances - there is no syntactic special-case.
 
 Moving an `own &T` out of a field (`own &Box tmp = p.a;`) nulls the source
 field at the transfer: ownership has one home, the container's later drop
@@ -1005,9 +1016,11 @@ unit handle(*NetPacket p) {
 
 Cross-type casts that don't satisfy the prefix rule (`*Foo → *Bar` between
 unrelated layouts, `*float → *int` for bit-pattern punning, etc.) require
-`unsafe { }` (§6.5 item 6).  The prefix rule avoids the strict-aliasing
-hazard: every access through `*hdr` goes through one of the shared prefix
-fields, so the C compiler's TBAA sees identical type access on both sides.
+`unsafe { }` (§6.5 item 6).  The prefix rule keeps the reinterpret **layout-safe**:
+`Bar`'s fields sit at identical offsets in `Foo`, so reading them through `*Bar` hits
+the intended bytes.  (Type-based aliasing is not the concern here - the generated C
+is compiled with `-fno-strict-aliasing` unconditionally, §15, so even the exempt
+punning casts are well-defined regardless of TBAA.)
 
 The `*int ↔ *Enum` pair is exempt from the prefix rule because an `Enum`
 is just one of the integer's valid tag values.  `*int → *Enum` reads the
@@ -1719,9 +1732,10 @@ monomorphization, every field type is concrete.
 
 **Pattern matching.**  Pattern scrutinees always have concrete
 monomorphized types — generics are erased before pattern dispatch.
-A binding in `match (w) { Wrapper { inner } => ... }` receives the
+A binding in `match (w) { Wrapper { inner } ... }` receives the
 **concrete resolved** field type of the matched instantiation (`*Foo`,
-not the abstract `T::Slot`).
+not the abstract `T::Slot`).  (Maka match arms are arrow-less - `Pattern body,`
+per §8 - not `Pattern => body`.)
 
 **No-impl-at-decl is fine.**  Writing `data Wrapper<T: Stored> { T::Slot inner; }`
 in a module where **no** `Stored` impls exist yet is not an error.  The
@@ -2360,7 +2374,9 @@ These are real limitations the implementation is honest about:
   clears all place-narrowings, since it may mutate a container through a `&mut`
   argument - so bind to a local across a call).  Two limits remain: it fires for
   `if` guards only (not `while`), and only for OWNING places - a non-owning `*T`
-  element aliases memory owned elsewhere that could be freed without touching the
-  container (a use-after-free the pass cannot see), so those are still refused.
+  element aliases memory owned elsewhere, so an IN-PLACE narrowing of it is still
+  refused.  (A `*T` view LAUNDERED out of such a place into a local is no longer a
+  silent use-after-free: it is a tracked, conservatively auto-nulled alias per §6.4,
+  so a dangling read observes null + a data-loss warning, not freed memory.)
 
 These are tractable to fix; they are not architectural blockers.
