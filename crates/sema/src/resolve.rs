@@ -728,6 +728,11 @@ impl SymTab {
             where_bounds: Vec::new(),
             is_foreign: false,
         });
+        // `Thread` is Shareable (a `*Thread` handle wraps a `pthread_t`); it is a
+        // built-in with no source `data`, so register the impl here rather than in
+        // std.maka.  Same registry the `has Shareable` impls populate, so
+        // `is_shareable` needs no special-case for it.
+        sym.trait_impls.entry("Shareable".to_string()).or_default().insert("Thread".to_string());
 
         // Pass 1: enums and struct names
         for (idx, item) in m.items.iter().enumerate() {

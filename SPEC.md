@@ -1098,9 +1098,16 @@ unit main() {
 
 `transfer X`: invalidates `X` in the caller - ownership crosses.
 
-`share X`: the type of `X` must be `Shareable`. Primitives, sync primitives,
-and structs whose every field is Shareable are auto-derived as Shareable. `*T`
-to mutable data and `raw *T` are NOT Shareable.
+`share X`: the type of `X` must be `Shareable`. `Shareable` is a **marker attr**
+(`pub attr Shareable {}`, §14) - a type is Shareable if it declares `has Shareable`
+OR every field is Shareable (structural auto-derive). Primitives are Shareable;
+`*T` to mutable data and `raw *T` are NOT. Opt-in is by IMPL, not by name: the
+stdlib sync handles (`Mutex`, `Atomic<T>`, ...) declare `has Shareable` because
+their opaque handle wraps a thread-safe C object, and a user type the programmer
+vouches is thread-safe opts in the same way (an explicit safety assertion,
+analogous to a Send/Sync impl). A type that merely shares a NAME with a stdlib
+handle is NOT Shareable - the impl is matched against the actual type, so a user
+`data Mutex { *int p; }` stays non-Shareable and racy.
 
 For generic structs with associated-type-placeholder fields (e.g.
 `data Wrapper<T: Stored> { T::Slot inner; }`, §10.5), Shareability is
@@ -1109,9 +1116,11 @@ site.  `Wrapper<int>` is Shareable iff the resolved `int::Slot` is
 Shareable; `Wrapper<*Foo>` is Shareable iff `*Foo::Slot` is.  The
 unmonomorphized form has no Shareable verdict.
 
-Recognized Shareable types by name: `Mutex`, `RwLock`, `Spinlock`, `Channel`,
-the generic `Atomic<T>` (by template name), `WaitGroup`, `Once`, the `*Chan`
-family, `TlsConn`, `Thread`, and `Pool`.
+The stdlib types that declare `has Shareable`: `Mutex`, `RwLock`, the generic
+`Atomic<T>`, `WaitGroup`, `Once`, the `*Chan` family (`IntChan`/`FloatChan`/
+`ByteChan`), `TlsConn`, and `Pool`.  `Thread` is a compiler built-in with no
+source `data`, so its impl is registered internally (`resolve.rs`); it lands in
+the same impl registry, so `is_shareable` needs no by-name special case.
 
 Calls to non-`gate` functions reject `transfer`/`share` annotations.
 
@@ -1154,11 +1163,12 @@ analogous to the `transfer` / `share` rule for `gate` (§7.1):
 - **`*unit` is rejected** like any other non-Shareable pointer.  The
   stdlib exposes its concurrency primitives as typed opaque-handle wrappers
   (`Atomic`, `Mutex`, `WaitGroup`, `Once`, `RwLock`, `IntChan`, `FloatChan`,
-  `ByteChan`, `TlsConn`) which are in the Shareable allowlist by name.
-  User code captures the typed handle into a spawn closure; the raw `*unit`
-  the wrapper holds never escapes the stdlib.  (Earlier drafts of this spec
-  allowed a `*unit` carve-out at spawn boundaries — the carve-out was
-  dropped once the stdlib typed-handle migration landed.)
+  `ByteChan`, `TlsConn`) which each declare `has Shareable` (their opaque
+  handle wraps a thread-safe C object).  User code captures the typed handle
+  into a spawn closure; the raw `*unit` the wrapper holds never escapes the
+  stdlib.  (Earlier drafts of this spec allowed a `*unit` carve-out at spawn
+  boundaries - the carve-out was dropped once the stdlib typed-handle
+  migration landed.)
 
 The fiber tier (`spawn`) runs on the same thread as the caller, so
 captures are unrestricted — borrows are fine because the fiber's
@@ -1215,7 +1225,8 @@ All of the above are wired into the runtime as compiler builtins; see
 `CONCURRENCY.md` for usage examples and the implementation status table.
 
 `Thread` is a built-in opaque type (recognized by name; backed by `pthread_t`
-in the generated C). It is Shareable.
+in the generated C). It is Shareable - its `has Shareable` is registered
+internally at built-in setup (it has no source `data` to carry the impl).
 
 ### 7.3 Sync primitives (typed handles)
 
@@ -1237,12 +1248,11 @@ pub unit  mutex_unlock(Mutex m)    { __fmutex_unlock(m.h); }
 pub unit  mutex_destroy(Mutex m)   { __fmutex_destroy(m.h); }
 ```
 
-The wrapper is named-Shareable (the type checker's Shareable allowlist
-matches `Mutex`, `RwLock`, `Spinlock`, `Channel`, the generic `Atomic<T>`
-(by its template name), `WaitGroup`, `Once`, `IntChan`, `FloatChan`,
-`ByteChan`, `TlsConn`, and `Thread` by name).  User code captures the typed handle
-into spawn closures by value; the raw `*unit` it holds never
-escapes the stdlib.  This replaces the original FFI-style `*unit`-only
+The wrapper declares `has Shareable` (like every stdlib sync handle: `Mutex`,
+`RwLock`, the generic `Atomic<T>`, `WaitGroup`, `Once`, `IntChan`, `FloatChan`,
+`ByteChan`, `TlsConn`, `Pool`; `Thread` is the built-in registered internally).
+User code captures the typed handle into spawn closures by value; the raw `*unit`
+it holds never escapes the stdlib.  This replaces the original FFI-style `*unit`-only
 sync surface, which is no longer part of the public stdlib API.
 
 ### 7.4 Concurrency primitives (the irreducible base)
@@ -1360,7 +1370,7 @@ matches).
 `thread`, `job`, or `spawn_pool` are further constrained — borrow captures
 (`[&x]` / `[&mut x]`) are rejected outright, and non-borrow captures must
 be of an owning type or a Shareable type (the stdlib's typed concurrency
-handles — `Atomic`, `Mutex`, `WaitGroup`, etc. — are named-Shareable).
+handles — `Atomic`, `Mutex`, `WaitGroup`, etc. — declare `has Shareable`).
 See §7.2 for the full rule and rationale.  The fiber tier (`spawn`) keeps
 the unrestricted closure semantics — same thread, lifetime bounded by
 caller.

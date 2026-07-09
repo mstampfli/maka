@@ -34,6 +34,25 @@ pub enum Result<T, E> {
 // e.g. Pool, can `has Drop`.)
 pub attr Drop { unit drop(&mut _ self); }
 
+// `Shareable` — the marker attr for a type that may cross a thread boundary
+// (`share x`, a by-value capture into a real thread).  Opt-in by impl, NOT by
+// magic name: the opaque sync handles below declare `has Shareable` because their
+// underlying C object is itself thread-safe; a user type is Shareable only when
+// all its fields are (auto), or when the user deliberately writes `T has Shareable`.
+pub attr Shareable {}
+// The stdlib sync handles are Shareable (their opaque `*unit` wraps a thread-safe
+// C object).  (`Thread` is a compiler built-in and is registered internally.)
+pub Mutex has Shareable {}
+pub RwLock has Shareable {}
+pub Atomic<T> has Shareable {}
+pub WaitGroup has Shareable {}
+pub Once has Shareable {}
+pub IntChan has Shareable {}
+pub FloatChan has Shareable {}
+pub ByteChan has Shareable {}
+pub TlsConn has Shareable {}
+pub Pool has Shareable {}
+
 // `Try` — the propagate-friendly fallibility attr.  A type T has Try
 // iff it splits cleanly into an Ok / Err pair AND can be reconstructed
 // from an Err alone.  `propagate r;` (§4.3) desugars through this attr.

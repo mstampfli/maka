@@ -1569,25 +1569,24 @@ impl<'a> TypeChecker<'a> {
             // Sync primitives recognized by name (auto-recognized stdlib types).
             HType::Struct(id) => {
                 let info = self.sym.struct_info(*id);
-                // For an instantiation (e.g. `Atomic<int>`), match the template
-                // base name ("Atomic"), not the mangled instantiation name.
                 let n = info.template.as_deref().unwrap_or(info.name.as_str());
-                // Trust the known-safe stdlib handle types by name ONLY when the
-                // struct actually comes from `module std` - else a USER struct named
-                // e.g. `Spinlock { *int p; }` (a raw alias, no real lock) would be
-                // falsely judged Shareable and let unsynchronized mutation cross a
-                // thread boundary.  A generic instantiation (`Atomic<int>`) carries
-                // the user's module_path, so also accept when its template is one of
-                // these names (the template itself is defined in std).
-                let from_std = info.module_path.first().map(|s| s.as_str()) == Some("std")
-                    || (info.template.is_some() && n == "Atomic");
-                if from_std && matches!(n,
-                    "Mutex" | "RwLock" | "Spinlock" | "Channel" | "Thread"
-                    | "Atomic" | "WaitGroup" | "Once" | "IntChan" | "FloatChan" | "ByteChan"
-                    | "TlsConn" | "Pool") {
+                // Shareable is opt-in by `has Shareable`, NOT by magic name: the
+                // opaque stdlib sync handles declare it (their `*unit` wraps a
+                // thread-safe C object) and a user type opts in the same way.  Match
+                // the impl against THIS struct's actual receiver via unification -
+                // so a user type that merely shares a name with a stdlib handle is
+                // NOT falsely judged Shareable (the old `from_std` guard's job, now
+                // structural).  `Thread` is a built-in handle with no source `data`,
+                // registered directly in the impl registry (resolve.rs).
+                if n == "Thread"
+                    && self.sym.trait_impls.get("Shareable").map_or(false, |s| s.contains(n)) {
                     return true;
                 }
-                // Auto-derive: all fields must be Shareable.
+                if self.sym.has_impls.iter().any(|h| h.attr_name == "Shareable"
+                    && receiver_unify_with_sym(&h.receiver_pattern, t, &h.receiver_tyvars, self.sym).is_some()) {
+                    return true;
+                }
+                // Otherwise auto-derive structurally: all fields must be Shareable.
                 info.fields.iter().all(|f| self.is_shareable(&f.ty))
             }
             HType::Enum(id) => {

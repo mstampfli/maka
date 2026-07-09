@@ -1,0 +1,20 @@
+// `Shareable` is a marker ATTR, opt-in by impl - not a hard-coded stdlib-name
+// allowlist.  A user type the programmer vouches is thread-safe declares
+// `has Shareable` and may then cross a thread boundary, even though its `*unit`
+// field would NOT auto-derive Shareable (a nullable view is not structurally
+// safe to share).  This is the capability the old name allowlist could not
+// express; the same `has Shareable` the stdlib handles (Mutex/Atomic/...) use.
+data Token { *unit h; }
+Token has Shareable {}
+
+unit main() {
+    Token tok = { h = null };
+    // [tok]: captured by value into the thread.  Accepted only because
+    // `Token has Shareable` - drop the impl and this is rejected (see neg_103,
+    // a user handle with no impl, which stays non-Shareable and racy).
+    *Thread t = thread(unit() [tok] {
+        if (tok.h == null) { log(1); }
+    });
+    join(t);
+    log(2);
+}
