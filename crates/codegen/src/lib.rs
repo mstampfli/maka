@@ -10403,36 +10403,34 @@ void __maka_pool_free(maka_unit* poolv) {
         //   - RHS uses the place only via a borrow    -> the old value is still live
         //     (`s = s + x`, `+` takes `&self`): compute the new value into a temp,
         //     then drop the old value, then assign (free it exactly once).
-        //   - RHS reads/moves the BARE-LOCAL place by value -> it derives the new
-        //     value FROM the old one (`node = node.next`, the list-walk idiom):
-        //     leave the old value alone (dropping it would double-free the
-        //     moved-out part, and a walker does not own the nodes it visits).
+        //   - RHS MOVES a sub-value out of the place by value (`node = node!.next`,
+        //     `bs[i] = bs[j]`) -> aliasing-safe order: compute the RHS into a temp
+        //     (moving the sub-value out and NULLing its slot), drop the old place
+        //     (whose moved-out slot is now null, so its recursive drop does NOT
+        //     cascade), then move the temp in.  This frees the old node exactly once
+        //     = a correct free-as-you-go iterative consume; ownership decides the
+        //     meaning (a `*T` walker never owns the nodes, so it takes the plain
+        //     no-drop path above; an `own *T` cursor consumes as it advances).
         if drop_old && matches!(op, HAssignOp::Assign) && self.drop_ty_owns(&place.ty) {
             if let Some(root) = place_root_local(place) {
-                // A PROJECTED owning place (field or index chain) whose RHS reads
-                // the same root (`bs[i] = bs[j]`, `s.fires = fires_new(s.w.w, ..)`,
-                // `p.a = p.b`): the root-based heuristic below can't tell whether
-                // the RHS touches the place's own old value, so it used to skip
-                // the old drop and leak it.  Use the aliasing-safe order: copy the
-                // RHS into a temp, NULL any source slot it moved out of, drop the
-                // old place (a no-op when the RHS was the place itself, since it
-                // was just nulled), then move the temp in.
-                if place_is_projection(place) && expr_contains_local(value, root) {
-                    let ty = self.c_type(&place.ty);
-                    self.wl(&format!("{{ {} __new = {};", ty, rhs));
-                    self.emit_move_out_null(f, value);
-                    self.emit_field_drop(&lhs, &place.ty, 0);
-                    self.wl(&format!("{} = __new; }}", lhs));
-                    return;
-                }
                 if !expr_contains_local(value, root) {
                     self.emit_field_drop(&lhs, &place.ty, 0);
-                } else if !local_used_by_value(value, root) {
+                } else if !local_used_by_value(value, root) && !place_is_projection(place) {
+                    // RHS reads the place only through a borrow (`s = s + x`).
                     let ty = self.c_type(&place.ty);
                     self.wl(&format!("{{ {} __reassign = {};", ty, rhs));
                     self.emit_field_drop(&lhs, &place.ty, 0);
                     self.wl(&format!("{} = __reassign; }}", lhs));
                     self.emit_move_out_null(f, value);
+                    return;
+                } else {
+                    // RHS moves a sub-value out of the place (projection alias like
+                    // `bs[i] = bs[j]`, or a bare-local self-walk like `node = node!.next`).
+                    let ty = self.c_type(&place.ty);
+                    self.wl(&format!("{{ {} __new = {};", ty, rhs));
+                    self.emit_move_out_null(f, value);
+                    self.emit_field_drop(&lhs, &place.ty, 0);
+                    self.wl(&format!("{} = __new; }}", lhs));
                     return;
                 }
             }

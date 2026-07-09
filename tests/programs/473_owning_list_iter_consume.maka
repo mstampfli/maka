@@ -1,0 +1,17 @@
+// `own *T` self-walk (`node = node!.next`) is a correct free-as-you-go iterative
+// consume: computing the RHS moves the next node out and NULLs the field, so
+// dropping the old node does not recursively cascade - it frees exactly one node
+// per step (no leak, no double-free, no recursive-drop stack blow-up on a long
+// list).  A non-owning `*T` walker takes the plain no-drop path instead; ownership
+// decides the meaning.  (Replaces the old syntactic special-case for this shape.)
+data Node { mut int v; mut own *Node next; }
+unit main() {
+    own *Node list = alloc Node { v = 1, next = alloc Node { v = 2, next = alloc Node { v = 3, next = null } } };
+    mut int sum = 0;
+    own *Node node = list;          // move the list into the cursor
+    while (node != null) {
+        sum = sum + node!.v;
+        node = node!.next;          // free-as-you-go consume
+    }
+    log(sum);                        // 6
+}
