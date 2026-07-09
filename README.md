@@ -126,14 +126,15 @@ unit main() {
 
 ## Project layout
 
+A Cargo workspace of eleven crates; the compile phases are `lexer -> ast ->
+parser -> sema -> codegen`, wired together by the `driver` (`makac`) binary. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the full codemap, dependency DAG,
+invariants, and the end-to-end compile flow, and each crate's `README.md` for its
+one-job contract.
+
 ```
-crates/
-  lexer/        tokens, span, source
-  ast/          surface syntax
-  parser/       tokens -> AST
-  sema/         HIR, resolution, type check, lifetime/move
-  codegen/      C emission
-  driver/       CLI: makac
+crates/        lexer ast parser sema codegen bridge lint fmt driver cli lsp
+               (makac = driver, maka = cli; see ARCHITECTURE.md)
 stdlib/
   std.maka      real Maka source for the stdlib (Option, Result, str_*,
                 Vec<T>, HashMap<V>, Atomic<T>, file I/O, concurrency),
@@ -143,6 +144,8 @@ tests/
   run_all.sh    positive suite
   run_neg.sh    negative suite (every neg_*.maka must fail to compile)
 ```
+
+Building, testing, and where new code goes: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 The stdlib lives in `module std;`. Every cross-module item - types, enums,
 functions, attrs - requires an explicit `import`.  Programs that touch
