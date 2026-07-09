@@ -543,21 +543,27 @@ impl<'a> TypeChecker<'a> {
                 HStmt::Return { value: v, heap_drops: Vec::new(), span: *span }
             }
             ast::Stmt::If { cond, then_block, else_block, span } => {
-                // Compile-time `if (T has X)`: a condition that folds to a constant
-                // keeps ONLY the taken branch and discards the other UNCHECKED, so a
-                // trait-dependent call in the dead branch never needs to resolve.
-                let folded = if expr_contains_has(cond) { self.try_comptime_bool(cond) } else { None };
-                if let Some(b) = folded {
-                    let taken = if b { Some(then_block) } else { else_block.as_ref() };
-                    match taken {
-                        Some(blk) => HStmt::Block(self.check_block(blk)),
-                        None => self.empty_block_stmt(*span),
-                    }
+                // Runtime existential `if (v has X)` on a `dyn`/`some` local: re-witness
+                // and NARROW `v` to `dyn X` in the then-branch.
+                if let Some(narrowed) = self.try_narrow_has_if(cond, then_block, else_block.as_ref(), *span) {
+                    narrowed
                 } else {
-                    let c = self.check_expr_coerce(cond, &HType::Bool);
-                    let then_b = self.check_block(then_block);
-                    let else_b = else_block.as_ref().map(|b| self.check_block(b));
-                    HStmt::If { cond: c, then_b, else_b, span: *span }
+                    // Compile-time `if (T has X)`: a condition that folds to a constant
+                    // keeps ONLY the taken branch and discards the other UNCHECKED, so a
+                    // trait-dependent call in the dead branch never needs to resolve.
+                    let folded = if expr_contains_has(cond) { self.try_comptime_bool(cond) } else { None };
+                    if let Some(b) = folded {
+                        let taken = if b { Some(then_block) } else { else_block.as_ref() };
+                        match taken {
+                            Some(blk) => HStmt::Block(self.check_block(blk)),
+                            None => self.empty_block_stmt(*span),
+                        }
+                    } else {
+                        let c = self.check_expr_coerce(cond, &HType::Bool);
+                        let then_b = self.check_block(then_block);
+                        let else_b = else_block.as_ref().map(|b| self.check_block(b));
+                        HStmt::If { cond: c, then_b, else_b, span: *span }
+                    }
                 }
             }
             ast::Stmt::While { cond, body, span } => {
@@ -1156,17 +1162,7 @@ impl<'a> TypeChecker<'a> {
                     span: *span,
                 }
             }
-            ast::Expr::HasPred { lhs, trait_name, span } => {
-                // `T has X` in value position (e.g. `bool b = T has X;`) folds to a
-                // compile-time boolean literal.  As an `if`/`match` condition the
-                // dead-branch elimination is handled earlier (check_stmt / check_match),
-                // so reaching here means an ordinary boolean use.
-                let b = self.eval_has_pred(lhs, trait_name, *span).unwrap_or_else(|| {
-                    self.err(format!("cannot evaluate `has {}`: the operand type is not concrete here", trait_name), *span);
-                    false
-                });
-                HExpr { kind: HExprKind::LitBool(b), ty: HType::Bool, span: *span }
-            }
+            ast::Expr::HasPred { lhs, trait_name, span } => self.check_has_pred(lhs, trait_name, *span),
         }
     }
 
@@ -3995,8 +3991,19 @@ impl<'a> TypeChecker<'a> {
         if !probed.is_empty() {
             let is_dyn = matches!(strip_to_dyn(&probed[0].ty), Some(_));
             if is_dyn {
-                // Find a signature in the trait with matching name and arity.
-                let trait_name = match strip_to_dyn(&probed[0].ty) { Some(traits) => traits[0].clone(), None => String::new() };
+                // Find a signature in the trait with matching name and arity.  For a
+                // MULTI-trait dyn (`dyn (Speak+Legs)`, e.g. a `has`-narrowed value),
+                // pick the trait among its traits that actually declares `name` -
+                // not just `traits[0]` - so `Legs.legs(&v)` selects Legs.
+                let dyn_traits = strip_to_dyn(&probed[0].ty).unwrap_or_default();
+                let trait_name = dyn_traits.iter()
+                    .find(|tn| self.sym.is_trait(tn) && self.sym.trait_method_funcs(tn).iter().any(|fid| {
+                        let s = self.sym.func_sig(*fid);
+                        s.name == name && s.param_tys.len() == probed.len()
+                    }))
+                    .or_else(|| dyn_traits.first())
+                    .cloned()
+                    .unwrap_or_default();
                 if !self.sym.is_trait(&trait_name) {
                     self.err(format!("unknown trait `{}`", trait_name), sp);
                     return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
@@ -5250,21 +5257,17 @@ impl<'a> TypeChecker<'a> {
         self.check_block_stmt(unrolled)
     }
 
-    /// Compile-time trait-membership fold for `T has X` / `expr has X`.  Returns
-    /// `Some(true|false)` when the operand's concrete type is known and the
-    /// predicate is decided at compile time (the common case: a type parameter
-    /// post-monomorphization, or a nominal type); `None` only when the operand
-    /// type is still an unresolved type variable (possible while checking a
-    /// generic template before monomorphization).  Uses the SAME satisfaction
-    /// decision as a `where T has X` bound, so the two agree by construction.
-    /// A runtime existential (`dyn`/`some`) operand needs a runtime check that is
-    /// not yet implemented; those report an error and return `Some(false)`.
-    fn eval_has_pred(&mut self, lhs: &ast::HasLhs, trait_name: &str, span: Span) -> Option<bool> {
+    /// Compile-time trait-membership fold for a `T has X` operand.  Returns
+    /// `Some(true|false)` ONLY when the operand is a TYPE (or a bare local whose
+    /// declared type) that is concrete and NON-existential - the case that enables
+    /// dead-branch elimination.  Returns `None` (defer) for a complex value operand,
+    /// an existential operand (which needs the runtime path), an unresolved type
+    /// variable, or a bogus trait.  Side-effect-free (no `check_expr`, no error) so
+    /// it is safe to call speculatively from `try_comptime_bool`.  Uses the SAME
+    /// satisfaction decision as a `where T has X` bound, so the two agree.
+    fn eval_has_pred(&mut self, lhs: &ast::HasLhs, trait_name: &str) -> Option<bool> {
         let recv_ty: HType = match lhs {
-            ast::HasLhs::Val(e) => self.check_expr(e, None).ty,
-            // A bare name that is a local VALUE (and not shadowing a type name) is
-            // the value form: query the value's static type.  A name that is also
-            // a type / type-parameter is read as the type (the `T has X` intent).
+            ast::HasLhs::Val(_) => return None,
             ast::HasLhs::Ty(ast::Type::Named(name, _))
                 if self.lookup(name).is_some()
                     && !self.cur_type_params.contains(name)
@@ -5276,20 +5279,123 @@ impl<'a> TypeChecker<'a> {
             }
             ast::HasLhs::Ty(t) => self.resolve_local_ty(t),
         };
-        if is_existential(&recv_ty) {
-            self.err(format!(
-                "runtime `has {t}` on an existential (`dyn`/`some`) value is not yet supported; \
-                 only a compile-time `T has {t}` on a concrete type or type parameter is folded",
-                t = trait_name), span);
-            return Some(false);
-        }
-        if has_tyvar(&recv_ty) { return None; }
-        if !self.sym.is_trait(trait_name) {
-            self.err(format!("`{}` is not a trait in a `has` predicate", trait_name), span);
-            return Some(false);
-        }
+        if is_existential(&recv_ty) || has_tyvar(&recv_ty) { return None; }
+        if !self.sym.is_trait(trait_name) { return None; }
         Some(crate::resolve::type_impls_trait_visible(
             self.sym, trait_name, &recv_ty, &self.cur_module, &self.cur_has_imports))
+    }
+
+    /// Check a `has` predicate in value position, producing an `HExpr`.  A concrete
+    /// operand folds to a boolean literal; an existential (`dyn`/`some`) VALUE
+    /// operand becomes a RUNTIME membership test `DynHasVtbl(DynRewitness(v, X))`
+    /// (a switch over the hidden type's vtable pointer).  Errors on a bogus trait or
+    /// a `has` applied to an existential TYPE (rather than a value).
+    fn check_has_pred(&mut self, lhs: &ast::HasLhs, trait_name: &str, span: Span) -> HExpr {
+        let lit_false = |sp| HExpr { kind: HExprKind::LitBool(false), ty: HType::Bool, span: sp };
+        let (recv_ty, val): (HType, Option<HExpr>) = match lhs {
+            ast::HasLhs::Val(e) => { let h = self.check_expr(e, None); (h.ty.clone(), Some(h)) }
+            ast::HasLhs::Ty(ast::Type::Named(name, _))
+                if self.lookup(name).is_some()
+                    && !self.cur_type_params.contains(name)
+                    && self.sym.struct_by_name(name).is_none()
+                    && self.sym.enum_by_name(name).is_none() =>
+            {
+                let id = self.lookup(name).unwrap();
+                let ty = self.local(id).ty.clone();
+                (ty.clone(), Some(HExpr { kind: HExprKind::Local(id), ty, span }))
+            }
+            ast::HasLhs::Ty(t) => (self.resolve_local_ty(t), None),
+        };
+        if !self.sym.is_trait(trait_name) {
+            self.err(format!("`{}` is not a trait in a `has` predicate", trait_name), span);
+            return lit_false(span);
+        }
+        if is_existential(&recv_ty) {
+            // Runtime path: re-witness the hidden concrete type as `dyn X`, then
+            // read the has-answer off the resulting (possibly-null) vtbl.
+            let Some(vh) = val else {
+                self.err(format!("`has {}` needs an existential VALUE, not the type `{}`", trait_name, type_str(&recv_ty)), span);
+                return lit_false(span);
+            };
+            // Deanonymized `some`: when the hidden concrete type is statically known
+            // (an immutable homogeneous column / its loop item), fold the membership
+            // test at compile time, exactly like a concrete operand.
+            if let Some(sid) = self.receiver_known_concrete(&vh) {
+                let b = crate::resolve::type_impls_trait_visible(
+                    self.sym, trait_name, &HType::Struct(sid), &self.cur_module, &self.cur_has_imports);
+                return HExpr { kind: HExprKind::LitBool(b), ty: HType::Bool, span };
+            }
+            // A single `some` value / iteration item is a Dyn fat pointer, so it
+            // re-witnesses exactly like `dyn`.
+            let (src_traits, _locked) = match existential_info(&recv_ty) {
+                Some(x) => x, None => return lit_false(span),
+            };
+            return self.build_dyn_has(vh, src_traits.join("_"), trait_name, span);
+        }
+        if has_tyvar(&recv_ty) { return lit_false(span); }
+        let b = crate::resolve::type_impls_trait_visible(
+            self.sym, trait_name, &recv_ty, &self.cur_module, &self.cur_has_imports);
+        HExpr { kind: HExprKind::LitBool(b), ty: HType::Bool, span }
+    }
+
+    /// Build `DynHasVtbl(DynRewitness(v, src_trait -> [X]))` - the runtime membership
+    /// bool for an existential value `v`.  The bool form re-witnesses to the single
+    /// `dyn X` (the answer is the same; only NARROWING needs the combined vtbl).
+    fn build_dyn_has(&mut self, vh: HExpr, src_trait: String, to_trait: &str, span: Span) -> HExpr {
+        let dyn_x = HType::Dyn { traits: vec![to_trait.to_string()], locked: false };
+        let rw = HExpr {
+            kind: HExprKind::DynRewitness { value: Box::new(vh), src_trait, to_traits: vec![to_trait.to_string()] },
+            ty: dyn_x, span,
+        };
+        HExpr { kind: HExprKind::DynHasVtbl(Box::new(rw)), ty: HType::Bool, span }
+    }
+
+    /// Runtime existential `has` with binding NARROWING: `if (v has X) { ... }` where
+    /// `v` is a bare local of existential type.  Re-witnesses `v` as `dyn X` once,
+    /// tests its vtbl for null (the membership check), and shadows `v` with the
+    /// narrowed `dyn X` value inside the then-branch so `X.method(&v)` dispatches
+    /// through the hidden type's X-vtable.  Returns None when the shape does not
+    /// apply (so the caller falls through to the comptime / normal path).
+    fn try_narrow_has_if(&mut self, cond: &ast::Expr, then_block: &ast::Block,
+                         else_block: Option<&ast::Block>, span: Span) -> Option<HStmt> {
+        let ast::Expr::HasPred { lhs, trait_name, span: hspan } = cond else { return None; };
+        let name = simple_has_name(lhs)?;
+        let lid = self.lookup(name)?;
+        let vty = self.local(lid).ty.clone();
+        if !is_existential(&vty) { return None; }
+        let (src_traits, _locked) = existential_info(&vty)?;
+        if !self.sym.is_trait(trait_name) {
+            self.err(format!("`{}` is not a trait in a `has` predicate", trait_name), span);
+            return Some(self.empty_block_stmt(span));
+        }
+        // Narrow to `dyn (source traits + X)` so BOTH interfaces stay callable in the
+        // branch (a combined vtbl, re-witnessed once - no per-call overhead).
+        let src_key = src_traits.join("_");
+        let mut to_traits = src_traits.clone();
+        if !to_traits.iter().any(|t| t == trait_name) { to_traits.push(trait_name.clone()); }
+        let dyn_x = HType::Dyn { traits: to_traits.clone(), locked: false };
+        let vexpr = HExpr { kind: HExprKind::Local(lid), ty: vty, span: *hspan };
+        let rw = HExpr {
+            kind: HExprKind::DynRewitness { value: Box::new(vexpr), src_trait: src_key, to_traits },
+            ty: dyn_x.clone(), span: *hspan,
+        };
+        let nlid = self.fresh_local("__narrow".to_string(), dyn_x.clone(), StorageClass::Stack, true, true, span);
+        let let_stmt = HStmt::Let { local: nlid, init: rw, span };
+        let cond_h = HExpr {
+            kind: HExprKind::DynHasVtbl(Box::new(HExpr { kind: HExprKind::Local(nlid), ty: dyn_x, span })),
+            ty: HType::Bool, span,
+        };
+        // then-branch: shadow the operand name with the narrowed `dyn X` local.
+        self.enter_scope();
+        self.bind_name(name, nlid);
+        let then_b = self.check_block(then_block);
+        self.leave_scope();
+        let else_b = else_block.map(|b| self.check_block(b));
+        let if_stmt = HStmt::If { cond: cond_h, then_b, else_b, span };
+        Some(HStmt::Block(HBlock {
+            stmts: vec![let_stmt, if_stmt],
+            heap_to_free: Vec::new(), ptr_nulls: Vec::new(), stmt_nulls: Vec::new(), span,
+        }))
     }
 
     /// Fold a boolean condition built from `has` predicates, boolean literals, and
@@ -5299,7 +5405,7 @@ impl<'a> TypeChecker<'a> {
     fn try_comptime_bool(&mut self, e: &ast::Expr) -> Option<bool> {
         match e {
             ast::Expr::Lit(ast::Lit::Bool(b), _) => Some(*b),
-            ast::Expr::HasPred { lhs, trait_name, span } => self.eval_has_pred(lhs, trait_name, *span),
+            ast::Expr::HasPred { lhs, trait_name, .. } => self.eval_has_pred(lhs, trait_name),
             ast::Expr::Un { op: ast::UnOp::Not, expr, .. } => self.try_comptime_bool(expr).map(|b| !b),
             ast::Expr::Bin { op: ast::BinOp::And, lhs, rhs, .. } => {
                 if !self.try_comptime_bool(lhs)? { Some(false) } else { self.try_comptime_bool(rhs) }
@@ -6345,17 +6451,37 @@ fn has_tyvar(t: &HType) -> bool {
 }
 
 /// Is this type an existential (`dyn X` / `some X`), possibly behind a pointer?
-/// A `has` predicate on such a value needs a RUNTIME check (the concrete type is
-/// hidden), which is not yet supported - only concrete-type operands fold.
+/// A `has` predicate on such a value takes the RUNTIME path (the concrete type is
+/// hidden), re-witnessing via the vtable-pointer switch.
 fn is_existential(t: &HType) -> bool {
+    existential_info(t).is_some()
+}
+
+/// For an existential type (peeling refs/pointers), its constituent trait list
+/// (the source vtable key is `traits.join("_")`, matching the `Dyn_<key>` C
+/// typedef and `dyn_insts`) and whether it is a `some` (locked) column/value.
+fn existential_info(t: &HType) -> Option<(Vec<String>, bool)> {
     match t {
-        HType::Dyn { .. } => true,
+        HType::Dyn { traits, locked } => Some((traits.clone(), *locked)),
         HType::Ref { inner, .. }
         | HType::Ptr { inner, .. }
         | HType::RawPtr { inner, .. }
         | HType::OwnPtr { inner, .. }
-        | HType::Heap { inner } => is_existential(inner),
-        _ => false,
+        | HType::Heap { inner } => existential_info(inner),
+        _ => None,
+    }
+}
+
+/// The bare operand name of a `has` predicate whose LHS is a simple identifier
+/// (`v has X` in either parsed form), for the narrowing shape; None otherwise.
+fn simple_has_name(lhs: &ast::HasLhs) -> Option<&str> {
+    match lhs {
+        ast::HasLhs::Ty(ast::Type::Named(n, _)) => Some(n),
+        ast::HasLhs::Val(e) => match e.as_ref() {
+            ast::Expr::Ident(n, _) => Some(n),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

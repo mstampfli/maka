@@ -1,0 +1,34 @@
+// Runtime `dyn Y has X`: given a `dyn Speak` value whose concrete type is hidden,
+// decide at runtime whether that type ALSO implements Legs - and, in the then
+// branch, NARROW it to `dyn (Speak + Legs)` so BOTH interfaces stay callable with
+// no per-call cost.  Lowered to a switch over the value's vtable pointer (no RTTI,
+// zero cost to plain dyn/some that never uses `has`).
+attr Speak { int sound(&_ self); }
+attr Legs  { int legs(&_ self); }
+
+data Cat { int c; }
+Cat has Speak { int sound(&Cat self) { return 1; } }
+Cat has Legs  { int legs(&Cat self)  { return 4; } }
+
+data Snake { int s; }
+Snake has Speak { int sound(&Snake self) { return 2; } }   // no Legs
+
+unit main() {
+    Cat cat = { c = 1 };
+    Snake snake = { s = 2 };
+    &dyn Speak d1 = &cat as dyn Speak;
+    &dyn Speak d2 = &snake as dyn Speak;
+
+    // Bool form.
+    if (d1 has Legs) { log(1); } else { log(0); }   // Cat has Legs -> 1
+    if (d2 has Legs) { log(1); } else { log(0); }   // Snake lacks Legs -> 0
+
+    // Narrowing form: inside the branch d1 is `dyn (Speak + Legs)`, so BOTH the
+    // checked trait (Legs) AND the original trait (Speak) dispatch directly.
+    if (d1 has Legs) { log(Legs.legs(&d1)); log(Speak.sound(&d1)); } else { log(-1); }   // 4, 1
+    if (d2 has Legs) { log(Legs.legs(&d2)); } else { log(-1); }   // -1
+
+    // The original Speak interface still works outside the narrowing.
+    log(Speak.sound(&d1));   // 1
+    log(Speak.sound(&d2));   // 2
+}

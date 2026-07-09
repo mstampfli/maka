@@ -1,0 +1,22 @@
+// A DEANONYMIZED `some` value - an immutable homogeneous column packed from a
+// concrete `Vec<T>`, whose hidden type the compiler still knows - folds a `has`
+// predicate at COMPILE time in value position, exactly like a concrete operand
+// (no runtime vtable switch).  `.cgrep` asserts the fold (a `true`/`false`
+// literal, not a re-witness) actually happened.
+import std.{Vec, push};
+data Gram { int g; }
+attr Weigh { int weight(&_ self); }
+attr Dense { int density(&_ self); }
+attr Fly   { int fly(&_ self); }
+Gram has Weigh { int weight(&Gram self) { return self.g; } }
+Gram has Dense { int density(&Gram self) { return 7; } }
+unit main() {
+    Vec<Gram> grams = []; push(grams, Gram { g = 5 });
+    Vec<some Weigh> col = grams;   // hidden type statically known = Gram
+    for (some Weigh item in col) {
+        bool has_dense = item has Dense;   // folds to true
+        bool has_fly   = item has Fly;     // folds to false
+        if (has_dense) { log(1); } else { log(0); }   // 1
+        if (has_fly)   { log(1); } else { log(0); }   // 0
+    }
+}

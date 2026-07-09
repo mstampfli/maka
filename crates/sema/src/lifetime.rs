@@ -2739,7 +2739,8 @@ fn inject_nulls_in_expr(e: &mut HExpr, locals: &[LocalInfo]) {
         Bin { lhs, rhs, .. } => { inject_nulls_in_expr(lhs, locals); inject_nulls_in_expr(rhs, locals); }
         Un { expr, .. } | Unwrap { expr, .. } | Cast { expr, .. } | CheckedCast { expr, .. }
         | DropWrite(expr) | DerefRef(expr) | HeapAlloc(expr) | Free(expr, _) | Transfer(expr)
-        | SliceLen(expr) | EnumTag(expr) => inject_nulls_in_expr(expr, locals),
+        | SliceLen(expr) | EnumTag(expr) | DynHasVtbl(expr)
+        | DynRewitness { value: expr, .. } => inject_nulls_in_expr(expr, locals),
         AddrOfRef { place, .. } => inject_nulls_in_expr(place, locals),
         Field { base, .. } | ArrayToSlice { base, .. } => inject_nulls_in_expr(base, locals),
         Index { base, idx } => { inject_nulls_in_expr(base, locals); inject_nulls_in_expr(idx, locals); }

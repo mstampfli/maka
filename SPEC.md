@@ -608,11 +608,20 @@ Rules and forms:
   (both arms type-checked).
 - In value position (`bool b = T has X;`) the predicate is just a compile-time
   boolean literal.
-- A predicate on an **existential** (`dyn X` / `some X`) value would need a runtime
-  type check (the concrete type is hidden); that is not yet supported and is a
-  compile error.  Only compile-time folding on a concrete operand is provided.
+- A predicate on an **existential** (`dyn X` / `some X`) VALUE takes the RUNTIME
+  path (the concrete type is hidden): it lowers to a switch over the value's vtable
+  pointer against the finite set of concrete types the existential can hold
+  (whole-program known), yielding the membership answer.  There is NO added runtime
+  type identity - the vtable pointer that every `dyn`/`some` value already carries
+  is the discriminator - so this costs **nothing** for `dyn`/`some` code that never
+  uses `has`.  As a bare `if (v has X)` condition on a local, the then-branch also
+  **narrows** `v` to `dyn (its traits + X)` - a combined fat pointer re-witnessed
+  once - so BOTH the checked trait and the source trait dispatch directly inside the
+  branch with no per-call cost.  (A `some` value whose hidden type is statically
+  known - a deanonymized column / loop item - folds the membership test at compile
+  time in value position, like a concrete operand.)
 - The right operand must name a trait/attr; a bogus name is an error, not a
-  silent `false`.
+  silent `false`.  `has` on an existential TYPE (rather than a value) is an error.
 
 A module-scope `Type NAME = expr;` declares a global.  Without `mut` the
 global is read-only; with `mut` it is writable from any function in the

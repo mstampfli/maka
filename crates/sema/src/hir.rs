@@ -724,6 +724,22 @@ pub enum HExprKind {
         /// Yielded type (Unit for statement-form).
         result_ty: HType,
     },
+    /// Runtime existential re-witness (`v has X` on a `dyn`/`some` value): given an
+    /// existential value of trait key `src_trait`, produce a `dyn to_traits` fat
+    /// pointer `{ value.data, <target vtbl> }` where the target vtbl is the hidden
+    /// concrete type's vtable for `to_traits`, or NULL if that type does not
+    /// implement all of `to_traits`.  Codegen lowers this to a switch over
+    /// `value.vtbl` against the finite set of concrete types packed into the source
+    /// existential (whole-program known).  `to_traits` has one element for the plain
+    /// membership test (`Dyn_X`) and MORE for the narrowing re-witness, which keeps
+    /// the source trait(s) too (a combined `Dyn_Y_X` fat pointer, so both interfaces
+    /// dispatch with no per-call cost).  The vtbl is NULL exactly when membership
+    /// fails, so `DynHasVtbl` reads the has-answer off it.
+    DynRewitness { value: Box<HExpr>, src_trait: String, to_traits: Vec<String> },
+    /// `(dynval).vtbl != NULL` as a bool - the membership answer for a `DynRewitness`
+    /// result (or any `dyn` value; a normally-constructed `dyn` always has a non-null
+    /// vtbl, so this is only meaningful on a re-witness result).
+    DynHasVtbl(Box<HExpr>),
 }
 
 #[derive(Debug, Clone)]

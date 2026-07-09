@@ -1,0 +1,3 @@
+bool has_dense = true;
+bool has_fly = false;
+!Dense_vtbl_for_Gram

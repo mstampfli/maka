@@ -62,6 +62,18 @@ struct Cx<'a> {
     dyn_insts: std::collections::BTreeSet<(String, u32)>,
     /// Traits seen — generate Dyn_Trait struct typedef for these.
     dyn_traits: std::collections::BTreeSet<String>,
+    /// Runtime existential re-witness targets `(src_trait, to_traits)` seen
+    /// (`v has X` on a `dyn`/`some` value).  After the scan populates `dyn_insts`,
+    /// each is expanded: every concrete type packed as `dyn src_trait` that also
+    /// implements all of `to_traits` gets a vtable emitted for that (combined) trait
+    /// set, so the runtime switch can re-witness it.
+    dyn_witness_targets: std::collections::BTreeSet<(String, Vec<String>)>,
+    /// Combined (multi-trait) vtables needed for narrowing re-witness: a `dyn (Y+X)`
+    /// keeps both interfaces.  `combined_vtbls` drives the `Dyn_<key>`/`<key>_vtbl`
+    /// typedefs; `combined_insts` drives the per-type `<key>_vtbl_for_T` instances.
+    /// `key` is `traits.join("_")` and the vtbl unions all constituent methods.
+    combined_vtbls: std::collections::BTreeSet<Vec<String>>,
+    combined_insts: std::collections::BTreeSet<(Vec<String>, u32)>,
     /// Fat-callable signatures seen — emit `Callable_KEY` typedef + raw-fn-ptr typedef.
     callable_sigs: std::collections::BTreeMap<String, (HType, Vec<HType>)>,
     /// Aggregate type keys already walked by `note_type`, so recursion into
@@ -158,6 +170,8 @@ impl<'a> Cx<'a> {
             slice_types: Default::default(), vec_types: Default::default(),
             rust_drop_types: Default::default(),
             dyn_insts: Default::default(), dyn_traits: Default::default(),
+            dyn_witness_targets: Default::default(),
+            combined_vtbls: Default::default(), combined_insts: Default::default(),
             callable_sigs: Default::default(),
             fn_trampolines: Default::default(),
             closure_trampolines: Default::default(),
@@ -203,6 +217,23 @@ impl<'a> Cx<'a> {
             .collect();
         for f in &funcs {
             self.scan_func(f);
+        }
+        // Expand runtime re-witness targets now that `dyn_insts` is complete: for
+        // each `v has X` (src_trait -> to_trait), every concrete type packed as
+        // `dyn src_trait` that ALSO implements to_trait needs a `to_trait` vtable
+        // (and the `Dyn_to_trait` typedef) so the runtime switch can re-witness it.
+        let witness_targets: Vec<(String, Vec<String>)> = self.dyn_witness_targets.iter().cloned().collect();
+        let inst_snapshot: Vec<(String, u32)> = self.dyn_insts.iter().cloned().collect();
+        for (src, to_traits) in &witness_targets {
+            let single = to_traits.len() == 1;
+            if single { self.dyn_traits.insert(to_traits[0].clone()); }
+            else { self.combined_vtbls.insert(to_traits.clone()); }
+            for (t, sid_n) in &inst_snapshot {
+                if t != src { continue; }
+                if !to_traits.iter().all(|tr| self.struct_impls_trait_cg(StructId(*sid_n), tr)) { continue; }
+                if single { self.dyn_insts.insert((to_traits[0].clone(), *sid_n)); }
+                else { self.combined_insts.insert((to_traits.clone(), *sid_n)); }
+            }
         }
         // Structs/enums: forward-decls, then (internally) dyn+callable typedefs
         // that reference struct POINTERS, then the struct BODIES.  A `data` struct
@@ -265,6 +296,7 @@ impl<'a> Cx<'a> {
 
         // Vtable instances (need function forward decls to be visible).
         self.emit_dyn_vtable_instances();
+        self.emit_combined_vtable_instances();
         // Trampolines for functions whose names are used as fat-callable values.
         self.emit_trampolines(&funcs);
         // Closure trampolines for capturing lambdas.
@@ -6022,6 +6054,7 @@ void __maka_pool_free(maka_unit* poolv) {
         // BEFORE the struct BODIES (a struct field can embed a `Dyn_T` fat-pointer
         // by value, so its typedef must exist first).  Idempotent.
         self.emit_dyn_typedefs();
+        self.emit_combined_typedefs();
 
         // Full definitions, emitted in dependency order.  A type that embeds
         // another BY VALUE (a struct field, an enum-variant field, or an array
@@ -6202,6 +6235,11 @@ void __maka_pool_free(maka_unit* poolv) {
                 }
                 self.scan_expr(expr);
             }
+            HExprKind::DynRewitness { value, src_trait, to_traits } => {
+                self.dyn_witness_targets.insert((src_trait.clone(), to_traits.clone()));
+                self.scan_expr(value);
+            }
+            HExprKind::DynHasVtbl(v) => self.scan_expr(v),
             HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) => self.scan_expr(expr),
             HExprKind::ArrayToSlice { base, .. } => self.scan_expr(base),
             HExprKind::DerefRef(inner) => self.scan_expr(inner),
@@ -6444,6 +6482,101 @@ void __maka_pool_free(maka_unit* poolv) {
         }
     }
 
+    /// Does struct `sid` have a buildable `trait_name` vtable, i.e. an impl of
+    /// every trait method taking `&Struct(sid)` as receiver?  Mirrors the `chosen`
+    /// lookup in `emit_dyn_vtable_instances` (so a candidate we admit is always
+    /// vtable-buildable) and the sema `struct_satisfies_trait` used for `as dyn`.
+    fn struct_impls_trait_cg(&self, sid: StructId, trait_name: &str) -> bool {
+        let funcs = self.sym.trait_method_funcs(trait_name);
+        if funcs.is_empty() { return false; }
+        let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for fid in &funcs { names.insert(self.sym.func_sig(*fid).name.clone()); }
+        names.iter().all(|n| funcs.iter().any(|fid| {
+            let s = self.sym.func_sig(*fid);
+            s.name == *n
+                && matches!(s.param_tys.first(),
+                    Some(HType::Ref { inner, .. }) if matches!(inner.as_ref(), HType::Struct(id) if *id == sid))
+        }))
+    }
+
+    /// The concrete types packed as `dyn src_trait` that implement ALL of
+    /// `to_traits` (struct names, for the runtime re-witness switch), stable order.
+    fn dyn_witness_candidates(&self, src_trait: &str, to_traits: &[String]) -> Vec<String> {
+        self.dyn_insts.iter()
+            .filter(|(t, sid_n)| t == src_trait
+                && to_traits.iter().all(|tr| self.struct_impls_trait_cg(StructId(*sid_n), tr)))
+            .map(|(_, sid_n)| self.sym.struct_info(StructId(*sid_n)).name.clone())
+            .collect()
+    }
+
+    /// Union of the method funcs of several traits (for a combined narrowing vtbl).
+    fn combined_method_funcs(&self, traits: &[String]) -> Vec<FuncId> {
+        let mut v = Vec::new();
+        for t in traits { v.extend(self.sym.trait_method_funcs(t)); }
+        v
+    }
+
+    /// Emit `Dyn_<key>` + `<key>_vtbl` typedefs for each combined (multi-trait)
+    /// re-witness target; the vtbl unions all constituent traits' methods so a
+    /// `dyn (Y+X)` value dispatches either interface directly.
+    fn emit_combined_typedefs(&mut self) {
+        let combos: Vec<Vec<String>> = self.combined_vtbls.iter().cloned().collect();
+        for traits in &combos {
+            let funcs = self.combined_method_funcs(traits);
+            if funcs.is_empty() { continue; }
+            let key = c_ident(&traits.join("_"));
+            let mut name_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for fid in &funcs { name_set.insert(self.sym.func_sig(*fid).name.clone()); }
+            self.wl(&format!("typedef struct {0}_vtbl {{", key));
+            self.open();
+            for n in &name_set {
+                let Some(sig) = funcs.iter().find(|fid| self.sym.func_sig(**fid).name == *n)
+                    .map(|fid| self.sym.func_sig(*fid).clone()) else { continue; };
+                let ret = self.c_ret_type(&sig.ret);
+                let mut parts: Vec<String> = Vec::new();
+                for (i, p) in sig.param_tys.iter().enumerate() {
+                    if i == 0 { parts.push("void*".into()); } else { parts.push(self.c_type(p)); }
+                }
+                let pstr = if parts.is_empty() { "void".to_string() } else { parts.join(", ") };
+                self.wl(&format!("{} (*{})({});", ret, c_ident(n), pstr));
+            }
+            self.close();
+            self.wl(&format!("}} {0}_vtbl;", key));
+            self.wl(&format!("typedef struct {{ void* data; const {0}_vtbl* vtbl; }} Dyn_{0};", key));
+        }
+    }
+
+    /// Emit the per-type `<key>_vtbl_for_T` instances for combined re-witness vtbls.
+    fn emit_combined_vtable_instances(&mut self) {
+        let insts: Vec<(Vec<String>, u32)> = self.combined_insts.iter().cloned().collect();
+        for (traits, sid_n) in &insts {
+            let sid = StructId(*sid_n);
+            let funcs = self.combined_method_funcs(traits);
+            if funcs.is_empty() { continue; }
+            let sname = self.sym.struct_info(sid).name.clone();
+            let key = c_ident(&traits.join("_"));
+            let mut name_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for fid in &funcs { name_set.insert(self.sym.func_sig(*fid).name.clone()); }
+            self.wl(&format!("static const {0}_vtbl {0}_vtbl_for_{1} = {{", key, c_ident(&sname)));
+            self.open();
+            for n in &name_set {
+                let chosen = funcs.iter().find_map(|fid| {
+                    let s = self.sym.func_sig(*fid);
+                    if s.name != *n || s.param_tys.is_empty() { return None; }
+                    if let HType::Ref { inner, .. } = &s.param_tys[0] {
+                        if let HType::Struct(id) = inner.as_ref() {
+                            if *id == sid { return Some(s.c_name.clone()); }
+                        }
+                    }
+                    None
+                });
+                if let Some(cn) = chosen { self.wl(&format!(".{} = (void*){},", c_ident(n), cn)); }
+            }
+            self.close();
+            self.wl("};");
+        }
+    }
+
     fn emit_dyn_vtable_instances(&mut self) {
         let insts: Vec<(String, u32)> = self.dyn_insts.iter().cloned().collect();
         for (tn, sid_n) in &insts {
@@ -6663,7 +6796,7 @@ void __maka_pool_free(maka_unit* poolv) {
                 HType::Dyn { traits, locked: true } => format!("SomeVec_{}", traits.join("_")),
                 _ => format!("Vec_{}", self.type_key(elem)),
             },
-            HType::Dyn { traits, .. } => format!("Dyn_{}", c_ident(&traits[0])),
+            HType::Dyn { traits, .. } => format!("Dyn_{}", c_ident(&traits.join("_"))),
             HType::FnPtr { ret, params } => {
                 format!("Callable_{}", fn_sig_key(ret, params))
             }
@@ -11477,6 +11610,31 @@ void __maka_pool_free(maka_unit* poolv) {
                     _ => format!("(({}){{0}})", ct),
                 }
             }
+            // Runtime existential re-witness: `{ v.data, <switch v.vtbl -> to-vtbl or NULL> }`.
+            // The switch compares the source vtbl against each `src_vtbl_for_T` (T packed
+            // as `dyn src_trait` that implements all of `to_traits`) and yields the matching
+            // `to_vtbl_for_T`; anything else yields NULL (the membership-fails case).  For a
+            // multi-trait `to_traits` (narrowing keeps the source trait too) the target is a
+            // combined `Dyn_Y_X` whose vtbl unions both interfaces - so both dispatch directly.
+            HExprKind::DynRewitness { value, src_trait, to_traits } => {
+                let vc = self.emit_expr(f, value);
+                let src_c = c_ident(src_trait);
+                let to_key = c_ident(&to_traits.join("_"));
+                let cands = self.dyn_witness_candidates(src_trait, to_traits);
+                let mut sw = String::new();
+                for t in &cands {
+                    let tc = c_ident(t);
+                    sw.push_str(&format!("(__s.vtbl == &{0}_vtbl_for_{2}) ? &{1}_vtbl_for_{2} : ", src_c, to_key, tc));
+                }
+                sw.push_str(&format!("(const {}_vtbl*)0", to_key));
+                format!("(__extension__ ({{ Dyn_{0} __s = ({1}); (Dyn_{2}){{ .data = __s.data, .vtbl = ({3}) }}; }}))",
+                    src_c, vc, to_key, sw)
+            }
+            // `(dynval).vtbl != NULL` — the has-answer read off a re-witness result.
+            HExprKind::DynHasVtbl(v) => {
+                let vc = self.emit_expr(f, v);
+                format!("(({}).vtbl != 0)", vc)
+            }
         }
     }
 
@@ -12503,7 +12661,8 @@ fn expr_mutates_local(e: &HExpr, iv: u32) -> bool {
         | HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. } => expr_mutates_local(expr, iv),
         HExprKind::DropWrite(e) | HExprKind::DerefRef(e) | HExprKind::HeapAlloc(e)
         | HExprKind::Free(e, _) | HExprKind::Transfer(e) | HExprKind::SliceLen(e)
-        | HExprKind::EnumTag(e) => expr_mutates_local(e, iv),
+        | HExprKind::EnumTag(e) | HExprKind::DynHasVtbl(e)
+        | HExprKind::DynRewitness { value: e, .. } => expr_mutates_local(e, iv),
         HExprKind::ArrayToSlice { base, .. } => expr_mutates_local(base, iv),
         HExprKind::Struct { fields, .. } | HExprKind::VariantCtor { fields, .. } =>
             fields.iter().any(|(_, fe)| expr_mutates_local(fe, iv)),
@@ -12792,7 +12951,8 @@ fn collect_local_reads_expr(e: &HExpr, out: &mut std::collections::HashSet<u32>)
         Bin { lhs, rhs, .. } => { collect_local_reads_expr(lhs, out); collect_local_reads_expr(rhs, out); }
         Un { expr, .. } | Unwrap { expr, .. } | Cast { expr, .. } | CheckedCast { expr, .. }
         | DropWrite(expr) | DerefRef(expr) | HeapAlloc(expr) | Free(expr, _) | Transfer(expr)
-        | SliceLen(expr) | EnumTag(expr) => collect_local_reads_expr(expr, out),
+        | SliceLen(expr) | EnumTag(expr) | DynHasVtbl(expr)
+        | DynRewitness { value: expr, .. } => collect_local_reads_expr(expr, out),
         AddrOfRef { place, .. } => collect_local_reads_expr(place, out),
         Struct { fields, .. } | VariantCtor { fields, .. } => for (_, fe) in fields { collect_local_reads_expr(fe, out); },
         ArrayLit(es) => for e2 in es { collect_local_reads_expr(e2, out); },
