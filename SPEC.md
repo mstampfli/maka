@@ -271,8 +271,13 @@ field access is rejected because the concrete type is unknown. The trait is an
 
 **`dyn Trait`** (and `dyn (T1 + T2)`) is a **per-value** existential: a fat
 pointer `{ data, vtbl }`, each value independently typed. `x as dyn Trait` packs
-a value; calls dispatch via the first `dyn` argument's vtable. `Vec<&dyn Trait>`
-holds differently-typed elements mixed in one buffer (a witness per element).
+a value; calls dispatch via the argument's vtable (`Trait.method(&d)`).
+`Vec<&dyn Trait>` holds differently-typed elements mixed in one buffer (a witness
+per element).  A **multi-trait** `dyn (A + B)` is first-class: `x as dyn (A + B)`
+(the type must satisfy every listed trait) builds a value over a COMBINED vtable
+that unions all constituent methods, so both `A.m(&d)` and `B.m(&d)` dispatch
+directly.  A runtime `d has X` on an existential value re-witnesses through the
+same combined-vtable machinery (§5, Compile-time trait predicate).
 
 **`some X`** (and `some (T1 + T2)`) is a **per-collection** existential: a single
 `some X` value is the same fat pointer as `dyn X`, but `Vec<some X>` is a
@@ -355,6 +360,16 @@ Standard infix and unary operators with conventional precedence. Maka-specific:
   - **`int → *T`**, **`raw *T` observation**, etc.: unchanged per §6.5.
 - `transfer x` / `share x` - only at direct argument positions of `gate`
   function calls (see §7).
+- `T has X` / `v has X` - a boolean trait-membership predicate.  Folds at
+  compile time when the operand's concrete type is known (dead-branch
+  elimination as an `if` condition); an existential (`dyn`/`some`) value operand
+  takes a runtime vtable-pointer switch, and a bare `if (v has X)` narrows `v`
+  to `dyn (its traits + X)` in the then-branch.  Full rules in §5 (Compile-time
+  trait predicate).
+- **Truthiness.** A pointer or integer in a boolean context (an `if`/`while`
+  condition, `!`/`&&`/`||` operand, or a `bool`-typed slot) coerces to `!= null`
+  / `!= 0`, so `if (p) { p! }` works (it opens the same non-null narrowing window
+  as `if (p != null)`).
 - `match (expr) { arms }` - pattern matching, can appear as expression or
   statement. Exhaustiveness checked.
 - `if (cond) { ... } else { ... }` as an expression - arms use `yield` to
@@ -416,6 +431,11 @@ match the field count exactly. Each name may carry `mut` (`(mut q, r) = ...`).
 The right side is evaluated once; an owning field moves out into its binding
 (the temporary drops only what is left, so no double-free). At least two names
 are required — a single `(x) = e;` is an ordinary parenthesized assignment.
+
+An **expression statement** (`expr;`) evaluates the expression and discards any
+value; a non-`unit` result needs no `_ =` ceremony.  An owning temporary so
+discarded (`alloc T{...};`, `make();`) is still hoisted into a hidden binding and
+auto-freed at scope exit, so a bare discard never leaks.
 
 `thread_local` on a `let` emits `static __thread` in C.
 
@@ -733,16 +753,39 @@ The driver accepts:
 
 ### 6.1 Move semantics on owning types
 
-Assigning between `own *T` or `own &T` bindings transfers ownership. The source
-is invalidated; subsequent use is a compile error.
+Assigning between owning bindings (or returning / passing one onward) transfers
+ownership.  What happens to the source depends on its kind:
+
+- **`own *T` AUTO-NULLS.** The nullable owning pointer is set to `null` at the
+  move site (a real runtime `= NULL`, emitted where the move happens - so
+  `x = f(x)` that re-lives `x` is fine).  The source is not hard-invalidated: it
+  is simply `null` afterwards, so re-using it as a value yields `null` (which
+  needs a non-null proof to deref, like any `*T`), and reassigning it before any
+  use is clean.  Using a maybe-moved `own *T` before reassigning it emits a
+  **potential-data-loss WARNING** (the value may be gone); an unconditional
+  reassign first silences it.  The move analysis is conservative: if the pointer
+  *might* have been moved on some path, it is auto-nulled unconditionally.
+- **`own &T` (and owning VALUES - a struct / `Vec` / `String` / array with owning
+  fields) POISON.** A strict, non-null owner has no null state to fall back to, so
+  the source is hard-invalidated and any subsequent use is a compile error.
 
 ```maka
 own &Node a = alloc Node { value = 1 };
-own &Node b = a;                  // move
+own &Node b = a;                  // move (own & poisons)
 // log(a.value);                   // ❌ use of moved value
+
+own *Node p = alloc Node { value = 2 };
+own *Node q = p;                  // move (own * auto-nulls p)
+if (p != null) { log(p!.value); } // OK - p is provably null here, branch skipped
 ```
 
-Returning an owning value moves it to the caller. Passing it as a `own *T` /
+**Field-granular struct move.** A `data` whose owning fields are *all* `own *T`
+moves per-field: copying the struct copies its plain fields and auto-nulls only
+the `own *T` fields.  `S s2 = s;` leaves `s.id` (a plain field) readable and
+`s.fltptr` (`own *f32`) null.  A struct containing an `own &T` (or a nested
+owning value) is not field-granular - it moves and poisons as a whole.
+
+Returning an owning value moves it to the caller.  Passing it as a `own *T` /
 `own &T` argument moves it into the callee.
 
 **Implicit reborrow.** Inside a function with `&mut T` (or `&T`) parameter
