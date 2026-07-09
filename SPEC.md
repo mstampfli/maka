@@ -833,6 +833,16 @@ hand it around as `own *T` (adopting the C pointer with the `unsafe`
   own *FileBody open() { unsafe { return c_fopen(...) as raw *FileBody as own *FileBody; } }
   ```
 
+  Because the block is never libc-freed, a foreign type's `Drop` is its **only**
+  release path, so two rules keep it leak-safe by construction:
+  - **A foreign type MUST implement `Drop`.** Without one, every adopted
+    `own *Body` would leak (own\* skips the libc-free and there is no destructor).
+    An intentionally-unmanaged handle still spells it out with an empty
+    `drop() {}`, making "no release" a visible choice rather than a silent leak.
+  - **`alloc` of a foreign type is rejected.** A foreign block is C-allocated
+    only (`alloc Body {}` + the skipped libc-free would leak); obtain it by
+    adopting a C pointer (`raw *T as own *T`), never by allocating in Maka.
+
 **Handing a pointer back to C** needs no `raw` and no "forget": declare the C
 function's parameter as `own *T`.  Passing your `own *T` to it MOVES it (auto-nulls
 the source), so Maka never frees it - C owns it now.  This is the mirror of the

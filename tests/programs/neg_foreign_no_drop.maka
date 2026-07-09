@@ -1,0 +1,7 @@
+// A foreign (`extern data`) type is never libc-freed by its `own *T` cleanup,
+// so without a `Drop` impl every adopted `own *Body` leaks by construction.
+// The compiler must reject the type up front.
+extern data Body;
+unit main() {
+    log(0);
+}

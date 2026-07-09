@@ -1,0 +1,16 @@
+// The INTENDED foreign pattern: C mallocs the block, Maka adopts it as `own *Body`,
+// and Body's Drop frees it via the C-side free.  own* runs the drop but emits NO
+// libc-free (foreign), so the C free is the single release path - leak-clean.
+extern data Body;
+cblock "
+    #include <stdlib.h>
+    maka_unit* body_make(void) { return (maka_unit*)malloc(16); }
+    void       body_kill(maka_unit* p) { free(p); }
+";
+extern "body_make" raw *unit body_make();
+extern "body_kill" unit body_kill(raw *unit p);
+Body has Drop { unit drop(&mut Body self) { unsafe { body_kill(self as raw *unit); } } }
+unit main() {
+    { unsafe { own *Body b = body_make() as raw *Body as own *Body; } }  // drop -> body_kill frees
+    log(0);
+}

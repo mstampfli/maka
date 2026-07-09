@@ -1,0 +1,9 @@
+// A foreign (`extern data`) type is C-allocated only: `own *Body`'s cleanup
+// skips libc-free, so a Maka-`alloc`'d one would leak.  `alloc` of a foreign
+// type must be rejected - obtain it by adopting a C pointer instead.
+extern data Body;
+Body has Drop { unit drop(&mut Body self) {} }
+unit main() {
+    own *Body b = alloc Body {};
+    log(0);
+}

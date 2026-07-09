@@ -1530,6 +1530,27 @@ impl SymTab {
             }
         }
 
+        // Pass 6: a foreign (`extern data`) type is never libc-freed by its
+        // `own *T` cleanup (the C side owns the block), so its ONLY release path
+        // is a `Drop` impl.  Without one, every adopted `own *Foreign` leaks by
+        // construction.  Require the `Drop` up front - an intentional no-cleanup
+        // foreign type still spells it out with an empty `drop() {}`, making the
+        // "no release" a visible choice rather than a silent leak.
+        let drop_impls = sym.trait_impls.get("Drop").cloned().unwrap_or_default();
+        for s in sym.structs.iter() {
+            if s.is_foreign && !drop_impls.contains(&s.name) {
+                errors.push(SemaError {
+                    msg: format!(
+                        "foreign type `{}` must implement `Drop` - its `own *{}` is never \
+                         libc-freed, so `Drop` is the only path that releases the resource \
+                         (write `drop() {{}}` for an intentionally-unmanaged handle)",
+                        s.name, s.name,
+                    ),
+                    span: s.span,
+                });
+            }
+        }
+
         if errors.is_empty() { Ok(sym) } else { Err(errors) }
     }
 }

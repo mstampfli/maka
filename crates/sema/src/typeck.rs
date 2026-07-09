@@ -1071,6 +1071,15 @@ impl<'a> TypeChecker<'a> {
                     self.check_expr(value, None)
                 };
                 let inner_ty = h.ty.clone();
+                // A foreign (`extern data`) type is C-allocated only: it is never
+                // Maka-allocated (its `own *` skips libc-free, so an alloc'd one
+                // would leak).  Obtain it by adopting a C pointer instead.
+                if let HType::Struct(sid) = &inner_ty {
+                    if self.sym.struct_info(*sid).is_foreign {
+                        let n = self.sym.struct_info(*sid).name.clone();
+                        self.err(format!("cannot `alloc` a foreign type `{}` - it is obtained by adopting a C pointer (`raw *T as own *T`), never allocated by Maka", n), *span);
+                    }
+                }
                 let result_ty = match expected {
                     Some(HType::OwnPtr { mutable, .. }) => HType::OwnPtr { mutable: *mutable, inner: Box::new(inner_ty) },
                     Some(HType::Heap { .. })            => HType::Heap   { inner: Box::new(inner_ty) },
