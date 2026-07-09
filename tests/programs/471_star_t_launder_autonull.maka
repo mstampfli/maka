@@ -1,0 +1,14 @@
+// A `*T` view laundered through a struct field: when the owner it aliases dies,
+// the tracker cannot tie the laundered local back to that owner, so it
+// CONSERVATIVELY auto-nulls the local (with the same data-loss warning a directly-
+// tracked alias gets) instead of letting it dangle.  "Prove where we can; null
+// where we can't."  No use-after-free: the guarded read sees the real null.
+data Node { mut int v; }
+data Holder { mut *Node p; }
+unit main() {
+    own *Node owner = alloc Node { v = 42 };
+    Holder h = Holder { p = owner };   // stash a *Node view in a struct field
+    *Node local = h.p;                 // read it back into a local (laundered)
+    owner = null;                       // free the Node -> `local` conservatively nulled
+    if (local != null) { log(local!.v); } else { log(-1); }   // -1, no UAF
+}

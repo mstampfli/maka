@@ -45,6 +45,16 @@ struct LocalState {
     /// s.as_str(); return v;` (a use-after-free of `s`'s freed buffer) a compile
     /// error, the same as the direct `return s.as_str();` already is.
     holds_dying_borrow: bool,
+    /// This `*T` was bound from a stored pointer the tracker could NOT tie to a
+    /// live owner (a `*T`/`&T` read out of a struct field / array element whose
+    /// container does not itself own the pointee - the "laundered view").  Its real
+    /// owner is unknown, so it cannot join any owner's `deps`/`kill_lid` set.  To
+    /// stay sound WITHOUT proving what it aliases, it is treated CONSERVATIVELY:
+    /// any owner death (a `kill_lid`) might have freed its pointee, so it is
+    /// auto-nulled there (with the same data-loss warning a tracked alias gets).
+    /// "Prove where we can; null where we can't."  Cleared by a re-assignment
+    /// (a fresh bind recomputes it), same as `auto_nulled`.
+    tainted_view: bool,
 }
 
 impl LocalState {
@@ -57,7 +67,24 @@ impl LocalState {
             known_nonnull: false,
             auto_nulled: false,
             holds_dying_borrow: false,
+            tainted_view: false,
         }
+    }
+}
+
+/// Does `e` read a pointer VALUE out of memory the tracker doesn't own - a
+/// `*T`/`&T` field or array element (peeling casts / unwrap / deref)?  This is the
+/// "laundered view" shape (`local = h.p`): the pointer's owner is not recoverable
+/// from the read, so if no owner alias was collected the binding is conservatively
+/// tainted.  A fresh borrow (`&x`), a bare local, an `alloc`, or a call is NOT this
+/// - those have known / separately-tracked provenance.
+fn reads_stored_ptr(e: &HExpr) -> bool {
+    match &e.kind {
+        HExprKind::Field { .. } | HExprKind::Index { .. } => true,
+        HExprKind::Cast { expr, .. } | HExprKind::CheckedCast { expr, .. }
+        | HExprKind::DropWrite(expr) | HExprKind::Unwrap { expr, .. }
+        | HExprKind::DerefRef(expr) => reads_stored_ptr(expr),
+        _ => false,
     }
 }
 
@@ -357,7 +384,7 @@ fn stmt_walk(s: &HStmt, state: &mut Vec<bool>, summaries: &[bool], any: &mut boo
             for i in 0..state.len() {
                 state[i] = match (then_r.terminates, else_r.terminates) {
                     (true, true) => state[i], // both terminate; post-if unreachable
-                    (true, false) => else_state[i], // only then terminates — else's state continues
+                    (true, false) => else_state[i], // only then terminates - else's state continues
                     (false, true) => then_state[i],
                     (false, false) => then_state[i] && else_state[i], // meet
                 };
@@ -880,8 +907,16 @@ impl<'a> Analyzer<'a> {
                 let id = *local;
                 let li_ty = self.f().locals[id.0 as usize].ty.clone();
                 let mut init_deps = self.expr_deps(init);
+                let mut tainted = false;
                 if matches!(li_ty, HType::Ptr { .. } | HType::Ref { .. }) {
-                    self.collect_owner_aliases(init, &mut init_deps);
+                    let mut owner_aliases = HashSet::new();
+                    self.collect_owner_aliases(init, &mut owner_aliases);
+                    // A `*T` bound from a stored-pointer read (a field/element) whose
+                    // owner we could NOT recover is a laundered view - conservatively
+                    // taint it so any owner death nulls it (§6.4 "prove where we can").
+                    tainted = matches!(li_ty, HType::Ptr { .. })
+                        && owner_aliases.is_empty() && reads_stored_ptr(init);
+                    init_deps.extend(owner_aliases);
                 }
                 let init_nonnull = self.expr_nonnull(init);
                 self.state[id.0 as usize].deps = init_deps;
@@ -891,6 +926,7 @@ impl<'a> Analyzer<'a> {
                 // Fresh local: it was never auto-nulled.  A re-bound name shadows
                 // the prior state; explicit init beats any historical collapse.
                 self.state[id.0 as usize].auto_nulled = false;
+                self.state[id.0 as usize].tainted_view = tainted;
                 // Track whether this binding stashes a borrow of a dying local, so
                 // returning it later is caught as the use-after-free it is.
                 let dying = self.expr_is_dying_borrow(init);
@@ -935,7 +971,7 @@ impl<'a> Analyzer<'a> {
                     let value_is_borrow = matches!(value.ty, HType::Ref { .. });
                     if place_root_is_param && value_is_borrow {
                         self.err(
-                            "storing a borrow into a struct field reachable through a parameter would escape the borrow's lifetime — without lifetime annotations the compiler can't prove the borrow's source outlives the struct".to_string(),
+                            "storing a borrow into a struct field reachable through a parameter would escape the borrow's lifetime - without lifetime annotations the compiler can't prove the borrow's source outlives the struct".to_string(),
                             *span,
                         );
                     }
@@ -1495,7 +1531,7 @@ impl<'a> Analyzer<'a> {
                         format!(
                             "pointer `{}` was auto-nulled when its pointee went out of scope and \
                              has not been explicitly re-assigned on every code path since; \
-                             this use observes that silent overwrite — re-assign `{}` yourself \
+                             this use observes that silent overwrite - re-assign `{}` yourself \
                              before reading it",
                             name, name
                         ),
@@ -1535,7 +1571,7 @@ impl<'a> Analyzer<'a> {
                         let span = e.span;
                         self.err(
                             format!(
-                                "reference to local `{}` escapes its scope (via a return, a store into a global, or a push into a longer-lived container) — the local dies here, so the reference would dangle",
+                                "reference to local `{}` escapes its scope (via a return, a store into a global, or a push into a longer-lived container) - the local dies here, so the reference would dangle",
                                 name
                             ),
                             span,
@@ -1928,6 +1964,19 @@ impl<'a> Analyzer<'a> {
                 self.collect_owner_aliases(base, out);
             }
             HExprKind::DerefRef(inner) => self.collect_owner_aliases(inner, out),
+            HExprKind::Call { callee, args } | HExprKind::InlineCall { callee, args, .. } => {
+                // A `*T`/`&T` RETURN aliases whichever args the callee's return
+                // borrows (the `ret_borrows` summary), so fold each borrowed arg's
+                // owner-aliases in: `v = view_of(owner)` then makes `v` depend on
+                // `owner`, so `owner`'s death auto-nulls `v` precisely (no taint).
+                if let Some(cb) = self.ret_borrows.get(callee.0 as usize) {
+                    for (m, &b) in cb.iter().enumerate() {
+                        if b {
+                            if let Some(a) = args.get(m) { self.collect_owner_aliases(a, out); }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -2016,6 +2065,20 @@ impl<'a> Analyzer<'a> {
                     // reset to, so a dangling-borrow use is a hard error.
                     st.poisoned = true;
                 }
+            }
+        }
+        // Conservative tail: a laundered `*T` view (owner unknown) might alias the
+        // thing that just died - we can't prove it doesn't, so auto-null it here
+        // (same runtime NULL + data-loss warning a tracked alias gets).  A fresh
+        // re-bind clears `tainted_view`, so an unrelated view rebuilt after this
+        // is not affected.
+        for (i, st) in self.state.iter_mut().enumerate() {
+            if i as u32 == lid_num { continue; }
+            if st.tainted_view && !st.auto_nulled && matches!(types[i], HType::Ptr { .. }) {
+                nulled.push(LocalId(i as u32));
+                st.auto_nulled = true;
+                st.known_nonnull = false;
+                st.narrowed_until = None;
             }
         }
         // Freeing / moving / scope-exiting the killed local invalidates any

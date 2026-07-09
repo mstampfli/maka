@@ -1,0 +1,12 @@
+// A `*T` view obtained from a FUNCTION RETURN aliases whatever arg the callee's
+// return borrows.  The lifetime pass folds that provenance in (via the ret-borrows
+// summary), so when the owner dies the returned view is auto-nulled precisely -
+// no use-after-free, same auto-null-and-warn as a direct alias.
+data Node { mut int v; }
+*Node view_of(*Node n) { return n; }   // hands the arg back as a view
+unit main() {
+    own *Node owner = alloc Node { v = 42 };
+    *Node v = view_of(owner);   // v aliases owner's Node through the return
+    owner = null;                // free it -> v auto-nulled (tracked via ret-borrows)
+    if (v != null) { log(v!.v); } else { log(-1); }   // -1, no UAF
+}

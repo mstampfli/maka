@@ -1,7 +1,7 @@
-warning at 16:10: pointer `a` was auto-nulled when its pointee went out of scope and has not been explicitly re-assigned on every code path since; this use observes that silent overwrite — re-assign `a` yourself before reading it
-warning at 37:10: pointer `c` was auto-nulled when its pointee went out of scope and has not been explicitly re-assigned on every code path since; this use observes that silent overwrite — re-assign `c` yourself before reading it
-warning at 58:9: pointer `e` was auto-nulled when its pointee went out of scope and has not been explicitly re-assigned on every code path since; this use observes that silent overwrite — re-assign `e` yourself before reading it
-warning at 66:9: pointer `f` was auto-nulled when its pointee went out of scope and has not been explicitly re-assigned on every code path since; this use observes that silent overwrite — re-assign `f` yourself before reading it
-warning at 67:14: pointer `f` was auto-nulled when its pointee went out of scope and has not been explicitly re-assigned on every code path since; this use observes that silent overwrite — re-assign `f` yourself before reading it
+warning at 16:10: pointer `a` was auto-nulled when its pointee went out of scope and has not been explicitly re-assigned on every code path since; this use observes that silent overwrite - re-assign `a` yourself before reading it
+warning at 37:10: pointer `c` was auto-nulled when its pointee went out of scope and has not been explicitly re-assigned on every code path since; this use observes that silent overwrite - re-assign `c` yourself before reading it
+warning at 58:9: pointer `e` was auto-nulled when its pointee went out of scope and has not been explicitly re-assigned on every code path since; this use observes that silent overwrite - re-assign `e` yourself before reading it
+warning at 66:9: pointer `f` was auto-nulled when its pointee went out of scope and has not been explicitly re-assigned on every code path since; this use observes that silent overwrite - re-assign `f` yourself before reading it
+warning at 67:14: pointer `f` was auto-nulled when its pointee went out of scope and has not been explicitly re-assigned on every code path since; this use observes that silent overwrite - re-assign `f` yourself before reading it
 e was nulled
 0

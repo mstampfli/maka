@@ -106,8 +106,8 @@ Five categories of pointer-like things, each with a distinct contract:
 |---|---|---|---|---|---|---|
 | `own *T` | yes | yes (when non-null) | yes | – | `!` | optional / switchable owner |
 | `own &T` | no | yes | (move on assign) | – | auto | guaranteed-owned slot |
-| `*T` | yes | no | yes | no | `!` | non-owning view, cursor, FFI shim |
-| `&T` / `&mut T` | no | no | no | yes | auto | tracked borrow |
+| `*T` | yes | no | yes | yes (null) | `!` | non-owning view, cursor, FFI shim |
+| `&T` / `&mut T` | no | no | no | yes (poison) | auto | tracked borrow |
 | `raw *T` | yes | no | yes | no | `!` (inside `unsafe`) | unsafe escape, FFI |
 
 `own &T` is the same internal type that older specs called `heap T` - the
@@ -115,9 +115,13 @@ binding owns a single heap allocation that is auto-freed at scope exit or
 transferred via assignment. It is non-null by construction and accessed without
 `!`. The legacy keyword `heap` has been removed; write `own &T` instead.
 
-`*T` is the flexible escape valve: nullable, untracked, freely rebindable.
-Linked-list `next` pointers, optional struct fields, downgrades of `own *T` for
-read-only views - all `*T`.  `*T` does **not** own; it cannot be `alloc`'d into
+`*T` is the flexible escape valve: nullable, freely rebindable, and **flow-tracked
+exactly like `&T`** - the difference is only the invalidation mechanism. When the
+owner a `*T` views moves / dies / is null-assigned, the compiler follows the alias
+and AUTO-NULLS it (a runtime `= NULL`, then the next deref needs a fresh non-null
+proof); where a `&T` in the same situation POISONS (a hard compile error). So `*T`
+is not "untracked" - it is a tracked, nullable alias. Linked-list `next` pointers,
+optional struct fields, downgrades of `own *T` for read-only views - all `*T`.  `*T` does **not** own; it cannot be `alloc`'d into
 directly, and there is no `free()` builtin you can call on it - either the owner
 auto-frees it at its scope exit, or you go through an FFI shim for C-allocated
 memory.
@@ -861,7 +865,7 @@ The dispatch per alias kind:
 
 | alias kind | what happens when its owner mutates / moves / null-assigns |
 |---|---|
-| `*T` (nullable, untracked) | flow state auto-NULLs the alias; the next deref needs a fresh non-null proof, comparisons-to-null fire the silent-overwrite warning below |
+| `*T` (nullable, tracked) | flow state auto-NULLs the alias; the next deref needs a fresh non-null proof, comparisons-to-null fire the silent-overwrite warning below |
 | `&T` / `&mut T` (tracked borrow) | the borrow is **poisoned**; any subsequent use is a hard compile error (`use of poisoned reference X`) |
 
 The auto-NULL for `*T` emits the same flow-sensitive warning the compiler used
