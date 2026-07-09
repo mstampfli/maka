@@ -5977,6 +5977,11 @@ impl<'a> TypeChecker<'a> {
 
     fn coerce(&mut self, e: HExpr, target: &HType) -> HExpr {
         if type_eq(&e.ty, target) { return e; }
+        // `int` <-> `i64`: same 64-bit machine type, retype in place (no cast
+        // node - identical `int64_t` representation at the C level).
+        if int_i64_interchangeable(&e.ty, target) {
+            return HExpr { ty: target.clone(), ..e };
+        }
 
         // Pack a concrete homogeneous `Vec<T>` into a dense existential column
         // `Vec<some X>` when `T` implements `X` (implicit).  Attaches the `X`-vtable
@@ -6853,6 +6858,21 @@ pub fn concretize_generic_patterns(t: &HType, sym: &SymTab) -> HType {
     }
 }
 
+/// `int` and `i64` are the SAME machine type - signed, 64-bit, both lowered to
+/// C `int64_t` (`maka_int`).  Maka keeps two spellings (`int` the ergonomic
+/// default, `i64` the explicit width) but a value of one is accepted wherever
+/// the other is wanted: assignment, argument passing, return, and - via the
+/// recursive compatibility rules - through `&mut`/`*`/`[]` wrappers too (the
+/// referent representation is identical, so it is a no-op reinterpret at the C
+/// level).  This is a COERCION, not equality: `type_eq` still distinguishes them
+/// so an exact overload is preferred and match/exhaustiveness are unaffected.
+/// Deliberately does NOT include `isize` (semantically pointer-sized) or any
+/// narrower width (`int` <-> `i32`/`i16`/... still needs an explicit cast).
+pub fn int_i64_interchangeable(a: &HType, b: &HType) -> bool {
+    let is_signed64 = |t: &HType| matches!(t, HType::Int | HType::SizedInt { signed: true, bits: 64 });
+    is_signed64(a) && is_signed64(b)
+}
+
 /// Check if an argument's type is compatible with a parameter type (possibly generic).
 pub fn param_compatible(param: &HType, actual: &HType, type_params: &[String]) -> bool {
     param_compatible_impl(param, actual, type_params, None)
@@ -6937,6 +6957,8 @@ fn param_compatible_impl(param: &HType, actual: &HType, type_params: &[String], 
     }
     // Allow trivial implicit conversions (struct embedding upcast deferred).
     if type_eq(param, actual) { return true; }
+    // `int` and `i64` are the same 64-bit machine type - interchangeable.
+    if int_i64_interchangeable(param, actual) { return true; }
     // Allow null → ptr.
     if matches!(actual, HType::NullT) && matches!(param, HType::Ptr { .. }) { return true; }
     // Implicit reborrow: writing `&mut g` where `g` is already `&mut T` produces

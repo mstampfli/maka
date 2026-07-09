@@ -89,7 +89,15 @@ associated-type paths like `T::Slot` — see §10.5).
 | `f64` / `float` | `double` (IEEE-754 binary64, 8 bytes); `float` and `f64` are aliases |
 
 `int` and the sized integers (`i32`, `u8`, etc.) are **distinct types**.
-Implicit conversion between them is forbidden; use `as` to convert.
+Implicit conversion between them is forbidden; use `as` to convert. The one
+exception: **`int` and `i64` are interchangeable** - they are the same machine
+type (signed, 64-bit, both lowered to `int64_t`), so a value of one is accepted
+wherever the other is wanted (assignment, argument, return, and through
+`&mut`/`*`/`[]` wrappers), with no `as`. `int` is the ergonomic spelling, `i64`
+the explicit-width one; they remain distinct for overload identity (an exact
+match outranks the `int`<->`i64` coercion) and for `match` exhaustiveness. This
+does NOT extend to `isize` (semantically pointer-sized) or any narrower width
+(`int` <-> `i32`/`i16`/... still needs an explicit cast).
 
 For exact (bit-for-bit) float serialization, the builtins `f32_bits(f32) -> int`,
 `bits_f32(int) -> f32`, `f64_bits(float) -> int`, and `bits_f64(int) -> float`

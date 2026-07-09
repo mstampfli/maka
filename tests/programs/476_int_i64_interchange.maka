@@ -1,0 +1,23 @@
+// `int` and `i64` are the same 64-bit machine type and interconvert freely
+// (assignment, argument, return, arithmetic, struct fields).  Narrowing to a
+// smaller width still needs an explicit cast; this is only int <-> i64.
+i64 dbl(i64 x) { return x * 2; }        // i64 in, i64 out
+int inc(int x) { return x + 1; }        // int in, int out
+
+data Box { i64 hi; int lo; }             // one field each spelling
+
+unit main() {
+    int a = 5;
+    i64 b = a;                           // int -> i64 (assign)
+    int c = b;                           // i64 -> int (assign)
+    i64 d = dbl(a);                      // int arg -> i64 param
+    int e = inc(b);                      // i64 arg -> int param
+    i64 f = a + b;                       // mixed arithmetic
+    Box bx = { hi = a, lo = b };         // int -> i64 field, i64 -> int field
+    log(b);                              // 5
+    log(c);                              // 5
+    log(d);                              // 10
+    log(e);                              // 6
+    log(f);                              // 10
+    log(bx.hi + bx.lo);                  // 10
+}
