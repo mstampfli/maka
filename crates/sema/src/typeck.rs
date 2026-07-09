@@ -543,10 +543,22 @@ impl<'a> TypeChecker<'a> {
                 HStmt::Return { value: v, heap_drops: Vec::new(), span: *span }
             }
             ast::Stmt::If { cond, then_block, else_block, span } => {
-                let c = self.check_expr_coerce(cond, &HType::Bool);
-                let then_b = self.check_block(then_block);
-                let else_b = else_block.as_ref().map(|b| self.check_block(b));
-                HStmt::If { cond: c, then_b, else_b, span: *span }
+                // Compile-time `if (T has X)`: a condition that folds to a constant
+                // keeps ONLY the taken branch and discards the other UNCHECKED, so a
+                // trait-dependent call in the dead branch never needs to resolve.
+                let folded = if expr_contains_has(cond) { self.try_comptime_bool(cond) } else { None };
+                if let Some(b) = folded {
+                    let taken = if b { Some(then_block) } else { else_block.as_ref() };
+                    match taken {
+                        Some(blk) => HStmt::Block(self.check_block(blk)),
+                        None => self.empty_block_stmt(*span),
+                    }
+                } else {
+                    let c = self.check_expr_coerce(cond, &HType::Bool);
+                    let then_b = self.check_block(then_block);
+                    let else_b = else_block.as_ref().map(|b| self.check_block(b));
+                    HStmt::If { cond: c, then_b, else_b, span: *span }
+                }
             }
             ast::Stmt::While { cond, body, span } => {
                 let c = self.check_expr_coerce(cond, &HType::Bool);
@@ -1143,6 +1155,17 @@ impl<'a> TypeChecker<'a> {
                     ty: HType::Unit,
                     span: *span,
                 }
+            }
+            ast::Expr::HasPred { lhs, trait_name, span } => {
+                // `T has X` in value position (e.g. `bool b = T has X;`) folds to a
+                // compile-time boolean literal.  As an `if`/`match` condition the
+                // dead-branch elimination is handled earlier (check_stmt / check_match),
+                // so reaching here means an ordinary boolean use.
+                let b = self.eval_has_pred(lhs, trait_name, *span).unwrap_or_else(|| {
+                    self.err(format!("cannot evaluate `has {}`: the operand type is not concrete here", trait_name), *span);
+                    false
+                });
+                HExpr { kind: HExprKind::LitBool(b), ty: HType::Bool, span: *span }
             }
         }
     }
@@ -5227,6 +5250,67 @@ impl<'a> TypeChecker<'a> {
         self.check_block_stmt(unrolled)
     }
 
+    /// Compile-time trait-membership fold for `T has X` / `expr has X`.  Returns
+    /// `Some(true|false)` when the operand's concrete type is known and the
+    /// predicate is decided at compile time (the common case: a type parameter
+    /// post-monomorphization, or a nominal type); `None` only when the operand
+    /// type is still an unresolved type variable (possible while checking a
+    /// generic template before monomorphization).  Uses the SAME satisfaction
+    /// decision as a `where T has X` bound, so the two agree by construction.
+    /// A runtime existential (`dyn`/`some`) operand needs a runtime check that is
+    /// not yet implemented; those report an error and return `Some(false)`.
+    fn eval_has_pred(&mut self, lhs: &ast::HasLhs, trait_name: &str, span: Span) -> Option<bool> {
+        let recv_ty: HType = match lhs {
+            ast::HasLhs::Val(e) => self.check_expr(e, None).ty,
+            // A bare name that is a local VALUE (and not shadowing a type name) is
+            // the value form: query the value's static type.  A name that is also
+            // a type / type-parameter is read as the type (the `T has X` intent).
+            ast::HasLhs::Ty(ast::Type::Named(name, _))
+                if self.lookup(name).is_some()
+                    && !self.cur_type_params.contains(name)
+                    && self.sym.struct_by_name(name).is_none()
+                    && self.sym.enum_by_name(name).is_none() =>
+            {
+                let id = self.lookup(name).unwrap();
+                self.local(id).ty.clone()
+            }
+            ast::HasLhs::Ty(t) => self.resolve_local_ty(t),
+        };
+        if is_existential(&recv_ty) {
+            self.err(format!(
+                "runtime `has {t}` on an existential (`dyn`/`some`) value is not yet supported; \
+                 only a compile-time `T has {t}` on a concrete type or type parameter is folded",
+                t = trait_name), span);
+            return Some(false);
+        }
+        if has_tyvar(&recv_ty) { return None; }
+        if !self.sym.is_trait(trait_name) {
+            self.err(format!("`{}` is not a trait in a `has` predicate", trait_name), span);
+            return Some(false);
+        }
+        Some(crate::resolve::type_impls_trait_visible(
+            self.sym, trait_name, &recv_ty, &self.cur_module, &self.cur_has_imports))
+    }
+
+    /// Fold a boolean condition built from `has` predicates, boolean literals, and
+    /// `!` / `&&` / `||` to a compile-time constant.  Returns `None` if any leaf is
+    /// a runtime value.  Short-circuits, so a dead `has`-guarded runtime operand is
+    /// not required to be constant (`(T has X)==false && rt` -> `false`).
+    fn try_comptime_bool(&mut self, e: &ast::Expr) -> Option<bool> {
+        match e {
+            ast::Expr::Lit(ast::Lit::Bool(b), _) => Some(*b),
+            ast::Expr::HasPred { lhs, trait_name, span } => self.eval_has_pred(lhs, trait_name, *span),
+            ast::Expr::Un { op: ast::UnOp::Not, expr, .. } => self.try_comptime_bool(expr).map(|b| !b),
+            ast::Expr::Bin { op: ast::BinOp::And, lhs, rhs, .. } => {
+                if !self.try_comptime_bool(lhs)? { Some(false) } else { self.try_comptime_bool(rhs) }
+            }
+            ast::Expr::Bin { op: ast::BinOp::Or, lhs, rhs, .. } => {
+                if self.try_comptime_bool(lhs)? { Some(true) } else { self.try_comptime_bool(rhs) }
+            }
+            _ => None,
+        }
+    }
+
     /// Is there a `next` method registered for the given struct whose return is
     /// `Option<elem_ty>`?  The iterator protocol is: receiver = `&mut Self`,
     /// return = `Option<T>` where T matches the loop variable's declared type.
@@ -5304,7 +5388,90 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Lower a single match-arm body to `(block, optional value)`.  Shared by the
+    /// per-arm loop in `check_match` and by the compile-time-folded single-arm fast
+    /// path.  `result_ty` is the arm result type inferred from earlier arms (if
+    /// any); `expected` is the surrounding context's expected type.  A value-
+    /// producing block routes `yield` through a synthetic result local (or, for an
+    /// owning result, through `yield_expected`) exactly as before the extraction.
+    fn lower_arm_body(&mut self, body: &ast::ArmBody, arm_span: Span,
+                      result_ty: Option<&HType>, expected: Option<&HType>, as_stmt: bool)
+        -> (HBlock, Option<HExpr>)
+    {
+        match body {
+            ast::ArmBody::Expr(e) => {
+                let h = self.check_expr(e, result_ty);
+                let block = HBlock { stmts: Vec::new(), heap_to_free: Vec::new(), ptr_nulls: Vec::new(), stmt_nulls: Vec::new(), span: arm_span };
+                (block, Some(h))
+            }
+            ast::ArmBody::Block(b) => {
+                let arm_ty = result_ty.cloned().or_else(|| expected.cloned());
+                let target = if as_stmt { None } else {
+                    arm_ty.as_ref().and_then(|t| self.zero_expr(t, arm_span).map(|z| (t.clone(), z)))
+                };
+                if let Some((t, init)) = target {
+                    let yv = self.fresh_local("__yield".to_string(), t.clone(), StorageClass::Stack, true, true, arm_span);
+                    self.yield_target.push((yv, t.clone()));
+                    self.in_arm_body += 1;
+                    let mut block = self.check_block(b);
+                    self.in_arm_body -= 1;
+                    self.yield_target.pop();
+                    block.stmts.insert(0, HStmt::Let { local: yv, init, span: arm_span });
+                    let value = HExpr { kind: HExprKind::Local(yv), ty: t, span: arm_span };
+                    (block, Some(value))
+                } else {
+                    let pushed = if !as_stmt {
+                        if let Some(t) = arm_ty.clone() { self.yield_expected.push(t); true } else { false }
+                    } else { false };
+                    self.in_arm_body += 1;
+                    let mut block = self.check_block(b);
+                    self.in_arm_body -= 1;
+                    if pushed { self.yield_expected.pop(); }
+                    // Statement-form matches don't extract a value.  Otherwise the
+                    // trailing yield (lowered to an ExprStmt) becomes the arm value
+                    // and must be REMOVED from the block, else it is emitted twice.
+                    let value = if as_stmt {
+                        None
+                    } else if matches!(block.stmts.last(), Some(HStmt::ExprStmt(_))) {
+                        match block.stmts.pop() {
+                            Some(HStmt::ExprStmt(e)) => Some(e),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    (block, value)
+                }
+            }
+        }
+    }
+
     fn check_match(&mut self, scrutinee: &ast::Expr, arms: &[ast::MatchArm], as_stmt: bool, sp: Span, expected: Option<&HType>) -> HExpr {
+        // Compile-time `if (T has X)` in expression position desugars (at parse
+        // time) to `match (T has X) { true => .., else => .. }`.  When the scrutinee
+        // folds to a compile-time boolean, select the single live arm and check ONLY
+        // it - the dead arm, with its trait-dependent calls, is discarded unchecked.
+        if expr_contains_has(scrutinee) {
+            if let Some(b) = self.try_comptime_bool(scrutinee) {
+                if let Some(arm) = pick_bool_arm(arms, b) {
+                    self.enter_scope();
+                    let (block, value) = self.lower_arm_body(&arm.body, arm.span, None, expected, as_stmt);
+                    self.leave_scope();
+                    let ty = value.as_ref().map(|v| v.ty.clone()).unwrap_or(HType::Unit);
+                    // A single `else` arm over the folded bool literal: codegen emits
+                    // the body unconditionally (the C compiler drops the dead test).
+                    let scrut_h = HExpr { kind: HExprKind::LitBool(b), ty: HType::Bool, span: sp };
+                    return HExpr {
+                        kind: HExprKind::Match {
+                            scrutinee: Box::new(scrut_h),
+                            arms: vec![HMatchArm { kind: HArmKind::Else, guard: None, body: block, value, scrut_binding: None }],
+                            result_ty: ty.clone(),
+                        },
+                        ty, span: sp,
+                    };
+                }
+            }
+        }
         let scrut_h = self.check_expr(scrutinee, None);
         let scrut_ty = scrut_h.ty.clone();
 
@@ -5330,68 +5497,7 @@ impl<'a> TypeChecker<'a> {
                 has_else = true;
             }
             let guard_h = arm.guard.as_ref().map(|g| self.check_expr_coerce(g, &HType::Bool));
-            let (body, value) = match &arm.body {
-                ast::ArmBody::Expr(e) => {
-                    let h = self.check_expr(e, result_ty.as_ref());
-                    let block = HBlock { stmts: Vec::new(), heap_to_free: Vec::new(), ptr_nulls: Vec::new(), stmt_nulls: Vec::new(), span: arm.span };
-                    (block, Some(h))
-                }
-                ast::ArmBody::Block(b) => {
-                    // When the arm's result type is known (from a prior arm or the
-                    // surrounding context), route `yield` through a synthetic result
-                    // local initialized to ZeroInit.  This captures yields nested
-                    // inside `if`/`while`/block statements, not just a trailing
-                    // `yield`.  Owning results use this path too: the synthetic local
-                    // flows out as the arm value, which the lifetime pass now tracks
-                    // as a move (visit_matches_in_expr excludes it from the arm
-                    // body's drop set), so there is no double free; and the
-                    // free-on-reassign of its ZeroInit start value is a no-op.
-                    let arm_ty = result_ty.clone().or_else(|| expected.cloned());
-                    let target = if as_stmt { None } else {
-                        arm_ty.as_ref()
-                            .and_then(|t| self.zero_expr(t, arm.span).map(|z| (t.clone(), z)))
-                    };
-                    if let Some((t, init)) = target {
-                        let yv = self.fresh_local("__yield".to_string(), t.clone(), StorageClass::Stack, true, true, arm.span);
-                        self.yield_target.push((yv, t.clone()));
-                        self.in_arm_body += 1;
-                        let mut block = self.check_block(b);
-                        self.in_arm_body -= 1;
-                        self.yield_target.pop();
-                        block.stmts.insert(0, HStmt::Let { local: yv, init, span: arm.span });
-                        let value = HExpr { kind: HExprKind::Local(yv), ty: t, span: arm.span };
-                        (block, Some(value))
-                    } else {
-                        // Owning-value arm: provide the expected result type to a
-                        // trailing `yield` (via `yield_expected`, not a synthetic
-                        // local) so an `alloc` picks the right owning kind.
-                        let pushed = if !as_stmt {
-                            if let Some(t) = arm_ty.clone() { self.yield_expected.push(t); true } else { false }
-                        } else { false };
-                        self.in_arm_body += 1;
-                        let mut block = self.check_block(b);
-                        self.in_arm_body -= 1;
-                        if pushed { self.yield_expected.pop(); }
-                        // Statement-form matches don't extract a value from the
-                        // arm body.  Otherwise the trailing yield (lowered to an
-                        // ExprStmt) becomes the arm value and must be REMOVED from
-                        // the block, else it is emitted twice - once as a discarded
-                        // statement and once as the value - which double-evaluates
-                        // (and leaks) an owning alloc.
-                        let value = if as_stmt {
-                            None
-                        } else if matches!(block.stmts.last(), Some(HStmt::ExprStmt(_))) {
-                            match block.stmts.pop() {
-                                Some(HStmt::ExprStmt(e)) => Some(e),
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        };
-                        (block, value)
-                    }
-                }
-            };
+            let (body, value) = self.lower_arm_body(&arm.body, arm.span, result_ty.as_ref(), expected, as_stmt);
             if let Some(v) = &value {
                 if result_ty.is_none() { result_ty = Some(v.ty.clone()); }
             }
@@ -6238,6 +6344,43 @@ fn has_tyvar(t: &HType) -> bool {
     }
 }
 
+/// Is this type an existential (`dyn X` / `some X`), possibly behind a pointer?
+/// A `has` predicate on such a value needs a RUNTIME check (the concrete type is
+/// hidden), which is not yet supported - only concrete-type operands fold.
+fn is_existential(t: &HType) -> bool {
+    match t {
+        HType::Dyn { .. } => true,
+        HType::Ref { inner, .. }
+        | HType::Ptr { inner, .. }
+        | HType::RawPtr { inner, .. }
+        | HType::OwnPtr { inner, .. }
+        | HType::Heap { inner } => is_existential(inner),
+        _ => false,
+    }
+}
+
+/// Does this condition contain a `has` predicate at its logical top level (through
+/// `!` / `&&` / `||`)?  Gates the compile-time dead-branch fold so ordinary
+/// conditions (`if (flag)`, `match (someBool)`) are untouched.
+fn expr_contains_has(e: &ast::Expr) -> bool {
+    match e {
+        ast::Expr::HasPred { .. } => true,
+        ast::Expr::Un { expr, .. } => expr_contains_has(expr),
+        ast::Expr::Bin { lhs, rhs, .. } => expr_contains_has(lhs) || expr_contains_has(rhs),
+        _ => false,
+    }
+}
+
+/// For a match whose scrutinee folded to the compile-time boolean `b`, pick the
+/// single live arm: the `true`/`false` literal arm matching `b`, else the
+/// `else`/wildcard arm.  Returns None (declining the fold) if any arm carries a
+/// runtime guard, since a guard makes static arm selection unsound.
+fn pick_bool_arm(arms: &[ast::MatchArm], b: bool) -> Option<&ast::MatchArm> {
+    if arms.iter().any(|a| a.guard.is_some()) { return None; }
+    arms.iter().find(|a| matches!(&a.pattern, ast::Pattern::Lit(ast::Lit::Bool(v), _) if *v == b))
+        .or_else(|| arms.iter().find(|a| matches!(&a.pattern, ast::Pattern::Else(_))))
+}
+
 /// Human-readable rendering of a type, used for the `f.type` reflection string.
 fn htype_display(sym: &SymTab, t: &HType) -> String {
     match t {
@@ -6372,6 +6515,7 @@ fn rw_expr(e: &mut ast::Expr, c: &FieldCtx) {
             if let Some(r) = receiver { rw_expr(r, c); }
             for a in args { rw_expr(a, c); }
         }
+        HasPred { lhs, .. } => if let ast::HasLhs::Val(e2) = lhs { rw_expr(e2, c); },
     }
 }
 

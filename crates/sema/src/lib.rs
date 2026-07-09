@@ -1367,14 +1367,14 @@ fn rewrite_placeholders(f: &mut HFunc, mapping: &[u32]) {
 /// and universally visible - you can't meaningfully `use` (or fail to `use`) the
 /// `Add` impl for `int` the way you would for a user-defined type, and overlap
 /// rules keep it unique, so it is always in scope.
-fn is_primitive_type_key(k: &str) -> bool {
+pub(crate) fn is_primitive_type_key(k: &str) -> bool {
     matches!(k,
         "int" | "bool" | "char" | "string" | "float" | "unit"
         | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
         | "isize" | "usize" | "f32" | "f64")
 }
 
-fn has_impl_visible(
+pub(crate) fn has_impl_visible(
     h: &hir::HasImpl,
     from_module: &[String],
     caller_has_imports: &[maka_ast::HasImport],

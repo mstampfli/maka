@@ -1,0 +1,54 @@
+// Edge cases for compile-time `if (T has X)`: no-else form, `||`, nesting, and a
+// compound condition mixing a `has` predicate with a runtime flag (which falls
+// back to a normal runtime branch, both arms checked).
+attr A { int fa(&_ self); }
+attr B { int fb(&_ self); }
+
+data Both { int v; }
+Both has A { int fa(&Both self) { return self.v; } }
+Both has B { int fb(&Both self) { return self.v * 2; } }
+
+data OnlyA { int v; }
+OnlyA has A { int fa(&OnlyA self) { return self.v; } }
+
+data Nada { int v; }   // implements nothing
+
+// No-else form: the body is simply dropped when T lacks A.
+int noelse<T>(&T v) {
+    mut int r = 50;
+    if (T has A) { r = v.fa(); }
+    return r;
+}
+// `||`.
+int either<T>(&T v) {
+    if (T has A || T has B) { return 1; } else { return 0; }
+}
+// Nested folds.
+int nested<T>(&T v) {
+    if (T has A) {
+        if (T has B) { return v.fa() + v.fb(); } else { return v.fa(); }
+    } else { return -1; }
+}
+// `has` AND a runtime flag: when T has A this is a real runtime branch (both
+// arms type-checked); when T lacks A the whole thing folds false and the
+// then-branch (with its `v.fa()`) is discarded unchecked.
+int mixed<T>(&T v, bool flag) {
+    if (T has A && flag) { return v.fa(); } else { return -2; }
+}
+
+unit main() {
+    Both both = { v = 10 };
+    OnlyA oa = { v = 3 };
+    Nada no = { v = 7 };
+    log(noelse(&both));         // 10
+    log(noelse(&no));           // 50
+    log(either(&both));         // 1
+    log(either(&oa));           // 1
+    log(either(&no));           // 0
+    log(nested(&both));         // 30
+    log(nested(&oa));           // 3
+    log(nested(&no));           // -1
+    log(mixed(&both, true));    // 10
+    log(mixed(&both, false));   // -2
+    log(mixed(&no, true));      // -2
+}

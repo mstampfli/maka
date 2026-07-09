@@ -569,6 +569,51 @@ Rules and limits:
 - Only struct fields are reflected; enum-variant reflection is not yet provided.
 - Embedded (`embed`) fields are reached as ordinary fields of the outer struct.
 
+### Compile-time trait predicate (`if (T has X)`)
+
+`T has X` is a boolean-valued predicate that asks whether a type implements a
+trait.  When its operand's concrete type is known - the common case: a type
+parameter after monomorphization, or a nominal type - it **folds at compile time**
+to `true` / `false`, using the SAME satisfaction rule (and visibility rule) as a
+`where T has X` bound, so the two agree by construction.
+
+As the condition of an `if` (or if-expression), a folded predicate performs
+**dead-branch elimination**: only the taken branch is type-checked and emitted;
+the other is discarded UNCHECKED.  So a trait-dependent call in the untaken branch
+never has to resolve - the mechanism is Zig's `comptime if`, and it adds **zero**
+runtime overhead (no branch, no vtable, no type tag survives to codegen):
+
+```maka
+attr Weigh { int weight(&_ self); }
+data Gram { int g; }
+Gram has Weigh { int weight(&Gram self) { return self.g; } }
+data Blob { int n; }             // implements nothing
+
+int describe<T>(&T v) {
+    if (T has Weigh) { return v.weight(); }   // for Blob this line is discarded, never checked
+    else             { return -1; }
+}
+// describe(&gram) -> the weight; describe(&blob) -> -1 (compiles: no `weight` on Blob needed)
+```
+
+Rules and forms:
+
+- The operand may be a **type** (`T has X`, `Point has X`, `Vec<int> has X`,
+  `*Foo has X`) or a **value** whose static type is queried (`v has X`); a bare
+  name that is both a type and an in-scope local is read as the type.
+- Compound conditions fold too: `!`, `&&`, `||` over `has` predicates and boolean
+  literals, with short-circuit (`(T has X) && rt` folds to `false` when `T` lacks
+  `X`, so the runtime operand `rt` is not required).  Mixing a `has` predicate with
+  a runtime value that does not fold away falls back to an ordinary runtime branch
+  (both arms type-checked).
+- In value position (`bool b = T has X;`) the predicate is just a compile-time
+  boolean literal.
+- A predicate on an **existential** (`dyn X` / `some X`) value would need a runtime
+  type check (the concrete type is hidden); that is not yet supported and is a
+  compile error.  Only compile-time folding on a concrete operand is provided.
+- The right operand must name a trait/attr; a bogus name is an error, not a
+  silent `false`.
+
 A module-scope `Type NAME = expr;` declares a global.  Without `mut` the
 global is read-only; with `mut` it is writable from any function in the
 module.  Globals are emitted as `static <ctype> __maka_global__NAME = init;`

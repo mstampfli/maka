@@ -300,6 +300,34 @@ pub fn underlying_struct_key(sym: &SymTab, ty: &HType) -> Option<String> {
     }
 }
 
+/// Does concrete type `recv` have a `has <trait_name>` impl that is visible from
+/// `from_module` (given its `has`-imports)?  This is the exact "does T satisfy the
+/// `has X` predicate" decision, sharing the same primitives the function
+/// `where`-bound check uses (`underlying_struct_key` for key normalization,
+/// `receiver_unify_with_sym` for generic receivers like `*T has Stored`, and
+/// `has_impl_visible` for the `pub`/`use` visibility rule), so `if (T has X)`
+/// agrees with `where T has X` by construction.  Attr-arg / associated-type
+/// refinements (`Convert<int>`, `Slot = R`) are not part of the surface `T has X`
+/// predicate, so any impl of the named attr on the type counts.
+pub(crate) fn type_impls_trait_visible(
+    sym: &SymTab,
+    trait_name: &str,
+    recv: &HType,
+    from_module: &[String],
+    has_imports: &[ast::HasImport],
+) -> bool {
+    let key = underlying_struct_key(sym, recv);
+    sym.has_impls.iter().any(|h| {
+        if h.attr_name != trait_name { return false; }
+        let name_ok = match &key {
+            Some(k) => h.type_key == *k,
+            None => false,
+        } || receiver_unify_with_sym(&h.receiver_pattern, recv, &h.receiver_tyvars, sym).is_some();
+        if !name_ok { return false; }
+        crate::has_impl_visible(h, from_module, has_imports)
+    })
+}
+
 /// Walk a resolved type, reporting an error for every Struct or Enum reference
 /// whose declaring module differs from `from_module` and which is either not
 /// `pub` or not imported by the current file.  Same rule that already applies
@@ -1836,6 +1864,10 @@ fn substitute_expr_placeholders_ty(e: &mut ast::Expr, recv: &ast::Type) {
             if let Some(r) = receiver.as_mut() { substitute_expr_placeholders_ty(r, recv); }
             for a in args { substitute_expr_placeholders_ty(a, recv); }
         }
+        HasPred { lhs, .. } => match lhs {
+            ast::HasLhs::Ty(t) => *t = t.subst_placeholder_ty(recv),
+            ast::HasLhs::Val(e) => substitute_expr_placeholders_ty(e, recv),
+        },
     }
 }
 
@@ -1953,6 +1985,10 @@ fn substitute_expr_placeholders(e: &mut ast::Expr, impl_ty: &str) {
             if let Some(r) = receiver.as_mut() { substitute_expr_placeholders(r, impl_ty); }
             for a in args { substitute_expr_placeholders(a, impl_ty); }
         }
+        HasPred { lhs, .. } => match lhs {
+            ast::HasLhs::Ty(t) => *t = t.subst_placeholder(impl_ty),
+            ast::HasLhs::Val(e) => substitute_expr_placeholders(e, impl_ty),
+        },
     }
 }
 

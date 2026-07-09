@@ -1,0 +1,68 @@
+// Compile-time `if (T has X)`: folds per-monomorphization, discards the dead
+// branch UNCHECKED (so a trait-dependent call in it never needs to resolve),
+// and adds no runtime overhead because T is concrete.
+attr Weigh { int weight(&_ self); }
+attr Tag   { int tag_of(&_ self); }
+
+data Gram { int g; }
+Gram has Weigh { int weight(&Gram self) { return self.g; } }
+Gram has Tag   { int tag_of(&Gram self) { return 100; } }
+
+data Kilo { int k; }
+Kilo has Weigh { int weight(&Kilo self) { return self.k * 1000; } }
+
+data Blob { int n; }   // implements NOTHING
+
+// Dead-branch elimination: for `Blob`, `v.weight()` in the then-branch is never
+// checked (Blob has no `weight`), the else path is taken.
+int describe<T>(&T v) {
+    if (T has Weigh) { return v.weight(); } else { return -1; }
+}
+
+// Compound `&&`: needs both traits.
+int full<T>(&T v) {
+    if (T has Weigh && T has Tag) { return v.weight() + v.tag_of(); }
+    else { return 0; }
+}
+
+// Negation.
+int inv<T>(&T v) {
+    if (!(T has Weigh)) { return 999; } else { return v.weight(); }
+}
+
+// Value position: folds to a compile-time boolean.
+bool can_weigh<T>(&T v) { return T has Weigh; }
+
+// If-expression (value-yielding) form.
+int pick<T>(&T v) {
+    int r = if (T has Weigh) { yield v.weight(); } else { yield -7; };
+    return r;
+}
+
+// Concrete (non-generic) operand and a concrete-typed value operand.
+int concrete_checks(&Gram g) {
+    mut int acc = 0;
+    if (Gram has Weigh) { acc = acc + 1; }        // type operand, folds true
+    if (Blob has Weigh) { acc = acc + 100; }      // folds false, skipped
+    if (g has Weigh)    { acc = acc + 10; }       // value operand, folds true
+    return acc;
+}
+
+unit main() {
+    Gram g = { g = 5 };
+    Kilo k = { k = 2 };
+    Blob b = { n = 9 };
+    log(describe(&g));   // 5
+    log(describe(&k));   // 2000
+    log(describe(&b));   // -1
+    log(full(&g));       // 105
+    log(full(&k));       // 0  (Kilo has Weigh but not Tag)
+    log(full(&b));       // 0
+    log(inv(&g));        // 5
+    log(inv(&b));        // 999
+    if (can_weigh(&g)) { log(1); } else { log(0); }   // 1
+    if (can_weigh(&b)) { log(1); } else { log(0); }   // 0
+    log(pick(&k));       // 2000
+    log(pick(&b));       // -7
+    log(concrete_checks(&g));   // 11
+}

@@ -1,0 +1,7 @@
+// The right operand of `has` must be a trait/attr.  A bogus name is rejected
+// (not silently treated as "false").
+data Foo { int x; }
+unit main() {
+    Foo f = { x = 1 };
+    if (Foo has Bogus) { log(1); } else { log(0); }
+}

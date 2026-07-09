@@ -286,6 +286,21 @@ pub enum Expr {
     /// reaches attr `Stored` even when a local named `Stored` is in scope).
     /// `receiver = Some(_)` for the postfix form `r.Attr::method()`.
     AttrCall { attr: String, name: String, receiver: Option<Box<Expr>>, args: Vec<Expr>, span: Span },
+    /// `T has Trait` / `expr has Trait` — a trait-membership predicate, boolean-valued.
+    /// Folded at compile time when the operand's concrete type is known (the common
+    /// case: a type parameter post-monomorphization, or a nominal type); as an `if`
+    /// condition the untaken branch is then discarded unchecked, so a trait-dependent
+    /// call in the dead branch never needs to resolve (Zig `comptime if` semantics).
+    HasPred { lhs: HasLhs, trait_name: String, span: Span },
+}
+
+/// Left operand of a `has` predicate (see `Expr::HasPred`).
+#[derive(Debug, Clone)]
+pub enum HasLhs {
+    /// `T has Trait` — the LHS parsed as a type (a type parameter or nominal type).
+    Ty(Type),
+    /// `expr has Trait` — the LHS parsed as a value expression (its type is queried).
+    Val(Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +342,7 @@ impl Expr {
             | Expr::VariantCtor { span: s, .. }
             | Expr::Match { span: s, .. }
             | Expr::Lambda { span: s, .. }
+            | Expr::HasPred { span: s, .. }
             | Expr::WallMod { span: s, .. } => *s,
         }
     }

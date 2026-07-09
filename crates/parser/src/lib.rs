@@ -1803,11 +1803,36 @@ impl Parser {
         Ok(lhs)
     }
     fn parse_and(&mut self) -> Result<Expr, ParseError> {
-        let mut lhs = self.parse_eq()?;
+        let mut lhs = self.parse_has_pred()?;
         while self.eat(&TokKind::AndAnd) {
-            let rhs = self.parse_eq()?;
+            let rhs = self.parse_has_pred()?;
             let span = lhs.span();
             lhs = Expr::Bin { op: BinOp::And, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+        }
+        Ok(lhs)
+    }
+    /// `T has Trait` / `expr has Trait` — a trait-membership predicate.  Binds
+    /// tighter than `&&`/`||` (so `T has A && T has B` groups as expected) and
+    /// is non-chainable.  The type-operand form is tried first via a speculative
+    /// `parse_type` (covers `T`, `Point`, `Vec<int>`, `*Foo`, ...); on no trailing
+    /// `has` the position is restored and a normal expression is parsed, which may
+    /// still carry a trailing `has` (the value-operand form, `col[0] has Trait`).
+    fn parse_has_pred(&mut self) -> Result<Expr, ParseError> {
+        let start = self.peek_span();
+        let save = self.pos;
+        if let Ok(ty) = self.parse_type() {
+            if self.at(&TokKind::Has) {
+                self.bump(); // `has`
+                let (trait_name, _) = self.expect_ident("trait name after `has`")?;
+                return Ok(Expr::HasPred { lhs: HasLhs::Ty(ty), trait_name, span: start });
+            }
+        }
+        self.pos = save;
+        let lhs = self.parse_eq()?;
+        if self.at(&TokKind::Has) {
+            self.bump(); // `has`
+            let (trait_name, _) = self.expect_ident("trait name after `has`")?;
+            return Ok(Expr::HasPred { lhs: HasLhs::Val(Box::new(lhs)), trait_name, span: start });
         }
         Ok(lhs)
     }
