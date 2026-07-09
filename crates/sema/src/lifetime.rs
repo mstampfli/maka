@@ -1781,6 +1781,15 @@ impl<'a> Analyzer<'a> {
             self.pending_stmt_nulls.extend(n);
             return;
         }
+        // A field-granular struct (all owning fields are own*) is a stack VALUE:
+        // copying it copies the plain fields and moves only the own* fields
+        // (codegen nulls them at the move site), so the source stays usable - do
+        // NOT whole-move / error.  A later use of a moved own* field faults at its
+        // deref (needs a fresh non-null proof); the plain fields stay readable.
+        if is_own_ptr_granular(self.sym, &owner_ty) {
+            self.invalidate_place_facts(id.0);
+            return;
+        }
         if self.state[id.0 as usize].moved {
             self.err(format!("use of moved value `{}`", name), sp);
             return;
@@ -2811,6 +2820,19 @@ fn check_scoped_thread_borrows(f: &HFunc, errors: &mut Vec<SemaError>) {
 /// `drop` is the resource release).  Mirrors codegen's `type_impls_drop`.
 pub(crate) fn type_impls_drop(sym: &SymTab, name: &str) -> bool {
     sym.trait_impls.get("Drop").is_some_and(|s| s.contains(name))
+}
+
+/// A struct all of whose owning fields are `own *T` (nullable): a field-granular
+/// stack VALUE.  Copying it copies the plain fields and moves (auto-nulls) only
+/// the own* fields, so the source stays usable.  Excludes own& / Vec / nested
+/// owning fields (those keep whole-value move).  Mirrors codegen's
+/// `struct_own_ptr_granular`.
+pub(crate) fn is_own_ptr_granular(sym: &SymTab, ty: &HType) -> bool {
+    if let HType::Struct(sid) = ty {
+        let si = sym.struct_info(*sid);
+        si.fields.iter().all(|fi| !ty_owns_heap(sym, &fi.ty) || matches!(fi.ty, HType::OwnPtr { .. }))
+            && si.fields.iter().any(|fi| matches!(fi.ty, HType::OwnPtr { .. }))
+    } else { false }
 }
 
 pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {

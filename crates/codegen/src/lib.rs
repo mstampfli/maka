@@ -9964,10 +9964,21 @@ void __maka_pool_free(maka_unit* poolv) {
         // no-op (`free(NULL)`).  A borrow of the same local is coerced to `*T`/`&T`
         // (different kind/type), so this hits moves only.
         if let HExprKind::Local(id) = &e.kind {
+            let place = self.local_name(*id, &f.locals[id.0 as usize].name);
+            let ty = self.c_type(&e.ty);
             if matches!(&e.ty, HType::OwnPtr { .. }) {
-                let place = self.local_name(*id, &f.locals[id.0 as usize].name);
-                let ty = self.c_type(&e.ty);
                 return format!("(__extension__ ({{ {0} __mc = {1}; {2} = NULL; __mc; }}))", ty, s, place);
+            }
+            // Field-granular struct moved by value: copy it, null its own* fields
+            // in the source (plain fields stay readable, ownership moves).
+            if self.struct_own_ptr_granular(&e.ty) {
+                if let HType::Struct(sid) = &e.ty {
+                    let nulls: String = self.sym.struct_info(*sid).fields.clone().iter()
+                        .filter(|fi| matches!(fi.ty, HType::OwnPtr { .. }))
+                        .map(|fi| format!("{}.{} = NULL; ", place, c_ident(&fi.name)))
+                        .collect();
+                    return format!("(__extension__ ({{ {0} __mc = {1}; {2}__mc; }}))", ty, s, nulls);
+                }
             }
         }
         if !matches!(&e.kind, HExprKind::Field { .. } | HExprKind::Index { .. }) { return s; }
@@ -9984,6 +9995,32 @@ void __maka_pool_free(maka_unit* poolv) {
         format!("(__extension__ ({{ {0} __mc = {1}; {2} = {3}; __mc; }}))", ty, s, place, nullv)
     }
 
+    /// A struct all of whose owning fields are `own *T` (nullable) - the
+    /// field-granular-movable shape: copying it copies the plain fields and moves
+    /// (nulls) the own* fields, leaving the source usable.  Excludes own& / Vec /
+    /// nested-owning fields (those keep whole-value move).  Mirrors sema's
+    /// `is_own_ptr_granular`.
+    fn struct_own_ptr_granular(&self, ty: &HType) -> bool {
+        if let HType::Struct(sid) = ty {
+            let si = self.sym.struct_info(*sid);
+            si.fields.iter().all(|fi| !self.drop_ty_owns(&fi.ty) || matches!(fi.ty, HType::OwnPtr { .. }))
+                && si.fields.iter().any(|fi| matches!(fi.ty, HType::OwnPtr { .. }))
+        } else { false }
+    }
+
+    /// Null the `own *T` fields of a field-granular struct at `place` (the plain
+    /// fields are copied by the struct assignment; only ownership moves).
+    fn null_own_ptr_fields(&mut self, place: &str, ty: &HType) {
+        if let HType::Struct(sid) = ty {
+            let fields = self.sym.struct_info(*sid).fields.clone();
+            for fld in &fields {
+                if matches!(fld.ty, HType::OwnPtr { .. }) {
+                    self.wl(&format!("({}).{} = NULL;", place, c_ident(&fld.name)));
+                }
+            }
+        }
+    }
+
     fn emit_move_out_null(&mut self, f: &HFunc, src: &HExpr) {
         // A bare `own *T` Local moved out (into an owning binding) auto-nulls at
         // the source, so its scope-exit free is `free(NULL)` and a read sees null.
@@ -9991,6 +10028,11 @@ void __maka_pool_free(maka_unit* poolv) {
             if matches!(&src.ty, HType::OwnPtr { .. }) {
                 let place = self.local_name(*id, &f.locals[id.0 as usize].name);
                 self.wl(&format!("{} = NULL;", place));
+            } else if self.struct_own_ptr_granular(&src.ty) {
+                // Field-granular struct move: null only the own* fields.
+                let place = self.local_name(*id, &f.locals[id.0 as usize].name);
+                let ty = src.ty.clone();
+                self.null_own_ptr_fields(&place, &ty);
             }
             return;
         }

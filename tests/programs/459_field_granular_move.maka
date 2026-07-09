@@ -1,0 +1,8 @@
+data SomeStruct { i32 id; own *f32 fltptr; }
+unit main() {
+    SomeStruct s = { id = 3, fltptr = alloc 3.0 };
+    SomeStruct s2 = s;                         // move fltptr, copy id
+    if (s.fltptr != null) { log(1); } else { log(-1); }   // fltptr null -> -1
+    log(s.id);                                 // 3 (still valid)
+    if (s2.fltptr != null) { log(2); }          // s2 owns -> 2
+}
