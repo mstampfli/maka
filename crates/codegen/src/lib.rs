@@ -5860,17 +5860,43 @@ void __maka_pool_free(maka_unit* poolv) {
         for s in &structs { self.wl(&format!("static void __maka_drop_{0}(struct {0}* p);", c_ident(&s.name))); }
         for e in &enums { self.wl(&format!("static void __maka_drop_{0}(struct {0}* p);", c_ident(&e.name))); }
         for s in &structs {
-            self.wl(&format!("static void __maka_drop_{0}(struct {0}* p) {{", c_ident(&s.name)));
+            let cn = c_ident(&s.name);
+            // A struct with EXACTLY ONE self-referential `own *Self` field (a
+            // linked-list spine) drops that chain ITERATIVELY, not recursively -
+            // one C stack frame per node would blow the stack on a long list (the
+            // Box-chain problem).  The one self field is walked in a loop; every
+            // other owning field (and the user `Drop`) is dropped per node.  A tree
+            // (>1 self field) still recurses for now.
+            let sid = self.sym.struct_by_name(&s.name).map(|(id, _)| id.0);
+            let self_ptr_fields: Vec<&str> = s.fields.iter().filter_map(|f| match &f.ty {
+                HType::OwnPtr { inner, .. } if matches!(inner.as_ref(), HType::Struct(id) if Some(id.0) == sid) =>
+                    Some(f.name.as_str()),
+                _ => None,
+            }).collect();
+            self.wl(&format!("static void __maka_drop_{0}(struct {0}* p) {{", cn));
             self.open();
-            // User `Drop::drop` runs first (logical teardown), before the
-            // compiler recursively frees the value's owning fields.
-            if let Some(dropfn) = self.drop_method_cname(&s.name) {
-                self.wl(&format!("{}(p);", dropfn));
-            }
-            for fld in &s.fields {
-                if !self.drop_ty_owns(&fld.ty) { continue; }
-                let lv = format!("p->{}", c_ident(&fld.name));
-                self.emit_field_drop(&lv, &fld.ty, 0);
+            if let &[spine] = self_ptr_fields.as_slice() {
+                // Iterative spine drop.  Per-node body (user Drop + non-spine owning
+                // fields) is emitted for `p`, then for each `__it` in the chain.
+                self.emit_node_body_drop("p", s, spine);
+                self.wl(&format!("struct {0}* __it = p->{1};", cn, c_ident(spine)));
+                self.wl("while (__it) {");
+                self.open();
+                self.wl(&format!("struct {0}* __nx = __it->{1};", cn, c_ident(spine)));
+                self.emit_node_body_drop("__it", s, spine);
+                self.wl("free(__it);");
+                self.wl("__it = __nx;");
+                self.close();
+                self.wl("}");
+            } else {
+                if let Some(dropfn) = self.drop_method_cname(&s.name) {
+                    self.wl(&format!("{}(p);", dropfn));
+                }
+                for fld in &s.fields {
+                    if !self.drop_ty_owns(&fld.ty) { continue; }
+                    let lv = format!("p->{}", c_ident(&fld.name));
+                    self.emit_field_drop(&lv, &fld.ty, 0);
+                }
             }
             self.close();
             self.wl("}");
@@ -5905,6 +5931,21 @@ void __maka_pool_free(maka_unit* poolv) {
 
     /// Emit statements that free what the owned lvalue `lv` (of type `ty`) holds,
     /// including `lv` itself when it is an owning pointer.
+    /// The per-node drop body used by the ITERATIVE spine drop: run the struct's
+    /// user `Drop` on `base`, then drop each owning field EXCEPT `skip_field` (the
+    /// self-referential spine, walked by the loop).  `base` is a `struct S*`.
+    fn emit_node_body_drop(&mut self, base: &str, s: &StructInfo, skip_field: &str) {
+        if let Some(dropfn) = self.drop_method_cname(&s.name) {
+            self.wl(&format!("{}({});", dropfn, base));
+        }
+        for fld in &s.fields {
+            if fld.name == skip_field { continue; }
+            if !self.drop_ty_owns(&fld.ty) { continue; }
+            let lv = format!("{}->{}", base, c_ident(&fld.name));
+            self.emit_field_drop(&lv, &fld.ty, 0);
+        }
+    }
+
     fn emit_field_drop(&mut self, lv: &str, ty: &HType, depth: usize) {
         match ty {
             HType::OwnPtr { inner, .. } if matches!(inner.as_ref(), HType::Dyn { .. }) => {

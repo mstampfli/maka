@@ -1,0 +1,3 @@
+struct LL* __it = p->next;
+while (__it) {
+!__maka_drop_LL(p->next)

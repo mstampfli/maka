@@ -1,0 +1,14 @@
+// A struct with a single self-referential `own *Self` field (a linked-list spine)
+// drops that chain ITERATIVELY - one C stack frame per node would overflow on a
+// long list (the Box-chain problem).  The `.cgrep` asserts the emitted drop glue
+// is a loop over the spine, with no recursive self-call on the `next` field.
+data LL { mut int v; mut own *LL next; }
+unit main() {
+    mut own *LL head = null;
+    mut int i = 0;
+    while (i < 5) { head = alloc LL { v = i, next = head }; i = i + 1; }
+    mut int sum = 0;
+    *LL cur = head;                       // walk with a *T view (does not consume)
+    while (cur != null) { sum = sum + cur!.v; cur = cur!.next; }
+    log(sum);                              // 0+1+2+3+4 = 10 ; the list drops iteratively at scope exit
+}
