@@ -1,9 +1,0 @@
-// Cross-iteration use-after-move: an own *T moved inside a loop body is moved
-// again on the next iteration. Rejected by the loop move-state fixpoint.
-data Box { int v; }
-unit eat(own *Box b) { }
-unit main() {
-  own *Box x = alloc Box { v = 7 };
-  mut int i = 0;
-  while (i < 3) { eat(x); i = i + 1; }   // ERROR: x re-moved next iteration
-}

@@ -1476,7 +1476,7 @@ impl<'a> Analyzer<'a> {
                 let auto_nulled = st.auto_nulled;
                 let narrowed = st.narrowed_until.is_some();
                 let known_nn = st.known_nonnull;
-                let is_ptr = matches!(self.f().locals[id.0 as usize].ty, HType::Ptr { .. });
+                let is_ptr = matches!(self.f().locals[id.0 as usize].ty, HType::Ptr { .. } | HType::OwnPtr { .. });
                 if moved {
                     self.err(format!("use of moved value `{}`", name), e.span);
                 }
@@ -1762,6 +1762,25 @@ impl<'a> Analyzer<'a> {
             self.err(format!("cannot move captured value `{}` out of the closure body: the closure's environment owns it and frees it when the closure is dropped, so moving it out would double-free. Read it in place (borrow), or restructure so the owner is not moved out of the closure.", name), sp);
             return;
         }
+        let owner_ty = self.f().locals[id.0 as usize].ty.clone();
+        // `own *T` (nullable owner) AUTO-NULLS on move - it never errors on use.
+        // The source becomes NULL (runtime `id = NULL` after this statement), so a
+        // later `if (p != null)` correctly sees null and the owner's scope-exit
+        // free is a no-op (`free(NULL)`).  Only `own &T` (non-null) and owning
+        // VALUES (String/Vec/owning struct) poison, because they have no null state.
+        if matches!(owner_ty, HType::OwnPtr { .. }) {
+            let st = &mut self.state[id.0 as usize];
+            st.auto_nulled = true;
+            st.known_nonnull = false;
+            st.narrowed_until = None;
+            // The runtime `id = NULL` is emitted by CODEGEN at the move SITE (so a
+            // same-statement reassign like `x = f(x)` is not clobbered and a
+            // drop-on-reassign of the source frees NULL) - not here, post-statement.
+            self.invalidate_place_facts(id.0);
+            let n = self.kill_lid(id, sp, true);
+            self.pending_stmt_nulls.extend(n);
+            return;
+        }
         if self.state[id.0 as usize].moved {
             self.err(format!("use of moved value `{}`", name), sp);
             return;
@@ -1770,18 +1789,11 @@ impl<'a> Analyzer<'a> {
         // A move invalidates any place-narrowing rooted at (or indexed by) this
         // local: the container/element it names is now owned elsewhere.
         self.invalidate_place_facts(id.0);
-        // Moving an owner POINTER (by-value into a call/struct/array/return, into
-        // another owning local, or via `transfer` across a gate) transfers its heap
-        // to the new owner, which frees it - any `*T`/`&T` alias of it now dangles.
-        // Invalidate the aliases here, at the single move choke point, so EVERY
-        // move site is covered uniformly: `*T` aliases AUTO-NULL (a runtime
-        // `alias = NULL` is emitted after this statement via stmt_nulls, so a
-        // guarded deref is honest), `&T` borrows poison.  Non-pointer owners
-        // (String/Vec values) have no `*T` aliases, so kill_lid is a no-op there.
-        if matches!(
-            self.f().locals[id.0 as usize].ty,
-            HType::OwnPtr { .. } | HType::Heap { .. }
-        ) {
+        // Moving an owner (`own &T` / an owning VALUE) transfers its heap to the
+        // new owner; any `*T`/`&T` alias now dangles - invalidate them here, the
+        // single move choke point (`*T` aliases AUTO-NULL via stmt_nulls, `&T`
+        // borrows poison).  Owning values have no `*T` aliases (kill_lid no-ops).
+        if matches!(owner_ty, HType::Heap { .. }) {
             let n = self.kill_lid(id, sp, true);
             self.pending_stmt_nulls.extend(n);
         }

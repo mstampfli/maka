@@ -9958,6 +9958,18 @@ void __maka_pool_free(maka_unit* poolv) {
 
     fn emit_move_consuming(&mut self, f: &HFunc, e: &HExpr) -> String {
         let s = self.emit_sub(f, e);
+        // A bare `own *T` Local moved into an owning destination (this fn only runs
+        // at owning-destination sites) AUTO-NULLS the source at the move site, so a
+        // same-statement reassign isn't clobbered and its scope-exit free is a
+        // no-op (`free(NULL)`).  A borrow of the same local is coerced to `*T`/`&T`
+        // (different kind/type), so this hits moves only.
+        if let HExprKind::Local(id) = &e.kind {
+            if matches!(&e.ty, HType::OwnPtr { .. }) {
+                let place = self.local_name(*id, &f.locals[id.0 as usize].name);
+                let ty = self.c_type(&e.ty);
+                return format!("(__extension__ ({{ {0} __mc = {1}; {2} = NULL; __mc; }}))", ty, s, place);
+            }
+        }
         if !matches!(&e.kind, HExprKind::Field { .. } | HExprKind::Index { .. }) { return s; }
         if !move_out_owned_place(e) { return s; }
         let nullv = if matches!(&e.ty, HType::OwnPtr { .. } | HType::Heap { .. }) {
@@ -9973,6 +9985,15 @@ void __maka_pool_free(maka_unit* poolv) {
     }
 
     fn emit_move_out_null(&mut self, f: &HFunc, src: &HExpr) {
+        // A bare `own *T` Local moved out (into an owning binding) auto-nulls at
+        // the source, so its scope-exit free is `free(NULL)` and a read sees null.
+        if let HExprKind::Local(id) = &src.kind {
+            if matches!(&src.ty, HType::OwnPtr { .. }) {
+                let place = self.local_name(*id, &f.locals[id.0 as usize].name);
+                self.wl(&format!("{} = NULL;", place));
+            }
+            return;
+        }
         if !matches!(&src.kind, HExprKind::Field { .. } | HExprKind::Index { .. }) { return; }
         if !move_out_owned_place(src) { return; }
         if matches!(&src.ty, HType::OwnPtr { .. } | HType::Heap { .. }) {
@@ -10005,9 +10026,18 @@ void __maka_pool_free(maka_unit* poolv) {
                 let ptr_ty = self.c_type(&li.ty);
                 // Detect move from another heap local: init is HExprKind::Local pointing at a heap local.
                 if let HExprKind::Local(src) = init.kind {
-                    if matches!(f.locals[src.0 as usize].ty, HType::Heap { .. }) {
-                        // move
+                    let sty = f.locals[src.0 as usize].ty.clone();
+                    if matches!(sty, HType::Heap { .. }) {
+                        // move (own &T: non-null owner, source is dead per poison)
                         self.wl(&format!("{} {} = {}; /* moved */", ptr_ty, name, self.local_name(src, &f.locals[src.0 as usize].name)));
+                        return;
+                    }
+                    if matches!(sty, HType::OwnPtr { .. }) {
+                        // move an `own *T` local: copy the pointer, then AUTO-NULL
+                        // the source (so its scope-exit free is `free(NULL)` and a
+                        // read sees null - the ownership moved to this binding).
+                        let srcn = self.local_name(src, &f.locals[src.0 as usize].name);
+                        self.wl(&format!("{0} {1} = {2}; {2} = NULL; /* own* move */", ptr_ty, name, srcn));
                         return;
                     }
                 }

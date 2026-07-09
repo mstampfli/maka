@@ -1,0 +1,12 @@
+// Moving an `own *T` AUTO-NULLS the source (never a compile error, unlike own &T)
+// and transfers ownership: at scope exit only the destination frees the box (the
+// source is `free(NULL)`, no double-free). Reading a moved source warns (verified
+// separately); here we move the ownership forward and read the live destination.
+data A { int v; }
+own *A id(own *A p) { return p; }
+unit main() {
+    own *A a = alloc A { v = 7 };
+    own *A b = a;                  // move a -> b; a auto-nulled
+    own *A c = id(b);              // move b through a call -> c; b auto-nulled
+    if (c != null) { log(c!.v); }  // 7 - c owns; a,b are null so no double-free
+}
