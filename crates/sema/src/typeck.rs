@@ -4629,24 +4629,28 @@ impl<'a> TypeChecker<'a> {
                 return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp }; }
         };
 
-        // For each trait in `traits`, verify the concrete type satisfies it: every function
-        // in the trait must have a matching overload for the concrete struct as receiver.
+        // For each trait in `traits`, verify the concrete type satisfies it.  The
+        // REQUIRED method set is the attr's DECLARATION (not the set of existing
+        // impls): otherwise a trait that NO type implements has an empty impl set and
+        // is vacuously "satisfied" by a type lacking a `has` block - producing a `dyn`
+        // whose vtable slots are unfilled (a call would crash).  A `has tn` block
+        // materializes every method (user impls + synthesized defaults) as a
+        // `&Struct(id)` sig (resolve rejects an incomplete block), so a type satisfies
+        // `tn` exactly when every declared method has a matching impl for THIS struct.
         for tn in &traits {
             if !self.sym.is_trait(tn) {
                 self.err(format!("unknown trait `{}`", tn), sp);
                 continue;
             }
+            let required: Vec<String> = match self.sym.attr_by_name(tn) {
+                Some(a) => a.methods.iter().map(|m| m.name.clone()).collect(),
+                None => Vec::new(),
+            };
             let funcs = self.sym.trait_method_funcs(tn);
-            // Group by name; we only require that each *distinct* name has at least one overload
-            // accepting the concrete type as its first parameter.
-            let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut satisfied_names: std::collections::HashSet<String> = std::collections::HashSet::new();
             for fid in &funcs {
                 let sig = self.sym.func_sig(*fid);
-                seen_names.insert(sig.name.clone());
-                if sig.param_tys.is_empty() { continue; }
-                let first = &sig.param_tys[0];
-                if let HType::Ref { inner, .. } = first {
+                if let Some(HType::Ref { inner, .. }) = sig.param_tys.first() {
                     if let HType::Struct(sid) = inner.as_ref() {
                         if *sid == struct_id {
                             satisfied_names.insert(sig.name.clone());
@@ -4654,7 +4658,7 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
             }
-            for n in &seen_names {
+            for n in &required {
                 if !satisfied_names.contains(n) {
                     self.err(format!("type does not satisfy trait `{}`: missing overload of `{}`",
                                      tn, n), sp);

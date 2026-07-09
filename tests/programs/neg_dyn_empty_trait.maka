@@ -1,0 +1,13 @@
+// `as dyn Tr` where Tr is implemented by NO type (empty impl set): the concrete
+// type has no `has Legs` block, so its `dyn Legs` vtable would be unfilled.  The
+// required-method set comes from the attr DECLARATION, so this is rejected (was
+// previously accepted vacuously - the pre-existing check_to_dyn gap).
+attr Speak { int sound(&_ self); }
+attr Legs  { int legs(&_ self); }
+data Fish { int f; }
+Fish has Speak { int sound(&Fish self) { return 3; } }
+unit main() {
+    Fish fish = { f = 1 };
+    &dyn Legs d = &fish as dyn Legs;
+    log(Legs.legs(&d));
+}

@@ -1,0 +1,15 @@
+// A dyn value over a trait with a DEFAULT method: the type implements the required
+// method and inherits the default, which is materialized into the vtable - so the
+// tightened `as dyn` check (required = declared methods) must NOT over-reject it.
+attr Show {
+    int label(&_ self) { return 99; }   // default body - inherited
+    int announce(&_ self);               // required - must be implemented
+}
+data Point { int x; }
+Point has Show { int announce(&Point self) { return self.x; } }
+unit main() {
+    Point p = { x = 5 };
+    &dyn Show d = &p as dyn Show;
+    log(Show.announce(&d));   // 5
+    log(Show.label(&d));      // 99 (inherited default)
+}
