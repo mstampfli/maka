@@ -1,0 +1,6 @@
+// `has` on an existential TYPE (not a value) has nothing to re-witness - rejected.
+attr Speak { int sound(&_ self); }
+attr Legs  { int legs(&_ self); }
+unit main() {
+    if (dyn Speak has Legs) { log(1); } else { log(0); }
+}

@@ -222,18 +222,29 @@ impl<'a> Cx<'a> {
         // each `v has X` (src_trait -> to_trait), every concrete type packed as
         // `dyn src_trait` that ALSO implements to_trait needs a `to_trait` vtable
         // (and the `Dyn_to_trait` typedef) so the runtime switch can re-witness it.
+        // Fixpoint: a re-witness source can be a COMBINED existential produced by a
+        // prior narrowing (nested `if (d has A) { if (d has B) {..} }`), so keep
+        // expanding until no new (single or combined) vtable is registered.  Sources
+        // come from both `dyn_insts` (single-trait) and `combined_insts` (joined).
         let witness_targets: Vec<(String, Vec<String>)> = self.dyn_witness_targets.iter().cloned().collect();
-        let inst_snapshot: Vec<(String, u32)> = self.dyn_insts.iter().cloned().collect();
-        for (src, to_traits) in &witness_targets {
-            let single = to_traits.len() == 1;
-            if single { self.dyn_traits.insert(to_traits[0].clone()); }
-            else { self.combined_vtbls.insert(to_traits.clone()); }
-            for (t, sid_n) in &inst_snapshot {
-                if t != src { continue; }
-                if !to_traits.iter().all(|tr| self.struct_impls_trait_cg(StructId(*sid_n), tr)) { continue; }
-                if single { self.dyn_insts.insert((to_traits[0].clone(), *sid_n)); }
-                else { self.combined_insts.insert((to_traits.clone(), *sid_n)); }
+        loop {
+            let avail = self.dyn_source_insts();
+            let mut changed = false;
+            for (src, to_traits) in &witness_targets {
+                let single = to_traits.len() == 1;
+                // Register the target TYPEDEF unconditionally: the re-witness produces a
+                // `Dyn_<key>` value even when NO concrete type matches (all-null switch ->
+                // vtbl NULL -> membership false), so the typedef must exist regardless.
+                if single { changed |= self.dyn_traits.insert(to_traits[0].clone()); }
+                else { changed |= self.combined_vtbls.insert(to_traits.clone()); }
+                for (key, sid_n) in &avail {
+                    if key != src { continue; }
+                    if !to_traits.iter().all(|tr| self.struct_impls_trait_cg(StructId(*sid_n), tr)) { continue; }
+                    if single { changed |= self.dyn_insts.insert((to_traits[0].clone(), *sid_n)); }
+                    else { changed |= self.combined_insts.insert((to_traits.clone(), *sid_n)); }
+                }
             }
+            if !changed { break; }
         }
         // Structs/enums: forward-decls, then (internally) dyn+callable typedefs
         // that reference struct POINTERS, then the struct BODIES.  A `data` struct
@@ -6227,11 +6238,24 @@ void __maka_pool_free(maka_unit* poolv) {
             HExprKind::Index { base, idx } => { self.scan_expr(base); self.scan_expr(idx); }
             HExprKind::Call { args, .. } => for a in args { self.scan_expr(a); },
             HExprKind::Cast { expr, kind, .. } => {
-                if let CastKind::ToDyn { trait_name, struct_id }
-                     | CastKind::PackSomeVec { trait_name, struct_id }
-                     | CastKind::DowncastSomeVec { trait_name, struct_id } = kind {
-                    self.dyn_traits.insert(trait_name.clone());
-                    self.dyn_insts.insert((trait_name.clone(), struct_id.0));
+                match kind {
+                    // A multi-trait `dyn (A+B)` value needs a COMBINED vtable (union of
+                    // methods); a single-trait one uses the plain per-trait vtable.
+                    CastKind::ToDyn { traits, struct_id } => {
+                        if traits.len() == 1 {
+                            self.dyn_traits.insert(traits[0].clone());
+                            self.dyn_insts.insert((traits[0].clone(), struct_id.0));
+                        } else {
+                            self.combined_vtbls.insert(traits.clone());
+                            self.combined_insts.insert((traits.clone(), struct_id.0));
+                        }
+                    }
+                    CastKind::PackSomeVec { trait_name, struct_id }
+                    | CastKind::DowncastSomeVec { trait_name, struct_id } => {
+                        self.dyn_traits.insert(trait_name.clone());
+                        self.dyn_insts.insert((trait_name.clone(), struct_id.0));
+                    }
+                    _ => {}
                 }
                 self.scan_expr(expr);
             }
@@ -6499,14 +6523,28 @@ void __maka_pool_free(maka_unit* poolv) {
         }))
     }
 
-    /// The concrete types packed as `dyn src_trait` that implement ALL of
-    /// `to_traits` (struct names, for the runtime re-witness switch), stable order.
+    /// Every existential instantiation available as a re-witness SOURCE, keyed by
+    /// its runtime vtable key: single-trait (`dyn_insts`) and combined (`combined_insts`,
+    /// key = `traits.join("_")`).  A narrowed value's vtbl is a combined one, so a
+    /// nested `has` must find it here.
+    fn dyn_source_insts(&self) -> Vec<(String, u32)> {
+        let mut v: Vec<(String, u32)> = self.dyn_insts.iter().map(|(t, s)| (t.clone(), *s)).collect();
+        v.extend(self.combined_insts.iter().map(|(traits, s)| (traits.join("_"), *s)));
+        v
+    }
+
+    /// The concrete types whose source vtbl is `src_trait` (single or combined) and
+    /// that implement ALL of `to_traits` (struct names, for the re-witness switch),
+    /// de-duplicated in stable order.
     fn dyn_witness_candidates(&self, src_trait: &str, to_traits: &[String]) -> Vec<String> {
-        self.dyn_insts.iter()
-            .filter(|(t, sid_n)| t == src_trait
-                && to_traits.iter().all(|tr| self.struct_impls_trait_cg(StructId(*sid_n), tr)))
-            .map(|(_, sid_n)| self.sym.struct_info(StructId(*sid_n)).name.clone())
-            .collect()
+        let mut out: Vec<String> = Vec::new();
+        for (key, sid_n) in self.dyn_source_insts() {
+            if key != src_trait { continue; }
+            if !to_traits.iter().all(|tr| self.struct_impls_trait_cg(StructId(sid_n), tr)) { continue; }
+            let name = self.sym.struct_info(StructId(sid_n)).name.clone();
+            if !out.contains(&name) { out.push(name); }
+        }
+        out
     }
 
     /// Union of the method funcs of several traits (for a combined narrowing vtbl).
@@ -9864,8 +9902,8 @@ void __maka_pool_free(maka_unit* poolv) {
                 } else { call }
             }
             HExprKind::Cast { expr, kind, to } => {
-                if let CastKind::ToDyn { trait_name, struct_id } = kind {
-                    return self.emit_to_dyn(inline_f, expr, trait_name, *struct_id);
+                if let CastKind::ToDyn { traits, struct_id } = kind {
+                    return self.emit_to_dyn(inline_f, expr, traits, *struct_id);
                 }
                 let s = self.emit_inline_expr(inline_f, expr, tag);
                 self.emit_cast(s, kind.clone(), to, &expr.ty)
@@ -11470,8 +11508,8 @@ void __maka_pool_free(maka_unit* poolv) {
             }
             HExprKind::Cast { expr, kind, to } => {
                 // For ToDyn casts we need the source's address (the data pointer).
-                if let CastKind::ToDyn { trait_name, struct_id } = kind {
-                    return self.emit_to_dyn(f, expr, trait_name, *struct_id);
+                if let CastKind::ToDyn { traits, struct_id } = kind {
+                    return self.emit_to_dyn(f, expr, traits, *struct_id);
                 }
                 let s = self.emit_expr(f, expr);
                 self.emit_cast(s, kind.clone(), to, &expr.ty)
@@ -12193,10 +12231,9 @@ void __maka_pool_free(maka_unit* poolv) {
         out
     }
 
-    fn emit_to_dyn(&mut self, f: &HFunc, expr: &HExpr, trait_name: &str, struct_id: StructId) -> String {
+    fn emit_to_dyn(&mut self, f: &HFunc, expr: &HExpr, traits: &[String], struct_id: StructId) -> String {
         // Source might be `&T`, `&mut T`, or `T`. For all three, we take the address of the value.
         let sname = self.sym.struct_info(struct_id).name.clone();
-        let inner_c = c_ident(&sname);
         // Need an address. If expr is already a reference (Ref), emit_expr returns `&local` form.
         let s = self.emit_expr(f, expr);
         // If the expression's type is a Ref, its C value is already `T*`. Else, take address.
@@ -12204,9 +12241,10 @@ void __maka_pool_free(maka_unit* poolv) {
             HType::Ref { .. } => format!("(void*)({})", s),
             _ => format!("(void*)(&({}))", s),
         };
-        let _ = inner_c;
+        // Single or combined (multi-trait) vtable, keyed by the joined trait set.
+        let key = c_ident(&traits.join("_"));
         format!("((Dyn_{0}){{ .data = {1}, .vtbl = &{0}_vtbl_for_{2} }})",
-                c_ident(trait_name), data_expr, c_ident(&sname))
+                key, data_expr, c_ident(&sname))
     }
 
     /// The env's recursive-drop function for a spawn-closure argument, so the

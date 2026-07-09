@@ -1,0 +1,15 @@
+// Narrowing is PRECISE: `if (d has Legs)` views d as `dyn (Speak + Legs)`, NOT its
+// full concrete interface.  Calling a trait that was neither the source nor the
+// checked one (Fly) is rejected, even though the hidden Cat happens to implement it.
+attr Speak { int sound(&_ self); }
+attr Legs  { int legs(&_ self); }
+attr Fly   { int fly(&_ self); }
+data Cat { int c; }
+Cat has Speak { int sound(&Cat self) { return 1; } }
+Cat has Legs  { int legs(&Cat self)  { return 4; } }
+Cat has Fly   { int fly(&Cat self)   { return 9; } }
+unit main() {
+    Cat cat = { c = 1 };
+    &dyn Speak d = &cat as dyn Speak;
+    if (d has Legs) { log(Fly.fly(&d)); }
+}

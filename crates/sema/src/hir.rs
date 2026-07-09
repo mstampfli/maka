@@ -600,8 +600,10 @@ pub enum CastKind {
     IntPtrToEnumPtrChecked,
     /// implicit (used by codegen when source==target type)
     Identity,
-    /// `&T as dyn Trait` / `&mut T as dyn Trait` / `T as dyn Trait`: produces a fat pointer.
-    ToDyn { trait_name: String, struct_id: StructId },
+    /// `&T as dyn Trait` / `T as dyn Trait` / `T as dyn (A + B)`: produces a fat
+    /// pointer.  `traits` is the full (possibly multi-) trait set; a multi-trait dyn
+    /// gets a combined `Dyn_A_B` value whose vtbl unions all constituent methods.
+    ToDyn { traits: Vec<String>, struct_id: StructId },
     /// `Vec<T> -> Vec<some X>`: pack a concrete homogeneous column into a dense
     /// existential column (attach the `X`-vtable for `T` and `sizeof(T)`).
     PackSomeVec { trait_name: String, struct_id: StructId },

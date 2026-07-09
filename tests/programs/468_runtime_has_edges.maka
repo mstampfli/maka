@@ -1,0 +1,30 @@
+// Runtime `has` edge / non-happy paths on an existential value:
+//  (1) no concrete type behind the dyn implements the checked trait -> always
+//      false, still compiles; (2) checking the source trait itself -> always true;
+//  (3) NESTED narrowing accumulates traits (dyn Speak -> dyn (Speak+Legs) ->
+//      dyn (Speak+Legs+Wings)), all callable; (4) negation; (5) a `has` predicate
+//      compounded with a runtime flag (runtime branch, no narrowing); (6) the bool
+//      value form.
+attr Speak { int sound(&_ self); }
+attr Legs  { int legs(&_ self); }
+attr Wings { int span(&_ self); }
+attr Ghost { int boo(&_ self); }
+data Cat { int c; }
+Cat has Speak { int sound(&Cat self){return 1;} }
+Cat has Legs  { int legs(&Cat self){return 4;} }
+Cat has Wings { int span(&Cat self){return 2;} }
+unit main() {
+    Cat cat = {c=1};
+    &dyn Speak d = &cat as dyn Speak;
+    if (d has Ghost) { log(1); } else { log(0); }   // no impl behind dyn -> 0
+    if (d has Speak) { log(7); } else { log(0); }    // self-trait -> 7
+    if (d has Legs) {                                 // nested narrowing
+        if (d has Wings) { log(Legs.legs(&d) + Wings.span(&d) + Speak.sound(&d)); }  // 4+2+1=7
+        else { log(-1); }
+    }
+    if (!(d has Ghost)) { log(11); } else { log(-1); }       // negation -> 11
+    bool flag = true;
+    if (d has Legs && flag) { log(12); } else { log(-1); }   // runtime branch -> 12
+    bool bb = d has Legs;                                    // bool value form
+    if (bb) { log(13); } else { log(-1); }                   // 13
+}

@@ -4664,7 +4664,7 @@ impl<'a> TypeChecker<'a> {
 
         // Result type: keep `dyn Trait` value form; downstream coercion adapts to `&dyn`/`&mut dyn`.
         let dyn_ty = HType::Dyn { traits: traits.clone(), locked: false };
-        let kind = CastKind::ToDyn { trait_name: traits[0].clone(), struct_id };
+        let kind = CastKind::ToDyn { traits: traits.clone(), struct_id };
         let result_ty = match want_mut_ref {
             Some(true) => HType::Ref { mutable: true, inner: Box::new(dyn_ty.clone()) },
             Some(false) => HType::Ref { mutable: false, inner: Box::new(dyn_ty.clone()) },
@@ -5330,7 +5330,7 @@ impl<'a> TypeChecker<'a> {
             let (src_traits, _locked) = match existential_info(&recv_ty) {
                 Some(x) => x, None => return lit_false(span),
             };
-            return self.build_dyn_has(vh, src_traits.join("_"), trait_name, span);
+            return self.build_dyn_has(vh, &src_traits, trait_name, span);
         }
         if has_tyvar(&recv_ty) { return lit_false(span); }
         let b = crate::resolve::type_impls_trait_visible(
@@ -5338,14 +5338,19 @@ impl<'a> TypeChecker<'a> {
         HExpr { kind: HExprKind::LitBool(b), ty: HType::Bool, span }
     }
 
-    /// Build `DynHasVtbl(DynRewitness(v, src_trait -> [X]))` - the runtime membership
-    /// bool for an existential value `v`.  The bool form re-witnesses to the single
-    /// `dyn X` (the answer is the same; only NARROWING needs the combined vtbl).
-    fn build_dyn_has(&mut self, vh: HExpr, src_trait: String, to_trait: &str, span: Span) -> HExpr {
-        let dyn_x = HType::Dyn { traits: vec![to_trait.to_string()], locked: false };
+    /// Build `DynHasVtbl(DynRewitness(v, src -> src + X))` - the runtime membership
+    /// bool for an existential value `v`.  Re-witnesses to the COMBINED `dyn (src + X)`
+    /// (same as narrowing), not the bare `dyn X`: the combined vtbl unions the source
+    /// traits' methods, so it is always emittable even when X itself is method-less
+    /// (a trait no reachable type implements) - the switch is then all-null -> false.
+    fn build_dyn_has(&mut self, vh: HExpr, src_traits: &[String], to_trait: &str, span: Span) -> HExpr {
+        let src_key = src_traits.join("_");
+        let mut to_traits = src_traits.to_vec();
+        if !to_traits.iter().any(|t| t == to_trait) { to_traits.push(to_trait.to_string()); }
+        let dyn_ty = HType::Dyn { traits: to_traits.clone(), locked: false };
         let rw = HExpr {
-            kind: HExprKind::DynRewitness { value: Box::new(vh), src_trait, to_traits: vec![to_trait.to_string()] },
-            ty: dyn_x, span,
+            kind: HExprKind::DynRewitness { value: Box::new(vh), src_trait: src_key, to_traits },
+            ty: dyn_ty, span,
         };
         HExpr { kind: HExprKind::DynHasVtbl(Box::new(rw)), ty: HType::Bool, span }
     }

@@ -1,0 +1,15 @@
+// A multi-trait `as dyn (A + B)` requires the concrete type to satisfy EVERY
+// listed trait: Fish implements Speak but not Legs (which Cat implements), so the
+// cast is rejected - no combined vtable with a missing method slot is built.
+attr Speak { int sound(&_ self); }
+attr Legs  { int legs(&_ self); }
+data Cat { int c; }
+Cat has Speak { int sound(&Cat self) { return 1; } }
+Cat has Legs  { int legs(&Cat self)  { return 4; } }
+data Fish { int f; }
+Fish has Speak { int sound(&Fish self) { return 3; } }
+unit main() {
+    Fish fish = { f = 1 };
+    &dyn (Speak + Legs) d = &fish as dyn (Speak + Legs);
+    log(Speak.sound(&d));
+}

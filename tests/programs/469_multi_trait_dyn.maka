@@ -1,0 +1,24 @@
+// First-class multi-trait `dyn (A + B)` values: a fat pointer whose combined vtable
+// unions both interfaces, so both dispatch directly.  Differently-typed values live
+// mixed in one array (per-element witness), each exposing Speak AND Legs.
+attr Speak { int sound(&_ self); }
+attr Legs  { int legs(&_ self); }
+data Cat { int c; }
+Cat has Speak { int sound(&Cat self) { return 1; } }
+Cat has Legs  { int legs(&Cat self)  { return 4; } }
+data Dog { int d; }
+Dog has Speak { int sound(&Dog self) { return 2; } }
+Dog has Legs  { int legs(&Dog self)  { return 8; } }
+unit main() {
+    Cat cat = { c = 1 };
+    Dog dog = { d = 2 };
+    // Single values.
+    &dyn (Speak + Legs) a = &cat as dyn (Speak + Legs);
+    log(Speak.sound(&a) + Legs.legs(&a));   // 1 + 4 = 5
+
+    // Heterogeneous array of multi-trait dyn (mixed concrete types, both interfaces).
+    [2]&dyn (Speak + Legs) arr = [&cat as dyn (Speak + Legs), &dog as dyn (Speak + Legs)];
+    mut int total = 0;
+    for (int i in 0..2) { total = total + Speak.sound(&arr[i]) * Legs.legs(&arr[i]); }
+    log(total);   // 1*4 + 2*8 = 20
+}
