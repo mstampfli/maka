@@ -25,7 +25,7 @@ A `.maka` source file consists of:
 
 ### 1.2 Comments
 
-`// line comment` and `/* block comment */`. Block comments do not nest.
+`// line comment` and `/* block comment */`. Block comments nest.
 
 ### 1.3 Identifiers and literals
 
@@ -263,7 +263,9 @@ For Maka-managed memory there is no `free`:
   **escape-checked** - returning it, storing it into a global, or laundering it
   through a function that returns a borrow of it is rejected (it would dangle). A
   slice of a `&T`/`*T`/`[]T` parameter is fine (the source outlives the call).
-- `[*]T` - vector payload (only inside `own &[*]T`).
+- `[*]T` - vector payload; used inside `own &[*]T` (a `Vec`'s owned buffer). A
+  bare `[*]T` binding is accepted by the compiler but has no ownership / free
+  machinery of its own, so prefer `own &[*]T` / `Vec<T>`.
 - `Name<T, U>` - generic instantiation. Monomorphized at compile time.
 - `RetType(P1, P2)` - function pointer type (also covers closure types via the
   internal fat-callable representation).
@@ -508,9 +510,9 @@ enum_decl    := [pub]? enum Name [<TyParams>] { variant_decl* }
 attr_decl    := [pub]? attr Name { attr_method* }
 has_decl     := [pub]? Name has Name { func_decl* }
 attr_method  := RetType name (params) [where ...]  ";" | block
-use_decl     := use ModPath . Receiver . Attr ;
-Receiver     := Type | PrimitiveType | "*" Receiver | "&" Receiver | "&mut" Receiver
-              | "own" "*" Receiver | "own" "&" Receiver | "raw" "*" Receiver
+use_decl     := use ModPath . Type . Attr ;    // Type: concrete or primitive only;
+                                               // parametric receivers (`*T`, `Box<T>`, ...)
+                                               // are NOT accepted in a `use` yet (§17)
               | Ident "<" Receiver ("," Receiver)* ">"
 cinclude     := cinclude "header.h";
 cblock       := cblock "raw C source";
@@ -586,8 +588,9 @@ to other `constexpr` functions, over the full integer/comparison/logical/bitwise
 operator set.  Constructs it cannot evaluate (`alloc`, pointers, `match`, string
 ops, calls to non-`constexpr` functions) make the fold fail; the use site then
 reports that the value is not a compile-time constant.  Runaway recursion or
-loops are bounded by a step budget.  Generic `constexpr` functions are not folded
-(generics do not cross the compile-time boundary).
+loops are bounded by a step budget.  A `constexpr` cannot be declared with type
+parameters (`constexpr int f<T>(...)` is a parse error), so there are no generic
+`constexpr` functions - generics do not cross the compile-time boundary.
 
 ### Compile-time reflection (`inline for` over `fields`)
 
@@ -1103,7 +1106,9 @@ flags is implicit, tightening a flag requires proof**.
 
 - *owning* can only be dropped (a non-owner cannot become an owner without
   a phantom free-obligation).
-- *tracked* can be dropped freely (`&T → *T`, `&mut T → *T`).
+- *tracked* can be dropped freely, subject to mutability: `&mut T → *T` and
+  `&T → *const T`. An immutable `&T` cannot become a writable `*mut T` (i.e. `*T`) -
+  that would synthesize write access it never had; write `*const T` for that target.
 - *nullable* can be gained freely (`own &T → own *T`, `own &T → *T`).
 - *nullable* can be **dropped only with a non-null proof**, discharged by
   the `!` operator.
@@ -1145,12 +1150,12 @@ A function declared `gate` is a synchronization-boundary crossing. At every
 direct call site, each argument may carry a modifier:
 
 ```maka
-gate unit worker(int payload, *int data) { /* ... */ }
+gate unit worker(int payload, *int pd) { /* ... */ }
 
 unit main() {
     int x = 10;
-    own *int data = alloc 42;
-    worker(share x, transfer data);    // x copied, data ownership moves
+    own *int pd = alloc 42;
+    worker(share x, transfer pd);      // x copied, pd ownership moves
 }
 ```
 
@@ -1161,9 +1166,10 @@ unit main() {
 OR every field is Shareable (structural auto-derive). Primitives are Shareable.
 **No `*T` is Shareable** - neither `*T` nor `*const T` nor `raw *T`, regardless of
 pointee mutability: a `*const T` aliases a local WITHOUT freezing it (the owner
-keeps mutating the pointee), so sharing it into a thread races. Only the `&const T`
-immutable BORROW crosses a thread boundary (it freezes the referent for the borrow;
-`&mut T` does not). §7.2 is authoritative on capture. Opt-in is by IMPL, not by name: the
+keeps mutating the pointee), so sharing it into a thread races. A borrow (`&const T`,
+`&T`, or `&mut T`) MAY cross a thread boundary, but only when the handle is
+unconditionally joined before the borrowed data's scope ends (§7.2); the join, not
+the borrow's mutability, is what makes it sound. §7.2 is authoritative on capture. Opt-in is by IMPL, not by name: the
 stdlib sync handles (`Mutex`, `Atomic<T>`, ...) declare `has Shareable` because
 their opaque handle wraps a thread-safe C object, and a user type the programmer
 vouches is thread-safe opts in the same way (an explicit safety assertion,
@@ -1216,9 +1222,12 @@ analogous to the `transfer` / `share` rule for `gate` (§7.1):
   is allowed — the value is copied into the thread's env (share semantics).
 - **Bare `unit` capture** is allowed — `unit` has no runtime representation,
   so there's nothing to share or transfer.
-- **Borrow capture** (`[&x]` / `[&mut x]`) is **rejected** — the borrow's
-  lifetime is tied to the caller's scope, but the thread can outlive that
-  scope, so the borrow would dangle or race.
+- **Borrow capture** (`[&x]` / `[&mut x]`) is allowed **only when the handle is
+  unconditionally joined** before the borrowed data's scope ends - the thread is
+  then guaranteed to finish before the borrow is freed (like Rust's scoped
+  threads). Without that join (or on a `detach`), it is **rejected**, because the
+  borrow's lifetime is tied to the caller's scope but the thread could outlive it,
+  so the borrow would dangle or race.
 - **Non-Shareable non-owning capture** (`*T`, `raw *T`, mutable slices, etc.)
   is **rejected** — the pointee lifetime is the caller's owner's, with the
   same lifetime hazard.
@@ -1276,7 +1285,9 @@ sharing is a tracked follow-up.  See `docs/GMP_MIGRATION.md`.)
 Composition helpers documented in `CONCURRENCY.md`:
   - `join(&[]Handle<T>) -> []T` — homogeneous wait-all
   - `select(&[]Handle<T>) -> T` — homogeneous race, winner cancels losers
-  - `par_for` / `par_reduce` / `par_map` — data-parallel over slices
+  - `par_for_range` / `par_for_each`, `par_reduce_int` / `par_reduce_float`,
+    `par_map_int` / `par_map_bytes` / `par_map_float` (plus `par_filter_*` /
+    `par_scan_*`) — data-parallel over ranges / slices
 
 Heterogeneous composition (different return types) lives in user code:
 either wrap each spawn body's return in a common `enum` and pass a
@@ -1387,7 +1398,8 @@ match (e) {
 
 Each arm is `pattern body,` where `body` is a single expression or a `{}` block.
 Variant patterns destructure named fields. Literal patterns match by value
-(`42`, `"hello"`, `true`). `_` matches anything. `null` matches null pointers.
+(`42`, `true`; string-literal patterns are not supported). The catch-all/wildcard
+arm is `else` (there is no `_` pattern). `null` matches null pointers.
 
 Exhaustiveness is checked at compile time for enum scrutinees. A non-exhaustive
 match without a wildcard arm is a compile error.
@@ -1410,10 +1422,13 @@ type for the current monomorphization, never an abstract `T::Slot`.
 unit() task = unit() { log("hello"); };
 
 // Capturing lambda - env on stack, must NOT escape
-int(int by) bump = int(int by) [&mut counter] { counter = counter + by; };
+// (the binding's TYPE is unnamed `int(int)`; only the lambda literal names `by`)
+int(int) bump = int(int by) [&mut counter] { counter = counter + by; };
 
-// Heap env (for closures that escape via spawn or return)
-own &unit() job = alloc unit() [transfer payload] { use(payload); };
+// Heap env (for closures that escape via spawn or return). Capture is plain
+// `[payload]`; transfer (move of the owning value) is inferred from its type -
+// there is no `[transfer x]` / `[share x]` capture keyword.
+own &unit() job = alloc unit() [payload] { use(payload); };
 ```
 
 Capture modes:
@@ -1696,18 +1711,13 @@ overlapping impl is always an error, even if the conflicting impl came
 from a `use`'d declaration.
 
 **Visibility.** `pub` and the cross-module `use Mod.Type.Attr;` rule
-(§10.1) carry over unchanged.  For a parametric receiver `R has Attr`,
-the use form spells `R` verbatim:
-
-```maka
-use shapes.*T.Stored;        // imports the `*T has Stored` impl from shapes
-use shapes.Box<T>.Stored;    // imports the `Box<T> has Stored` impl
-```
-
-The grammar production (§5) is correspondingly relaxed: in `use ModPath . R . Attr ;`,
-`R` may be any receiver pattern (concrete `Type`, primitive name, or
-parametric form — `*T`, `&T`, `&mut T`, `own *T`, `own &T`, `raw *T`,
-or `Name<T1, T2, ...>` with type variables in any subset of positions).
+(§10.1) carry over unchanged.  NOTE: a `use` currently accepts only a
+concrete or primitive receiver `Type`.  Propagating a **parametric** `has`
+impl (`*T has Stored`, `Box<T> has Stored`, ...) across modules -
+`use shapes.*T.Stored;` / `use shapes.Box<T>.Stored;` - is **not yet
+supported** (the parser rejects a `*` / `<...>` receiver in a `use`), so such
+impls are visible only within their defining module. This is an acknowledged
+gap (§17).
 
 **Receiver placeholder.**  Inside an `attr` declaration or a `has` impl
 body, the existing `_` placeholder type (§1.4) refers to the receiver.
@@ -1802,12 +1812,12 @@ type-checks `ptr` against the **post-resolution** type (i.e. `*Foo`,
 the resolved `*T::Slot`), not against the abstract `T::Slot`.  After
 monomorphization, every field type is concrete.
 
-**Pattern matching.**  Pattern scrutinees always have concrete
-monomorphized types — generics are erased before pattern dispatch.
-A binding in `match (w) { Wrapper { inner } ... }` receives the
-**concrete resolved** field type of the matched instantiation (`*Foo`,
-not the abstract `T::Slot`).  (Maka match arms are arrow-less - `Pattern body,`
-per §8 - not `Pattern => body`.)
+**Field access, not struct match.**  Generics are erased before dispatch, so a
+scrutinee always has a concrete monomorphized type. `match` requires an ENUM
+scrutinee (§8) - a plain `data` like `Wrapper` is **not** matchable - so read its
+assoc-typed field directly: `w.inner` has the **concrete resolved** field type of
+the matched instantiation (`*Foo`, not the abstract `T::Slot`).  (Maka match arms
+are arrow-less - `Pattern body,` per §8 - not `Pattern => body`.)
 
 **No-impl-at-decl is fine.**  Writing `data Wrapper<T: Stored> { T::Slot inner; }`
 in a module where **no** `Stored` impls exist yet is not an error.  The
@@ -2152,10 +2162,11 @@ and a `use Module.X.Stored;` for the specific impl being relied on at
 instantiation.  Without that, instantiation is rejected and the missing
 `use` line is suggested in the error hint (per the rule in §10.5).
 
-**Parametric receivers.**  For a `pub` parametric `has` impl
-(`pub *T has Stored { ... }` in `shapes`), the use form spells the
-receiver verbatim: `use shapes.*T.Stored;`.  See §10.4 for the
-full receiver grammar.
+**Parametric receivers.**  A `pub` parametric `has` impl
+(`pub *T has Stored { ... }` in `shapes`) cannot currently be propagated across
+modules: `use shapes.*T.Stored;` is a parse error (a `use` accepts only a concrete
+or primitive receiver `Type`). Such impls are visible only in their defining
+module - an acknowledged gap (§17).
 
 ---
 
@@ -2301,8 +2312,8 @@ A worked stub runtime + smoke test live at `tests/freestanding/`.
 | `panic` | `u32::MAX - 2` | `unit panic(string msg)` | prints to stderr, calls `abort()` |
 | `spawn` | `u32::MAX - 3` | `*Thread spawn(unit() closure)` | accepts bare or alloc'd closure |
 | `join` | `u32::MAX - 4` | `unit join(*Thread t)` | blocks; reclaims handle |
-| `+` (concat) | `u32::MAX - 5` (and `_freel/_freer/_freeb`) | `own *char (string, string)` | binop on two `string`s - result is heap-allocated, auto-freed; chained concats use freeing variants so intermediates don't leak |
-| `read_line` | `u32::MAX - 6` | `own *char read_line()` | reads one line from stdin (NUL-terminated, no trailing `\n`); returns `null` on EOF |
+| `+` (concat) | `u32::MAX - 5` (and `_freel/_freer/_freeb`) | `own *string (string, string)` | binop on two `string`s - result is heap-allocated, auto-freed; chained concats use freeing variants so intermediates don't leak |
+| `read_line` | `u32::MAX - 6` | `own *string read_line()` | reads one line from stdin (NUL-terminated, no trailing `\n`); returns `null` on EOF |
 | `read_int` | `u32::MAX - 7` | `int read_int()` | reads one base-10 integer from stdin; panics on malformed input |
 | `__maka_int_to_str` | `u32::MAX - 11` | `own *char (int)` | format-arg converter; never written by user code |
 | `__maka_bool_to_str` | `u32::MAX - 12` | `own *char (bool)` | format-arg converter |
@@ -2451,5 +2462,19 @@ These are real limitations the implementation is honest about:
   refused.  (A `*T` view LAUNDERED out of such a place into a local is no longer a
   silent use-after-free: it is a tracked, conservatively auto-nulled alias per §6.4,
   so a dangling read observes null + a data-loss warning, not freed memory.)
+- **`some (T1 + T2)` multi-trait columns are not implemented.** A single-trait
+  `Vec<some X>` works; a combined `some (A + B)` column type-checks but is rejected
+  at codegen (the combined vtable/column types are not emitted). Use a single-trait
+  column, or `dyn (A + B)` per value.
+- **Match is enum-only.** `match` requires an ENUM scrutinee; a plain `data`
+  struct is not matchable - read its fields directly (§10.5).
+- **Parametric `has` impls are module-local.** A `*T has Attr` / `Box<T> has Attr`
+  impl cannot be propagated across modules (`use Mod.*T.Attr;` is a parse error);
+  it is visible only in its defining module (§10.4, §11.5).
+- **Associated-type enforcement is partial.** The `type Slot = ...` machinery
+  resolves and monomorphizes, but several declared checks are not enforced: cyclic
+  assoc-type definitions are not rejected, a missing `X has Attr` for a `T::Slot`
+  surfaces as a generic type-mismatch (not the dedicated diagnostic), and the
+  abstract-phase op-restriction is not checked (only the concrete instantiation is).
 
 These are tractable to fix; they are not architectural blockers.
