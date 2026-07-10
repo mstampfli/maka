@@ -1,0 +1,8 @@
+// A slice VIEWS its base's storage; returning a slice of a stack local dangles
+// (stack-use-after-return), exactly like `return &local`. Must be REJECTED.
+// Slices were tracked in-function but had been abandoned by the escape checker.
+[]int leak() {
+    [3]int local = [1, 2, 3];
+    return local;                 // [3]int -> []int slice of a dying frame
+}
+unit main() { []int s = leak(); log(s[0]); }

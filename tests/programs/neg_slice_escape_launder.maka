@@ -1,0 +1,9 @@
+// The same dangle laundered through a passthrough function: `idslice` returns a
+// borrow of its slice param, so `idslice(local)` still borrows `local`. The
+// interprocedural borrow-provenance must follow it and REJECT.
+[]int idslice([]int xs) { return xs; }
+[]int leak() {
+    [3]int local = [11, 22, 33];
+    return idslice(local);
+}
+unit main() { []int s = leak(); log(s[0]); }

@@ -236,9 +236,12 @@ pub fn compute_return_borrows(sym: &SymTab, funcs: &[HFunc]) -> Vec<Vec<bool>> {
 /// Owning carriers (`own *T`, `heap T`, value types) transfer ownership and so
 /// never borrow a parameter.
 fn ty_is_borrowed_view(t: &HType) -> bool {
+    // A slice `[]T` is a borrowed view (ptr+len into someone else's storage), so
+    // a slice-returning function's provenance must be tracked too - else a slice
+    // of a local laundered through it (`return idslice(local)`) dangles uncaught.
     matches!(
         t,
-        HType::Str | HType::Ref { .. } | HType::Ptr { .. } | HType::RawPtr { .. }
+        HType::Str | HType::Ref { .. } | HType::Ptr { .. } | HType::RawPtr { .. } | HType::Slice { .. }
     )
 }
 
@@ -287,7 +290,7 @@ fn params_borrowed_by(e: &HExpr, f: &HFunc, borrows: &[Vec<bool>], acc: &mut Vec
                 if idx < acc.len() { acc[idx] = true; }
             }
         }
-        Field { base, .. } | Index { base, .. } => params_borrowed_by(base, f, borrows, acc),
+        Field { base, .. } | Index { base, .. } | ArrayToSlice { base, .. } => params_borrowed_by(base, f, borrows, acc),
         Call { callee, args } | InlineCall { callee, args, .. } => {
             let cid = callee.0 as usize;
             if let Some(cb) = borrows.get(cid) {
@@ -1569,32 +1572,56 @@ impl<'a> Analyzer<'a> {
     /// Walk an expression tree to catch every `&local` whose root is a
     /// function-scope stack binding — used to reject escape-via-return through
     /// any shape: direct, struct field, array element, variant payload, etc.
+    /// Does a borrow/view rooted at `root` - a `&place` OR a slice of `place` -
+    /// dangle if it escapes the function?  A stack local and a value/owning
+    /// parameter die on return; a non-owning reference/slice parameter (`&T` /
+    /// `*T` / `raw *T` / `[]T`) targets the caller's data, which outlives the
+    /// call, so a borrow or re-slice of it is sound (cf. Rust's elided
+    /// `fn(&Box) -> &int`).  Shared by `AddrOfRef` and `ArrayToSlice` so the two
+    /// can never drift.
+    fn local_borrow_escapes(&self, root: LocalId) -> bool {
+        let li = &self.f().locals[root.0 as usize];
+        match li.storage {
+            StorageClass::Stack => true,
+            StorageClass::Param => !matches!(
+                li.ty,
+                HType::Ref { .. } | HType::Ptr { .. } | HType::RawPtr { .. } | HType::Slice { .. }
+            ),
+            _ => false,
+        }
+    }
+
     fn check_no_local_ref_escape(&mut self, e: &HExpr, under_deref: bool) {
         use HExprKind::*;
         match &e.kind {
             AddrOfRef { place, .. } => {
                 if let Some(root) = root_local(place) {
-                    let li = &self.f().locals[root.0 as usize];
-                    // A borrow rooted in a non-owning reference parameter
-                    // (`&T` / `*T` / `raw *T`) targets the caller's data, which
-                    // outlives the call, so returning it is sound (cf. Rust's
-                    // elided `fn(&Box) -> &int`).  Stack locals, value parameters,
-                    // and OWNING parameters (`own &T` / `own *T`, whose referent
-                    // the function frees on exit) all die on return - reject those.
-                    let escapes = match li.storage {
-                        StorageClass::Stack => true,
-                        StorageClass::Param => !matches!(
-                            li.ty,
-                            HType::Ref { .. } | HType::Ptr { .. } | HType::RawPtr { .. }
-                        ),
-                        _ => false,
-                    };
-                    if escapes {
-                        let name = li.name.clone();
+                    if self.local_borrow_escapes(root) {
+                        let name = self.f().locals[root.0 as usize].name.clone();
                         let span = e.span;
                         self.err(
                             format!(
                                 "reference to local `{}` escapes its scope (via a return, a store into a global, or a push into a longer-lived container) - the local dies here, so the reference would dangle",
+                                name
+                            ),
+                            span,
+                        );
+                    }
+                }
+            }
+            // A slice VIEWS its base's storage, exactly like `&base`.  Slices were
+            // tracked IN-function (kill_lid poisons them like `&T`) but had been
+            // ABANDONED by the escape checker, so `return localArray` was a silent
+            // stack-use-after-return.  Route it through the same escape decision:
+            // a slice of a stack local / dying parameter dangles on return.
+            ArrayToSlice { base, .. } => {
+                if let Some(root) = root_local(base) {
+                    if self.local_borrow_escapes(root) {
+                        let name = self.f().locals[root.0 as usize].name.clone();
+                        let span = e.span;
+                        self.err(
+                            format!(
+                                "slice of local `{}` escapes its scope - the local's storage dies on return, so the slice would dangle. Return an owned `Vec` (or array) by value instead",
                                 name
                             ),
                             span,

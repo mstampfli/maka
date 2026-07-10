@@ -256,7 +256,13 @@ For Maka-managed memory there is no `free`:
   FFI boundary it decays to `T*` (a backend detail - the Maka semantics are
   value-copy).  Returning one by value is rejected (a C array is not an
   assignable value) - return a `Vec`/`data`, or fill a `&mut [N]T` out-param.
-- `[]T` / `[]mut T` - slice (pointer + length).
+- `[]T` / `[]mut T` - slice (pointer + length). A slice is a **borrowed view** and
+  is lifetime-tracked exactly like `&T`: it carries a dep-edge to its source, is
+  **poisoned** when that source moves / reassigns / dies (a later use is a compile
+  error), and a slice of a stack local or a dying (value/owning) parameter is
+  **escape-checked** - returning it, storing it into a global, or laundering it
+  through a function that returns a borrow of it is rejected (it would dangle). A
+  slice of a `&T`/`*T`/`[]T` parameter is fine (the source outlives the call).
 - `[*]T` - vector payload (only inside `own &[*]T`).
 - `Name<T, U>` - generic instantiation. Monomorphized at compile time.
 - `RetType(P1, P2)` - function pointer type (also covers closure types via the
