@@ -1,0 +1,9 @@
+// Strict `own &T`: an `own &T` is bound once and never re-pointed. Reassigning a
+// live `own &T` must be REJECTED - a switchable owner is `own *T`. Regression
+// guard for the drift where `own &T` was treated as reassignable (move-on-assign).
+data Node { mut int v; }
+unit main() {
+    mut own &Node n = alloc Node { v = 0 };
+    n = alloc Node { v = 1 };   // reassign a live own &T -> rejected
+    log(n.v);
+}

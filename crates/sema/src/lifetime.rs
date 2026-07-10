@@ -983,6 +983,29 @@ impl<'a> Analyzer<'a> {
                     self.walk_expr(place);
                 }
                 self.walk_expr(value);
+                // Strict `own &T` (SPEC 6.1): a `Heap` owner is bound ONCE.  It is
+                // initialized at its declaration (a `Let` with inline init, NOT this
+                // `Assign`), moved out (which consumes it), or freed at scope exit -
+                // but never RE-POINTED.  Re-pointing a non-null owned slot is the
+                // `own *T` job (nullable + reassignable); `&` is non-reassignable for
+                // owners exactly as it is for borrows.  So any assignment to an
+                // `own &T` place is rejected.
+                if matches!(place.ty, HType::Heap { .. }) {
+                    // Exempt compiler-synthetic slots: the `__yield` result local is
+                    // `ZeroInit`'d (null buffers) then assigned across match/if arms -
+                    // a legitimate free-on-null-reassign, not a user re-point. Only a
+                    // bare `__`-prefixed Local is synthetic; user names never are, and
+                    // a user `own &T` FIELD (`s.a = ..`) is still rejected.
+                    let is_synthetic = if let HExprKind::Local(id) = place.kind {
+                        self.f().locals[id.0 as usize].name.starts_with("__")
+                    } else { false };
+                    if !is_synthetic {
+                        self.err(
+                            "cannot reassign `own &T` (a bound-once, guaranteed-owned slot) - use `own *T` for a switchable/swappable owner".to_string(),
+                            *span,
+                        );
+                    }
+                }
                 // A bare owning Local on the RHS is moved by the assignment.  A
                 // conditional move (e.g. `if (k != null) { nk[i] = k; }`) no
                 // longer hard-errors at the branch join - join_branches auto-nulls

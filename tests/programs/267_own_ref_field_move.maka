@@ -1,18 +1,17 @@
-// Initializing an `own &T` local from an `own &T` struct field (a heap-pointer
-// field read) moves the pointer; codegen must not mistake it for a plain value
-// being heap-allocated.  Exercises the take-and-replace idiom (swap two owning
-// fields through &mut).  (Leak/double-free-freedom verified out of band.)
+// Swapping two owning fields. Under strict `own &T` (bound once, non-reassignable)
+// the swap idiom `p.a = p.b` is exactly the `own *T` job: a switchable/swappable
+// owner is nullable + reassignable. Moving one out nulls it, then reassigning
+// re-points it (drop-then-move); the round-trip is leak- and double-free-free.
 data Box { mut int v; }
-data Pair { mut own &Box a; mut own &Box b; }
+data Pair { mut own *Box a; mut own *Box b; }
 unit swap_fields(&mut Pair p) {
-    own &Box tmp = p.a;     // move the heap-pointer field out...
-    p.a = p.b;              // ... and immediately replace it
-    p.b = tmp;
+    own *Box tmp = p.a;     // move `a` out (nulls the source field)
+    p.a = p.b;              // re-point `a` (own *T reassignable): `b` moves in
+    p.b = tmp;              // re-point `b`: tmp moves in
 }
-int firsta(&Pair p) { return p.a.v; }
 unit main() {
     mut Pair p = Pair { a = alloc Box { v = 1 }, b = alloc Box { v = 2 } };
-    log(firsta(&p));     // 1
+    if (p.a != null) { log(p.a!.v); }   // 1
     swap_fields(&mut p);
-    log(firsta(&p));     // 2
+    if (p.a != null) { log(p.a!.v); }   // 2  (a and b swapped)
 }

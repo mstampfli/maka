@@ -117,15 +117,20 @@ Five categories of pointer-like things, each with a distinct contract:
 | type | nullable | owns | rebindable | tracked | deref | use case |
 |---|---|---|---|---|---|---|
 | `own *T` | yes | yes (when non-null) | yes | – | `!` | optional / switchable owner |
-| `own &T` | no | yes | (move on assign) | – | auto | guaranteed-owned slot |
+| `own &T` | no | yes | no (bound once) | – | auto | guaranteed-owned slot |
 | `*T` | yes | no | yes | yes (null) | `!` | non-owning view, cursor, FFI shim |
 | `&T` / `&mut T` | no | no | no | yes (poison) | auto | tracked borrow |
 | `raw *T` | yes | no | yes | no | `!` (inside `unsafe`) | unsafe escape, FFI |
 
 `own &T` is the same internal type that older specs called `heap T` - the
-binding owns a single heap allocation that is auto-freed at scope exit or
-transferred via assignment. It is non-null by construction and accessed without
-`!`. The legacy keyword `heap` has been removed; write `own &T` instead.
+binding owns a single heap allocation that is auto-freed at scope exit. It is
+**bound once**: initialized at its declaration, moved out (which consumes it,
+nulling the source slot), or dropped - but never RE-POINTED. Assigning to a live
+`own &T` is a compile error; a switchable owner is `own *T` (nullable +
+reassignable), which is also what you use for a slot you need to swap. Like `&T`
+for borrows, `&` is non-reassignable for owners too. It is non-null by
+construction and accessed without `!`. The legacy keyword `heap` has been
+removed; write `own &T` instead.
 
 `*T` is the flexible escape valve: nullable, freely rebindable, and **flow-tracked
 like `&T`** - the difference is the invalidation mechanism. When the owner a `*T`
