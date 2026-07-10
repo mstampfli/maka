@@ -1,0 +1,5 @@
+// Inline `data <T: Attr>` bound is enforced at instantiation (like `where T has Attr`).
+attr A { int a(&_ self); }
+data Bar { int v; }
+data Pick<T: A> { T x; }
+unit main() { Pick<Bar> p = Pick<Bar> { x = Bar { v = 1 } }; log(0); }

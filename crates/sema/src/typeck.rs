@@ -2174,6 +2174,23 @@ impl<'a> TypeChecker<'a> {
         None
     }
 
+    /// Count DISTINCT `embed` paths from `start` to `target` (each embed field is a
+    /// distinct edge).  >1 means the target type is reachable ambiguously - a
+    /// diamond - so promoting a method to it is ambiguous even with a single impl,
+    /// the same rule the field-access path uses.
+    fn count_embed_paths(&self, start: StructId, target: StructId) -> usize {
+        if start == target { return 1; }
+        let info = self.sym.struct_info(start);
+        let mut n = 0;
+        for f in &info.fields {
+            if !f.is_embed { continue; }
+            if let Some(sid) = struct_id_of(&f.ty) {
+                n += self.count_embed_paths(sid, target);
+            }
+        }
+        n
+    }
+
     fn check_index(&mut self, base: &ast::Expr, idx: &ast::Expr, sp: Span) -> HExpr {
         let bh = self.check_expr(base, None);
         // Don't pre-coerce the index — it might be a different type for an overloaded Index.
@@ -4193,7 +4210,21 @@ impl<'a> TypeChecker<'a> {
                 match hits.len() {
                     0 => {}
                     1 => {
-                        let (fid, sig, path, _target) = hits.remove(0);
+                        let (fid, sig, path, target) = hits.remove(0);
+                        // Diamond: even with a single impl, if the target type is
+                        // reachable through MORE THAN ONE embed path the receiver is
+                        // ambiguous (matches the field-ambiguity rule); `find_embed_path`
+                        // returned just the first path.
+                        if self.count_embed_paths(recv_sid, target) > 1 {
+                            self.err(
+                                format!(
+                                    "call to `{}` is ambiguous via embed promotion - the receiver type is reachable through more than one embed path; qualify the receiver (e.g. `value.embed_field.{}()`)",
+                                    name, name,
+                                ),
+                                sp,
+                            );
+                            return HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp };
+                        }
                         // Drill the embed chain into probed[0].
                         let drilled = self.drill_embed_path(probed[0].clone(), &path);
                         // Wrap in AddrOfRef if the target wants a reference / borrow.
@@ -7063,6 +7094,15 @@ fn param_compatible_impl(param: &HType, actual: &HType, type_params: &[String], 
     if matches!(param, HType::Str)
         && matches!(actual, HType::Array { elem, .. } if matches!(elem.as_ref(), HType::Char)) {
         return true;
+    }
+    // A `Vec<Struct>` argument matches a single-trait `Vec<some X>` parameter -
+    // implicit dense-column packing (parity with the assignment / push coercion).
+    // Overload selection only needs to let it THROUGH here; `coerce` at the call
+    // does the real `Struct has X` check and the pack (and errors if unsatisfied).
+    if let (HType::Vec { elem: pe }, HType::Vec { elem: ae }) = (param, actual) {
+        if let (HType::Dyn { traits, locked: true }, HType::Struct(_)) = (pe.as_ref(), ae.as_ref()) {
+            if traits.len() == 1 { return true; }
+        }
     }
     // Allow null → ptr.
     if matches!(actual, HType::NullT) && matches!(param, HType::Ptr { .. }) { return true; }

@@ -1357,6 +1357,29 @@ impl SymTab {
                     // with both receiver patterns".  We rely on the
                     // pattern-vs-pattern unification helper.
                     let mut overlapped = false;
+                    // Normalize a monomorphized `Struct(id)` / `Enum(id)` receiver
+                    // back to its `GenericPattern` (template + args) so a concrete
+                    // `Box<int>` (a `Struct`) and a generic `Box<T>` (a `GenericPattern`)
+                    // are compared head-to-head by `patterns_overlap` (§10.4).
+                    let norm = |t: &HType| -> HType {
+                        match t {
+                            HType::Struct(sid) => {
+                                let info = sym.struct_info(*sid);
+                                match &info.template {
+                                    Some(tn) => HType::GenericPattern { template_name: tn.clone(), args: info.template_args.clone(), is_enum: false },
+                                    None => t.clone(),
+                                }
+                            }
+                            HType::Enum(eid) => {
+                                let info = sym.enum_info(*eid);
+                                match &info.template {
+                                    Some(tn) => HType::GenericPattern { template_name: tn.clone(), args: info.template_args.clone(), is_enum: true },
+                                    None => t.clone(),
+                                }
+                            }
+                            _ => t.clone(),
+                        }
+                    };
                     for prior in sym.has_impls.iter() {
                         if prior.attr_name != h.attr_name { continue; }
                         // Two impls of the same attr conflict only if BOTH the
@@ -1368,8 +1391,8 @@ impl SymTab {
                         if !prior.attr_args.iter().zip(attr_args.iter())
                             .all(|(a, b)| crate::typeck::type_eq(a, b)) { continue; }
                         if patterns_overlap(
-                            &prior.receiver_pattern, &prior.receiver_tyvars,
-                            &receiver_pattern, &receiver_tyvars,
+                            &norm(&prior.receiver_pattern), &prior.receiver_tyvars,
+                            &norm(&receiver_pattern), &receiver_tyvars,
                         ) {
                             errors.push(SemaError {
                                 msg: format!(
@@ -1571,12 +1594,44 @@ impl SymTab {
         // concretely (or, for unmonomorphized signatures, collapse nested
         // `T::A::Slot` into `attr_hint: Some("A")` so the eventual
         // instantiation site sees the disambiguated form).
+        // A CONCRETE (non-type-variable) `on` that still carries an unresolved
+        // `AssocType` after resolution means the type has no visible `has` impl
+        // providing that associated type - surface a dedicated diagnostic (spec
+        // 10.5) instead of leaking the placeholder into a downstream type-mismatch.
+        // Tyvar-rooted assoc types (`T::Slot` in a generic template) stay abstract.
+        fn first_unresolved_assoc(t: &HType) -> Option<(HType, String)> {
+            fn tyvar_rooted(t: &HType) -> bool {
+                match t { HType::TyVar(_) => true, HType::AssocType { on, .. } => tyvar_rooted(on), _ => false }
+            }
+            match t {
+                HType::AssocType { on, segment, .. } if !tyvar_rooted(on) =>
+                    Some(((**on).clone(), segment.clone())),
+                HType::Ref { inner, .. } | HType::Ptr { inner, .. } | HType::RawPtr { inner, .. }
+                | HType::OwnPtr { inner, .. } | HType::Heap { inner } => first_unresolved_assoc(inner),
+                HType::Array { elem, .. } | HType::Slice { elem, .. } | HType::Vec { elem } => first_unresolved_assoc(elem),
+                HType::AssocType { on, .. } => first_unresolved_assoc(on),
+                _ => None,
+            }
+        }
         let sym_snapshot = sym.clone();
+        let mut assoc_errs: Vec<SemaError> = Vec::new();
         for s in sym.structs.iter_mut() {
             for f in s.fields.iter_mut() {
                 f.ty = resolve_assoc_types_in(&sym_snapshot, &f.ty);
+                if let Some((on_ty, seg)) = first_unresolved_assoc(&f.ty) {
+                    let on_name = match &on_ty {
+                        HType::Struct(sid) => sym_snapshot.struct_info(*sid).name.clone(),
+                        HType::Enum(eid) => sym_snapshot.enum_info(*eid).name.clone(),
+                        other => crate::typeck::type_str(other),
+                    };
+                    assoc_errs.push(SemaError {
+                        msg: format!("type `{}` does not provide the associated type `{}::{}` - it has no visible `has` impl declaring `{}` (implement the attr for `{}`, or `use` its impl)", on_name, on_name, seg, seg, on_name),
+                        span: s.span,
+                    });
+                }
             }
         }
+        errors.append(&mut assoc_errs);
         for sig in sym.sigs.iter_mut() {
             sig.ret = resolve_assoc_types_in(&sym_snapshot, &sig.ret);
             for pt in sig.param_tys.iter_mut() {

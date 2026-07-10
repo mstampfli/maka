@@ -2471,10 +2471,14 @@ These are real limitations the implementation is honest about:
 - **Parametric `has` impls are module-local.** A `*T has Attr` / `Box<T> has Attr`
   impl cannot be propagated across modules (`use Mod.*T.Attr;` is a parse error);
   it is visible only in its defining module (§10.4, §11.5).
-- **Associated-type enforcement is partial.** The `type Slot = ...` machinery
-  resolves and monomorphizes, but several declared checks are not enforced: cyclic
-  assoc-type definitions are not rejected, a missing `X has Attr` for a `T::Slot`
-  surfaces as a generic type-mismatch (not the dedicated diagnostic), and the
-  abstract-phase op-restriction is not checked (only the concrete instantiation is).
+- **Associated-type enforcement is partial (two remaining checks).** The
+  `type Slot = ...` machinery resolves and monomorphizes, and a missing `X has Attr`
+  for a `T::Slot` now reports a dedicated diagnostic. Two declared checks are still
+  not enforced: (1) a CYCLIC / self-referential assoc-type definition is not rejected
+  at sema - like any infinite-size struct (`data A { A a; }`), it is deferred to the
+  C compiler rather than sema-checked; and (2) the abstract-phase op-restriction is
+  not checked - an operation on a bare `T::Slot` is validated only at each concrete
+  instantiation, not against the attr's exposed operations up front. Both need new
+  type-system analysis (size/cycle detection; two-phase abstract checking).
 
 These are tractable to fix; they are not architectural blockers.

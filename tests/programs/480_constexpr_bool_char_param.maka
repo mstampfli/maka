@@ -1,0 +1,8 @@
+// A `constexpr` fn with a `bool`/`char` PARAMETER folds in a constant-decl
+// position (the token-stream decl-folder handles bool/char literal arguments).
+constexpr int pick(bool b) { if (b) { return 7; } else { return 9; } }
+constexpr int tag(char c) { return 3; }
+constexpr int P = pick(true);
+constexpr int Q = pick(false);
+constexpr int R = tag('A');
+unit main() { log(P); log(Q); log(R); }

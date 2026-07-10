@@ -1,0 +1,6 @@
+// Constructing `Wrapper<Foo>` where `Foo` has no `has Stored` impl (required for
+// the `T::Slot` field) gives a dedicated diagnostic, not a leaked-placeholder error.
+attr Stored { type Slot; int get(&_ self); }
+data Wrapper<T> where T has Stored { T::Slot inner; }
+data Foo { int v; }
+unit main() { Wrapper<Foo> w = Wrapper<Foo> { inner = 5 }; log(0); }

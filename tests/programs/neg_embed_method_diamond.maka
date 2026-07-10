@@ -1,0 +1,13 @@
+// A method reachable through TWO distinct embed paths to the same receiver type
+// is ambiguous (matches the field-ambiguity rule), not silently first-path.
+data A { mut int x = 0; }
+attr Tick { unit tick(&mut _ self); }
+A has Tick { unit tick(&mut A self) { self.x = self.x + 1; } }
+data L { embed A a1; }
+data R { embed A a2; }
+data Both { embed L l; embed R r; }
+unit main() {
+    mut Both b = Both { l = L { a1 = A { x = 1 } }, r = R { a2 = A { x = 2 } } };
+    b.tick();
+    log(0);
+}

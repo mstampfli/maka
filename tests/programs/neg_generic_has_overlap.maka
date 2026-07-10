@@ -1,0 +1,7 @@
+// Overlapping generic-struct `has` impls are rejected (coherence, §10.4):
+// `Box<int>` unifies with `Box<T>`.
+attr S { int f(&_ self); }
+data Box<T> { T v; }
+Box<int> has S { int f(&_ self) { return 1; } }
+Box<T> has S { int f(&_ self) { return 2; } }
+unit main() { Box<int> b = { v = 9 }; log(0); }

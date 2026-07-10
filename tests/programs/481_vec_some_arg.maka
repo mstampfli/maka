@@ -1,0 +1,16 @@
+// A `Vec<Struct>` coerces (dense-column packs) into a `Vec<some X>` PARAMETER
+// at the call site, not only in binding/push position.
+data Gram { int g; }
+attr Weigh { int wt(&_ self); }
+Gram has Weigh { int wt(&Gram self) { return self.g; } }
+int total(Vec<some Weigh> col) {
+    mut int t = 0;
+    for (some Weigh w in col) { t = t + Weigh.wt(&w); }
+    return t;
+}
+unit main() {
+    Vec<Gram> gs = [];
+    push(gs, Gram { g = 2 });
+    push(gs, Gram { g = 3 });
+    log(total(gs));            // packs Vec<Gram> -> Vec<some Weigh> at the arg: 5
+}

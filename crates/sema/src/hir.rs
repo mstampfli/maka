@@ -266,6 +266,17 @@ pub fn patterns_overlap(
             (HType::Array { len: ll, elem: le }, HType::Array { len: rl, elem: re })
                 if ll == rl => go(le, lvars, re, rvars, lenv, renv),
             (HType::Vec { elem: le }, HType::Vec { elem: re }) => go(le, lvars, re, rvars, lenv, renv),
+            // Generic-struct/enum receiver patterns (`Box<T>`, `Box<int>`,
+            // `Pair<int, B>`): same template head + arity, arguments unify
+            // pairwise (a type var on either side binds).  Without this arm the
+            // `_` fell through to `false`, so `Box<int> has S` and `Box<T> has S`
+            // (and even two identical `Box<int>` impls) were not detected as
+            // overlapping - a coherence hole that reached the C compiler as a
+            // symbol redefinition (§10.4).
+            (HType::GenericPattern { template_name: ln, args: la, is_enum: le },
+             HType::GenericPattern { template_name: rn, args: ra, is_enum: re })
+                if ln == rn && le == re && la.len() == ra.len() =>
+                la.iter().zip(ra.iter()).all(|(l, r)| go(l, lvars, r, rvars, lenv, renv)),
             _ => false,
         }
     }

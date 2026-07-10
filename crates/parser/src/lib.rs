@@ -359,6 +359,12 @@ impl Parser {
     fn fold_atom(&mut self) -> Option<i64> {
         match self.peek().clone() {
             TokKind::Int(n) => { self.bump(); Some(n) }
+            // Bool / char literals fold to their integer value, so a `constexpr`
+            // call with a `bool`/`char` ARGUMENT (`pick(true)`, `g('A')`) folds in a
+            // constant-decl position, matching the CTFE interpreter (`ct_expr`).
+            TokKind::True => { self.bump(); Some(1) }
+            TokKind::False => { self.bump(); Some(0) }
+            TokKind::CharLit(c) => { self.bump(); Some(c as i64) }
             TokKind::Minus => { self.bump(); let n = self.fold_atom()?; Some(-n) }
             TokKind::LParen => { self.bump(); let v = self.fold_addsub()?; if !self.eat(&TokKind::RParen) { return None; } Some(v) }
             TokKind::Ident(name) => {
@@ -1074,8 +1080,12 @@ impl Parser {
     fn parse_data(&mut self) -> Result<DataDecl, ParseError> {
         let kw = self.expect(&TokKind::Data, "`data`")?;
         let (name, _) = self.expect_ident("struct name")?;
-        let type_params = self.parse_type_params()?;
-        let where_clauses = self.parse_where_clauses()?;
+        // Capture inline `<T: Attr>` bound shorthands (previously discarded), and
+        // fold them into `where_clauses` exactly like a function decl does, so a
+        // `data Pick<T: A>` bound is enforced at instantiation like `where T has A`.
+        let (type_params, _tp_defaults, inline_bounds) = self.parse_type_params_with_bounds(false)?;
+        let mut where_clauses = self.parse_where_clauses()?;
+        for b in inline_bounds { where_clauses.push(b); }
         self.expect(&TokKind::LBrace, "`{`")?;
         let mut fields = Vec::new();
         while !self.at(&TokKind::RBrace) {
