@@ -2880,16 +2880,38 @@ fn check_scoped_thread_borrows(f: &HFunc, errors: &mut Vec<SemaError>) {
 }
 
 
-/// A struct all of whose owning fields are `own *T` (nullable): a field-granular
-/// stack VALUE.  Copying it copies the plain fields and moves (auto-nulls) only
-/// the own* fields, so the source stays usable.  Excludes own& / Vec / nested
-/// owning fields (those keep whole-value move).  Mirrors codegen's
-/// `struct_own_ptr_granular`.
+/// An owning field CLEARABLE to a moved-out sentinel whose stale use is CAUGHT:
+/// a nullable `own *T` (cleared to NULL, and any later read is a `!` deref that
+/// fails its non-null proof - the use-after-move is a compile error), or a nested
+/// struct that is itself all-`own *T` field-granular (clear recursively).
+///
+/// A `Vec`/`String` field is NOT zeroable: clearing it to "empty" leaves a plain
+/// read with NO proof gate, so the stale value is silently observable - and for a
+/// type with an invariant beyond emptiness (`String`, NUL-terminated: `length()`
+/// is `buf.len - 1`, needs `len >= 1`) that silent read is garbage (`-1`).  Only
+/// the deref gate makes clear-in-place sound, so only `own *T` gets it; every
+/// other owning field makes its container whole-move-and-poison (SPEC 6.1: "a
+/// struct containing a nested owning value is not field-granular").  EXCLUDES
+/// `own &T` (`Heap`, non-nullable) for the same no-gate reason.
+pub(crate) fn is_zeroable_owning(sym: &SymTab, ty: &HType) -> bool {
+    match ty {
+        HType::OwnPtr { .. } => true,
+        HType::Struct(_) => is_own_ptr_granular(sym, ty),
+        _ => false,
+    }
+}
+
+/// A struct that is a field-granular stack VALUE (the whole-language rule:
+/// containing an owning thing does NOT make the wrapper affine).  Copying it
+/// copies the plain fields and clears each owning field in the source (so the
+/// source stays a valid value - own* fields null, Vec fields empty).  True when
+/// EVERY owning field is zeroable and there is at least one owning field.
+/// Mirrors codegen's `struct_own_ptr_granular`.
 pub(crate) fn is_own_ptr_granular(sym: &SymTab, ty: &HType) -> bool {
     if let HType::Struct(sid) = ty {
         let si = sym.struct_info(*sid);
-        si.fields.iter().all(|fi| !ty_owns_heap(sym, &fi.ty) || matches!(fi.ty, HType::OwnPtr { .. }))
-            && si.fields.iter().any(|fi| matches!(fi.ty, HType::OwnPtr { .. }))
+        si.fields.iter().all(|fi| !ty_owns_heap(sym, &fi.ty) || is_zeroable_owning(sym, &fi.ty))
+            && si.fields.iter().any(|fi| ty_owns_heap(sym, &fi.ty))
     } else { false }
 }
 

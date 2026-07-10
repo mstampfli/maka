@@ -10220,16 +10220,13 @@ void __maka_pool_free(maka_unit* poolv) {
             if matches!(&e.ty, HType::OwnPtr { .. }) {
                 return format!("(__extension__ ({{ {0} __mc = {1}; {2} = NULL; __mc; }}))", ty, s, place);
             }
-            // Field-granular struct moved by value: copy it, null its own* fields
-            // in the source (plain fields stay readable, ownership moves).
+            // Field-granular struct moved by value: copy it, then clear ALL its
+            // owning fields in the source (own* -> NULL, Vec -> empty, nested ->
+            // recurse) so the source stays a valid value and its buffer isn't
+            // freed twice.  (Filtering own* only was the pass-by-value double-free.)
             if self.struct_own_ptr_granular(&e.ty) {
-                if let HType::Struct(sid) = &e.ty {
-                    let nulls: String = self.sym.struct_info(*sid).fields.clone().iter()
-                        .filter(|fi| matches!(fi.ty, HType::OwnPtr { .. }))
-                        .map(|fi| format!("{}.{} = NULL; ", place, c_ident(&fi.name)))
-                        .collect();
-                    return format!("(__extension__ ({{ {0} __mc = {1}; {2}__mc; }}))", ty, s, nulls);
-                }
+                let nulls = self.field_granular_null_stmts(&place, &e.ty);
+                return format!("(__extension__ ({{ {0} __mc = {1}; {2}__mc; }}))", ty, s, nulls);
             }
         }
         if !matches!(&e.kind, HExprKind::Field { .. } | HExprKind::Index { .. }) { return s; }
@@ -10251,25 +10248,55 @@ void __maka_pool_free(maka_unit* poolv) {
     /// (nulls) the own* fields, leaving the source usable.  Excludes own& / Vec /
     /// nested-owning fields (those keep whole-value move).  Mirrors sema's
     /// `is_own_ptr_granular`.
+    /// An owning field clearable to a moved-out sentinel whose stale use is CAUGHT:
+    /// `own *T` (NULL, caught by the `!` deref proof) or a nested all-`own *T`
+    /// field-granular struct.  Mirrors sema's `is_zeroable_owning`.  `Vec`/`String`
+    /// (no proof gate -> a cleared-to-empty field reads back silently, and for
+    /// String's `len-1` length that is `-1`) and `own &T` (non-nullable) are
+    /// EXCLUDED: their container whole-moves-and-poisons instead.
+    fn struct_field_zeroable(&self, ty: &HType) -> bool {
+        match ty {
+            HType::OwnPtr { .. } => true,
+            HType::Struct(_) => self.struct_own_ptr_granular(ty),
+            _ => false,
+        }
+    }
     fn struct_own_ptr_granular(&self, ty: &HType) -> bool {
         if let HType::Struct(sid) = ty {
             let si = self.sym.struct_info(*sid);
-            si.fields.iter().all(|fi| !self.drop_ty_owns(&fi.ty) || matches!(fi.ty, HType::OwnPtr { .. }))
-                && si.fields.iter().any(|fi| matches!(fi.ty, HType::OwnPtr { .. }))
+            si.fields.iter().all(|fi| !self.drop_ty_owns(&fi.ty) || self.struct_field_zeroable(&fi.ty))
+                && si.fields.iter().any(|fi| self.drop_ty_owns(&fi.ty))
         } else { false }
     }
 
-    /// Null the `own *T` fields of a field-granular struct at `place` (the plain
-    /// fields are copied by the struct assignment; only ownership moves).
-    fn null_own_ptr_fields(&mut self, place: &str, ty: &HType) {
+    /// The C statements clearing a field-granular struct's owning fields at
+    /// `place` to their moved-out sentinel (own* -> NULL, nested -> recurse), as a
+    /// string so BOTH move paths share it: `wl` lines (`null_own_ptr_fields`) and a
+    /// statement-expression (`emit_move_consuming`).  Only `own *T` (and nested
+    /// all-`own *T` structs) are cleared here - a field-granular struct has no
+    /// `Vec`/`String`/`own &T` owning fields by construction (`struct_field_zeroable`).
+    fn field_granular_null_stmts(&self, place: &str, ty: &HType) -> String {
+        let mut out = String::new();
         if let HType::Struct(sid) = ty {
-            let fields = self.sym.struct_info(*sid).fields.clone();
-            for fld in &fields {
-                if matches!(fld.ty, HType::OwnPtr { .. }) {
-                    self.wl(&format!("({}).{} = NULL;", place, c_ident(&fld.name)));
+            for fld in self.sym.struct_info(*sid).fields.clone().iter() {
+                let fp = format!("({}).{}", place, c_ident(&fld.name));
+                match &fld.ty {
+                    HType::OwnPtr { .. } => out.push_str(&format!("{} = NULL; ", fp)),
+                    HType::Struct(_) if self.struct_own_ptr_granular(&fld.ty) =>
+                        out.push_str(&self.field_granular_null_stmts(&fp, &fld.ty)),
+                    _ => {}
                 }
             }
         }
+        out
+    }
+
+    /// Clear a field-granular struct's owning fields at `place` to their moved-out
+    /// sentinel (own* -> NULL, Vec -> empty, nested -> recurse).  The plain fields
+    /// are copied by the struct assignment; only ownership moves.
+    fn null_own_ptr_fields(&mut self, place: &str, ty: &HType) {
+        let stmts = self.field_granular_null_stmts(place, ty);
+        if !stmts.is_empty() { self.wl(&stmts); }
     }
 
     fn emit_move_out_null(&mut self, f: &HFunc, src: &HExpr) {

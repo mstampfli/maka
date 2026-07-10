@@ -828,7 +828,22 @@ if (p != null) { log(p!.value); } // OK - p is provably null here, branch skippe
 moves per-field: copying the struct copies its plain fields and auto-nulls only
 the `own *T` fields.  `S s2 = s;` leaves `s.id` (a plain field) readable and
 `s.fltptr` (`own *f32`) null.  A struct containing an `own &T` (or a nested
-owning value) is not field-granular - it moves and poisons as a whole.
+owning value like `Vec`/`String`) is not field-granular - a WHOLE-value move
+(`S s2 = s;`, a return, a consuming call) moves and **poisons** it as a whole
+(owning values have no null state, so the source is hard-invalidated: any use is
+a compile error, and there is no incoherent leftover).
+
+**Moving a value field OUT** is different, and it is a *partial* move selected by
+syntax: `String x = s.name;` (an explicit field access) transfers `name`'s buffer
+to `x`, **nulls the source field** (drop-safe: `s`'s later drop frees nothing
+there), and leaves `s`'s OTHER fields usable.  This is the value-field twin of the
+`own *T` field move-out - except a value field has no null-proof gate, so the
+compiler does NOT reject a read of the moved-out field: reading `s.name` back
+yields the type's ZEROED value (e.g. an empty-but-not-NUL-terminated `String`
+whose `length()` is `-1`).  **Memory safety is guaranteed** (no double-free, no
+leak, on every path); **coherence of the moved-out field is the programmer's job**
+(reassign it, or simply do not read it), not compiler-checked.  This is the "you
+directly named the field, so you own what you left behind" rule.
 
 Returning an owning value moves it to the caller.  Passing it as a `own *T` /
 `own &T` argument moves it into the callee.

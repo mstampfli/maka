@@ -1,0 +1,24 @@
+// Moving a value field (`String`/`Vec`) OUT of a struct via explicit field access
+// is a partial move: the buffer transfers to the new binding, the field is nulled
+// (drop-safe, so the struct's later drop frees nothing there), and the struct's
+// OTHER fields stay usable. Memory safety (no double-free / no leak) is guaranteed;
+// COHERENCE of the moved-out field is the programmer's job (reading it back yields
+// the type's zeroed value, not compiler-checked). Contrast a WHOLE-value move
+// (`Box c = a;`) which poisons the source - owning values have no null state.
+import std.{String, StringOps, string_from};
+
+data Box  { mut String name; mut int id; }
+data VBox { mut Vec<int> xs; mut int id; }
+
+unit main() {
+    Box a = Box { name = string_from("hello"), id = 7 };
+    String x = a.name;              // move the String field out (a.name nulled)
+    log(x.length());               // 5
+    log(a.id);                     // 7 - the other field stays usable
+
+    mut VBox b = VBox { xs = [], id = 3 };
+    push(b.xs, 10); push(b.xs, 20);
+    Vec<int> y = b.xs;             // move the Vec field out (b.xs nulled)
+    log(y.len);                    // 2
+    log(b.id);                     // 3
+}
