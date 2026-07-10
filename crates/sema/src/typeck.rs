@@ -1128,15 +1128,16 @@ impl<'a> TypeChecker<'a> {
                         }
                         HType::RawPtr { mutable: *mutable, inner: Box::new(inner_ty) }
                     }
-                    Some(HType::Ptr { .. }) => {
+                    Some(HType::Ptr { .. }) | Some(HType::Ref { .. }) => {
                         self.err(
                             "`alloc value` must land in an owning slot (`own *T` or `own &T`) - \
-                             assigning an allocation to a non-owning `*T` would leak with no auto-free. \
-                             Declare the binding as `own *T` or downgrade explicitly later.",
+                             assigning an allocation to a non-owning `*T` / `&T` would leak with no \
+                             auto-free. Declare the binding as `own *T` or `own &T`, or downgrade \
+                             explicitly later.",
                             *span,
                         );
-                        // Continue with Ptr so we don't cascade errors.
-                        HType::Ptr { mutable: true, inner: Box::new(inner_ty) }
+                        // Continue with the target shape so we don't cascade errors.
+                        expected.unwrap().clone()
                     }
                     // No explicit target type — default to nullable owning so the
                     // result is captured and auto-freed.
@@ -1401,6 +1402,25 @@ impl<'a> TypeChecker<'a> {
     /// are processed, so globals are visible from every function.
     pub fn check_global_init(mut self, init: &ast::Expr, ty: &HType) -> Result<HExpr, Vec<SemaError>> {
         let h = self.check_expr_coerce(init, ty);
+        // A module-scope global must fold to a C constant expression: literals and
+        // their arithmetic / bitwise combinations (mirrors codegen `emit_global_init`).
+        // A call, an `alloc`, or a variable reference does NOT fold - previously such
+        // an initializer was silently emitted as `0`/NULL (a miscompile), so reject it.
+        fn first_nonconst(e: &HExpr) -> Option<Span> {
+            use HExprKind::*;
+            match &e.kind {
+                LitInt(_) | LitBool(_) | LitChar(_) | LitFloat(_) | LitStr(_)
+                | LitNull | LitUnit => None,
+                Un { op: HUnOp::Neg, expr } => first_nonconst(expr),
+                Bin { lhs, rhs, .. } => first_nonconst(lhs).or_else(|| first_nonconst(rhs)),
+                _ => Some(e.span),
+            }
+        }
+        if self.errors.is_empty() {
+            if let Some(sp) = first_nonconst(&h) {
+                self.err("a module-scope global's initializer must fold to a C constant expression (integer/bool/char/float literals and their arithmetic and bitwise combinations); calls and `alloc` are not supported".to_string(), sp);
+            }
+        }
         if self.errors.is_empty() { Ok(h) } else { Err(std::mem::take(&mut self.errors)) }
     }
 
@@ -6053,6 +6073,16 @@ impl<'a> TypeChecker<'a> {
             if let HType::Dyn { traits, locked: true } = te.as_ref() {
                 if let HType::Struct(sid) = se.as_ref() {
                     let sid = *sid;
+                    // A multi-trait `some (A + B)` COLUMN is not implemented: the dense
+                    // codegen carries a single-trait vtable, so packing with `traits[0]`
+                    // and dropping the rest emits references to combined vtable/column
+                    // types (`SomeVec_A_B`, `Dyn_A_B`) that are never defined -> broken C.
+                    // Reject cleanly instead (use a single-trait column, or `dyn (A+B)`
+                    // per value).  Single-trait `Vec<some X>` is unaffected.  (SPEC 17.)
+                    if traits.len() > 1 {
+                        self.err(format!("a multi-trait `some ({})` column is not yet supported - the dense `Vec<some X>` codegen handles a single trait only. Use a single-trait column, or `dyn ({})` per value.", traits.join(" + "), traits.join(" + ")), e.span);
+                        return HExpr { ty: target.clone(), ..e };
+                    }
                     if traits.iter().all(|tn| self.struct_satisfies_trait(sid, tn)) {
                         let sp = e.span;
                         return HExpr {
@@ -6249,8 +6279,14 @@ impl<'a> TypeChecker<'a> {
         // `read_line`, ...), never by implicitly "owning" a borrowed string.
         if let HType::OwnPtr { inner, .. } = target {
             if !matches!(inner.as_ref(), HType::Str) && type_eq(&e.ty, inner) {
-                let mut e = e; e.ty = target.clone();
-                return e;
+                // Wrap in an explicit heap allocation (identical to what `alloc value`
+                // lowers to), so codegen mallocs and stores the value.  Previously this
+                // only retyped the value expr, which for `own *T` made codegen reinterpret
+                // the value's BITS as a pointer (`(maka_int)7LL`) -> SIGSEGV.  (The `own &T`
+                // / `Heap` arm above is left as-is: codegen already boxes a Heap-typed
+                // value expr.)
+                let span = e.span;
+                return HExpr { kind: HExprKind::HeapAlloc(Box::new(e)), ty: target.clone(), span };
             }
         }
         // Int ↔ Float numeric promotion in const expressions: only at lit level, handled in check_lit.

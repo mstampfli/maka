@@ -10758,6 +10758,18 @@ void __maka_pool_free(maka_unit* poolv) {
             // Dispatch by first arg type
             if args.len() == 1 {
                 let s = self.emit_sub(f, &args[0]);
+                // Auto-deref a NON-NULL primitive reference (`&T` / `own &T`) so `log`
+                // prints the value, not the address (SPEC 14: "auto-derefs primitive
+                // refs"). Restricted to scalar pointees; nullable pointers
+                // (`*T` / `own *T` / `raw *T`) keep printing the pointer (may be null).
+                if let HType::Ref { inner, .. } | HType::Heap { inner } = &args[0].ty {
+                    if matches!(inner.as_ref(),
+                        HType::Int | HType::Enum(_) | HType::SizedInt { .. }
+                        | HType::Float | HType::SizedFloat { .. } | HType::Bool | HType::Char)
+                    {
+                        return format!("({}(*({})), MAKA_UNIT)", self.log_helper(inner), s);
+                    }
+                }
                 let helper = self.log_helper(&args[0].ty);
                 return format!("({}({}), MAKA_UNIT)", helper, s);
             }
