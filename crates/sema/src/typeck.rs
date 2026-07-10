@@ -654,7 +654,22 @@ impl<'a> TypeChecker<'a> {
         // bind the slot AS the owning type so the lifetime pass auto-frees it.
         // Use-site coercion (`own *char` → `string`) keeps source code ergonomic.
         if matches!(declared, HType::Str) {
-            if let Some(probed_ty) = Self::probe_init_ty(self.sym, init) {
+            // `string s = "literal"` infers a fixed `[N]char` VALUE (Option 1: the
+            // `string` keyword is sugar for a char array sized to hold the literal
+            // plus its NUL).  It is then a normal stack value - copies, no heap.
+            if let ast::Expr::Lit(ast::Lit::Str(s), _) = init {
+                declared = HType::Array { len: s.len() as i64 + 1, elem: Box::new(HType::Char) };
+            } else if let ast::Expr::Ident(nm, _) = init {
+                // `string b = a` where `a` is a `[N]char` VALUE: bind `b` as the same
+                // `[N]char` so it is an independent COPY (the array machinery memcpy's
+                // it), not a `const char*` view of `a`.
+                if let Some(lid) = self.lookup(nm) {
+                    let lty = self.local(lid).ty.clone();
+                    if matches!(&lty, HType::Array { elem, .. } if matches!(elem.as_ref(), HType::Char)) {
+                        declared = lty;
+                    }
+                }
+            } else if let Some(probed_ty) = Self::probe_init_ty(self.sym, init) {
                 if probed_ty.is_owned_string() {
                     declared = probed_ty;
                 }
@@ -1431,7 +1446,11 @@ impl<'a> TypeChecker<'a> {
                 // is `own *char` — auto-freed at scope exit, coerces back to `string`
                 // anywhere a borrowed view is wanted.  Chained concats `a + b + c`
                 // therefore work end-to-end and free each intermediate.
-                let is_strish = |t: &HType| matches!(t, HType::Str) || t.is_owned_string();
+                // A `[N]char` VALUE is stringy for concat (it IS a string, Option 1);
+                // it decays to `const char*` for the concat helper, and is not owning
+                // (no free), so it uses the borrowed-operand helper variant.
+                let is_strish = |t: &HType| matches!(t, HType::Str) || t.is_owned_string()
+                    || matches!(t, HType::Array { elem, .. } if matches!(elem.as_ref(), HType::Char));
                 if matches!(op, Add) && is_strish(&l.ty) && is_strish(&r.ty) {
                     // Pick the helper that frees whichever operands were owning
                     // intermediates, so chained `a + b + c` doesn't leak.
@@ -5994,6 +6013,19 @@ impl<'a> TypeChecker<'a> {
                 return HExpr { ty: target.clone(), ..e };
             }
         }
+        // A `[N]char` VALUE decays to a `string` (`const char*`) wherever a string
+        // is expected - `log`, `str_*`, FFI, `concat`, a `string` param (Option 1:
+        // `[N]char` IS a string).  The array decays to a pointer to its first char;
+        // the buffer stays alive on the caller's stack for the duration of the use
+        // (a transient borrow, exactly like `&[N]char`).
+        if matches!(&e.ty, HType::Array { elem, .. } if matches!(elem.as_ref(), HType::Char))
+            && matches!(target, HType::Str) {
+            let sp = e.span;
+            return HExpr {
+                kind: HExprKind::Cast { expr: Box::new(e), kind: CastKind::Reinterpret, to: HType::Str },
+                ty: HType::Str, span: sp,
+            };
+        }
         // `int` <-> `i64`: same 64-bit machine type, retype in place (no cast
         // node - identical `int64_t` representation at the C level).
         if int_i64_interchangeable(&e.ty, target) {
@@ -6990,6 +7022,12 @@ fn param_compatible_impl(param: &HType, actual: &HType, type_params: &[String], 
     if type_eq(param, actual) { return true; }
     // `int` and `i64` are the same 64-bit machine type - interchangeable.
     if int_i64_interchangeable(param, actual) { return true; }
+    // A `[N]char` VALUE decays to a `string` param (Option 1: `[N]char` IS a
+    // string; the array decays to `const char*`).
+    if matches!(param, HType::Str)
+        && matches!(actual, HType::Array { elem, .. } if matches!(elem.as_ref(), HType::Char)) {
+        return true;
+    }
     // Allow null → ptr.
     if matches!(actual, HType::NullT) && matches!(param, HType::Ptr { .. }) { return true; }
     // Implicit reborrow: writing `&mut g` where `g` is already `&mut T` produces

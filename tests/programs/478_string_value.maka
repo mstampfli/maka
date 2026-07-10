@@ -1,0 +1,18 @@
+// `string` is a `[N]char` VALUE (Option 1): a `string s = "..."` binding is a
+// fixed-size char array on the stack, copied on bind/pass like any array.  No
+// heap, no ownership - `own *string` is the heap form, `&string` the borrow.
+import std.str_len;
+
+string echo(string s) { return s; }        // string param + return (decays to char*)
+
+unit main() {
+    string a = "hello";                     // infers [6]char, a value
+    mut string b = a;                        // COPY - independent [6]char
+    b[0] = 'j';
+    log(a);                                  // hello  (a untouched)
+    log(b);                                  // jello
+    log(str_len(a));                         // 5      (decays to a string arg)
+    log(echo(a));                            // hello  (through a fn)
+    log("hi " + a);                          // hi hello  (concat)
+    log(a[1]);                               // e      (indexes like an array)
+}

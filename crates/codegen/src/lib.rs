@@ -11757,6 +11757,9 @@ void __maka_pool_free(maka_unit* poolv) {
             HType::Bool => "maka_log_bool",
             HType::Char => "maka_log_char",
             HType::Str => "maka_log_str",
+            // A `[N]char` VALUE logs as a string (it IS a string, Option 1); the
+            // array decays to `const char*` when passed to `maka_log_str`.
+            HType::Array { elem, .. } if matches!(elem.as_ref(), HType::Char) => "maka_log_str",
             HType::Ptr { .. } | HType::RawPtr { .. } | HType::OwnPtr { .. } | HType::Ref { .. } | HType::Heap { .. } => "maka_log_ptr",
             _ => "maka_log_ptr",
         }
