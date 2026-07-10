@@ -5985,6 +5985,15 @@ impl<'a> TypeChecker<'a> {
 
     fn coerce(&mut self, e: HExpr, target: &HType) -> HExpr {
         if type_eq(&e.ty, target) { return e; }
+        // A string LITERAL fills a `[N]char` array VALUE: `[6]char s = "hello"`
+        // (Option 1 - `string` IS `[N]char`).  The literal's bytes (+ NUL) are
+        // copied into the fixed stack buffer via the array memcpy path; N must
+        // hold the literal plus its NUL.  Value semantics, no heap.
+        if let (HExprKind::LitStr(s), HType::Array { len, elem }) = (&e.kind, target) {
+            if matches!(elem.as_ref(), HType::Char) && (s.len() as i64) < *len {
+                return HExpr { ty: target.clone(), ..e };
+            }
+        }
         // `int` <-> `i64`: same 64-bit machine type, retype in place (no cast
         // node - identical `int64_t` representation at the C level).
         if int_i64_interchangeable(&e.ty, target) {
