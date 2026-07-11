@@ -1797,20 +1797,34 @@ the resolved `Slot` itself be a struct: that struct's fields become the
 extra storage, but they live behind the named slot.  Composition is
 preferred over hidden injection; see §10.7 below for the rationale.
 
-**Abstract vs concrete typing.**  An unmonomorphized generic function
-with a bound — `unit f<T: Stored>() { T::Slot x = ...; }` — type-
-checks `T::Slot` **abstractly**: sema verifies the assoc type is
-declared in the bound attr and treats the path as an opaque type
-parameter throughout the body.  Operations applicable to an abstract
-`T::Slot` are only those the attr's method signatures expose (e.g.
-`atomic_load_cell(&self)` returning `T::Slot`).  Concrete resolution is
-deferred to monomorphization; the resolved type is substituted into the
-function body and rechecked against the concrete type's operations.
+**Use-site (monomorphization-time) typing.**  A generic function body is
+type-checked **per instantiation**, the same way any template body is: Maka
+checks it lazily, at monomorphization, against the concrete types the call
+supplies, not abstractly up front.  `T::Slot` is a type *expression* (it may
+appear anywhere a type can: field, return, local); at each instantiation it
+resolves to that impl's `type Slot = ...`, and the whole body is checked
+against the resolved types.  So
+
+```maka
+T::Out run<T: Producer>(&T x) {
+    T::Out v = produce(x);
+    return v + 1;            // checked against the RESOLVED Out at each call
+}
+```
+
+compiles **iff** the resolved `Out` supports `+` at that call: it does when an
+impl has `type Out = int`, and it is rejected with `arithmetic on non-numeric
+types` when the impl's `Out` is a `data` type.  "Operations applicable to
+`T::Slot`" therefore means "applicable to the type `Slot` resolves to *here*",
+decided at the use site: there is no separate abstract phase that restricts a
+`T::Slot` value to only the attr's declared methods, and none is wanted: it
+would reject the `v + 1` above even where `Out` is genuinely numeric.  A generic
+function that is **never** instantiated is, like any uncalled template body, not
+type-checked at all.
 
 A struct literal at a concrete instantiation — `Wrapper<*Foo> { inner = ptr }` —
 type-checks `ptr` against the **post-resolution** type (i.e. `*Foo`,
-the resolved `*T::Slot`), not against the abstract `T::Slot`.  After
-monomorphization, every field type is concrete.
+the resolved `*T::Slot`).  After monomorphization, every field type is concrete.
 
 **Field access, not struct match.**  Generics are erased before dispatch, so a
 scrutinee always has a concrete monomorphized type. `match` requires an ENUM
@@ -1848,6 +1862,16 @@ data Wrapper<T: Stored> { T::Slot inner; }    // would infinitely expand
 Cycles broken by an indirection (`type Slot = *Wrapper<T>` — a pointer
 behind which the recursion lives) are permitted; the size and layout are
 well-defined because the indirection is finite.
+
+This is one case of a general rule: **a `data`/`enum` that contains itself
+*by value* has infinite size and is rejected.**  The self-reference may be
+direct (`data A { A a; }`), through an inline array (`data A { [4]A a; }`), or
+through an associated type that resolves back to the type (the cycle above);
+each is refused at sema with an infinite-size diagnostic naming the type.  Any
+pointer (`own *A` / `*A` / `raw *A` / `own &A` / `&A`), a `Vec`/`[*]A`, a slice,
+or a function pointer breaks the cycle (the indirection has a fixed size), so
+linked lists, trees, and graph nodes (which store `own *A` / `*A` children) are
+well-defined and unaffected.
 
 **Disambiguating assoc types under multiple bounds.**  When a generic
 parameter has multiple bounds and two of them declare an associated type
@@ -2471,16 +2495,18 @@ These are real limitations the implementation is honest about:
 - **Parametric `has` impls are module-local.** A `*T has Attr` / `Box<T> has Attr`
   impl cannot be propagated across modules (`use Mod.*T.Attr;` is a parse error);
   it is visible only in its defining module (§10.4, §11.5).
-- **Associated-type abstract-op restriction is enforced only where the type is
-  visible.** The `type Slot = ...` machinery now: resolves + monomorphizes, reports
-  a dedicated diagnostic for a missing `X has Attr`, rejects a CYCLIC / self-
-  referential assoc def (it makes an infinite-size type, caught by the recursive-
-  value-size pass - which also now rejects `data A { A a; }`), and refuses an
-  operator on an abstract `T::Slot` (only the attr's declared methods apply). The
-  remaining gap: an UNCALLED generic body is not type-checked at all (Maka defers
-  ALL generic-body checking to monomorphization - even `int f<T>(T x){ return "x"; }`
-  compiles uncalled), so the abstract op-restriction fires at a concrete
-  instantiation, not up front on an uncalled generic. Closing that needs an abstract
-  generic-body checking phase (independent of associated types).
+- **Uncalled generic bodies are not type-checked (by design).** Maka checks a
+  generic body lazily, at monomorphization, against the concrete types each call
+  supplies - the C++-template model, not Rust's eager trait-checking. A generic
+  function that is never instantiated is therefore never body-checked: even
+  `int f<T>(T x){ return "x"; }` compiles when uncalled. Operations on a `T::Slot`
+  (or any type param) are consequently validated at each use site against the
+  resolved type - `T::Slot v = ...; v + 1` compiles where the resolved slot is
+  numeric and is rejected (`arithmetic on non-numeric types`) where it is not - so
+  a nonsensical operator IS a compile error wherever the generic is actually used.
+  This is a deliberate design choice (§10.5), not a gap: the only thing skipped is
+  dead code (an uncalled generic), and eager abstract checking is explicitly not
+  wanted (it would reject valid uses like `v + 1` above whenever the slot resolves
+  to a number).
 
 These are tractable to fix; they are not architectural blockers.
