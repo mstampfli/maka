@@ -1687,6 +1687,15 @@ impl<'a> TypeChecker<'a> {
 
     fn try_op_overload(&mut self, op: ast::BinOp, l: &HExpr, r: &HExpr, sp: Span) -> Option<HExpr> {
         use ast::BinOp::*;
+        // An abstract associated type (`T::Slot`) is OPAQUE in a generic body: it
+        // supports only the methods its attr declares, not operators (spec 10.5).
+        // Refuse to defer/resolve an operator on it, so the caller rejects it as
+        // unsupported rather than silently deferring to monomorphization.  (A
+        // CONCRETE instantiation resolves `T::Slot` to a real type before this runs,
+        // so a genuinely-numeric `Slot = int` still works when monomorphized.)
+        if matches!(&l.ty, HType::AssocType { .. }) || matches!(&r.ty, HType::AssocType { .. }) {
+            return None;
+        }
         let (logic_name, fn_name) = match op {
             Add => ("Add", "add"),
             Sub => ("Sub", "sub"),

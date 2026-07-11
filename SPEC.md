@@ -2471,14 +2471,16 @@ These are real limitations the implementation is honest about:
 - **Parametric `has` impls are module-local.** A `*T has Attr` / `Box<T> has Attr`
   impl cannot be propagated across modules (`use Mod.*T.Attr;` is a parse error);
   it is visible only in its defining module (§10.4, §11.5).
-- **Associated-type enforcement is partial (two remaining checks).** The
-  `type Slot = ...` machinery resolves and monomorphizes, and a missing `X has Attr`
-  for a `T::Slot` now reports a dedicated diagnostic. Two declared checks are still
-  not enforced: (1) a CYCLIC / self-referential assoc-type definition is not rejected
-  at sema - like any infinite-size struct (`data A { A a; }`), it is deferred to the
-  C compiler rather than sema-checked; and (2) the abstract-phase op-restriction is
-  not checked - an operation on a bare `T::Slot` is validated only at each concrete
-  instantiation, not against the attr's exposed operations up front. Both need new
-  type-system analysis (size/cycle detection; two-phase abstract checking).
+- **Associated-type abstract-op restriction is enforced only where the type is
+  visible.** The `type Slot = ...` machinery now: resolves + monomorphizes, reports
+  a dedicated diagnostic for a missing `X has Attr`, rejects a CYCLIC / self-
+  referential assoc def (it makes an infinite-size type, caught by the recursive-
+  value-size pass - which also now rejects `data A { A a; }`), and refuses an
+  operator on an abstract `T::Slot` (only the attr's declared methods apply). The
+  remaining gap: an UNCALLED generic body is not type-checked at all (Maka defers
+  ALL generic-body checking to monomorphization - even `int f<T>(T x){ return "x"; }`
+  compiles uncalled), so the abstract op-restriction fires at a concrete
+  instantiation, not up front on an uncalled generic. Closing that needs an abstract
+  generic-body checking phase (independent of associated types).
 
 These are tractable to fix; they are not architectural blockers.

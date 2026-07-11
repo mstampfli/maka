@@ -1666,6 +1666,67 @@ impl SymTab {
             }
         }
 
+        // Pass 5b: reject a `data`/`enum` that contains itself BY VALUE (infinite
+        // size).  An inline struct / enum / array field carries the cycle; a pointer
+        // (`own *T` / `*T` / `raw *T` / `own &T` / `&T`), a `Vec`, a slice, or a
+        // function pointer breaks it (indirection).  Assoc types are resolved as we
+        // walk, so a cyclic `type Slot = Wrapper<T>` whose value field resolves back
+        // to `Wrapper` is caught here too (spec 10.5).
+        {
+            let snap = sym.clone();
+            fn val_reaches(snap: &SymTab, ty: &HType, on: &mut Vec<u64>) -> bool {
+                match ty {
+                    HType::Struct(sid) => struct_cycle(snap, sid.0, on),
+                    HType::Enum(eid) => enum_cycle(snap, eid.0, on),
+                    HType::Array { elem, .. } => val_reaches(snap, elem, on),
+                    HType::AssocType { .. } => {
+                        let r = resolve_assoc_types_in(snap, ty);
+                        if matches!(r, HType::AssocType { .. }) { false } else { val_reaches(snap, &r, on) }
+                    }
+                    _ => false, // pointers / Vec / slice / fn-ptr / scalars break the cycle
+                }
+            }
+            fn struct_cycle(snap: &SymTab, sid: u32, on: &mut Vec<u64>) -> bool {
+                let key = sid as u64;
+                if on.contains(&key) { return true; }
+                on.push(key);
+                let ftys: Vec<HType> = snap.struct_info(StructId(sid)).fields.iter().map(|f| f.ty.clone()).collect();
+                let hit = ftys.iter().any(|t| val_reaches(snap, t, on));
+                on.pop();
+                hit
+            }
+            fn enum_cycle(snap: &SymTab, eid: u32, on: &mut Vec<u64>) -> bool {
+                let key = (eid as u64) | (1u64 << 40);
+                if on.contains(&key) { return true; }
+                on.push(key);
+                let ftys: Vec<HType> = snap.enum_info(EnumId(eid)).variants.iter()
+                    .flat_map(|v| v.fields.iter().map(|f| f.ty.clone())).collect();
+                let hit = ftys.iter().any(|t| val_reaches(snap, t, on));
+                on.pop();
+                hit
+            }
+            for i in 0..sym.structs.len() {
+                let mut on = Vec::new();
+                if struct_cycle(&snap, i as u32, &mut on) {
+                    let s = &sym.structs[i];
+                    errors.push(SemaError {
+                        msg: format!("recursive type `{}` has infinite size - it contains itself by value (directly or via an associated type); break the cycle with a pointer (`own *T` / `*T`) or a `Vec` / heap field", s.name),
+                        span: s.span,
+                    });
+                }
+            }
+            for i in 0..sym.enums.len() {
+                let mut on = Vec::new();
+                if enum_cycle(&snap, i as u32, &mut on) {
+                    let e = &sym.enums[i];
+                    errors.push(SemaError {
+                        msg: format!("recursive enum `{}` has infinite size - a variant contains it by value; box the recursive payload with `own *T` / `*T`", e.name),
+                        span: e.span,
+                    });
+                }
+            }
+        }
+
         // Pass 6: a foreign (`extern data`) type is never libc-freed by its
         // `own *T` cleanup (the C side owns the block), so its ONLY release path
         // is a `Drop` impl.  Without one, every adopted `own *Foreign` leaks by

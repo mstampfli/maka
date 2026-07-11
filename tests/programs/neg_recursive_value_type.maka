@@ -1,0 +1,8 @@
+// A `data` that contains itself BY VALUE has infinite size and is rejected
+// (break the cycle with a pointer / Vec). Also covers the cyclic-assoc case:
+// `Foo::Slot = Wrapper` while `Wrapper.inner : Foo::Slot` resolves back to Wrapper.
+attr S { type Slot; int g(&_ self); }
+data Foo { int v; }
+data Wrapper { Foo::Slot inner; }
+Foo has S { type Slot = Wrapper; int g(&Foo self) { return self.v; } }
+unit main() { Wrapper w = Wrapper { inner = Wrapper { inner = Foo { v = 1 } } }; log(0); }
