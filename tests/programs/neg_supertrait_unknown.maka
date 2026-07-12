@@ -1,0 +1,3 @@
+// A supertrait must be a declared attr; an unknown one is rejected.
+attr Foo: Nonexistent {}
+unit main() { log(0); }

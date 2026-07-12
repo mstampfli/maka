@@ -653,6 +653,11 @@ pub struct AttrDecl {
     /// `has` impl that omits an attr type-argument inherits the default; a
     /// parameter with no default must be supplied explicitly.
     pub type_param_defaults: Vec<Option<Type>>,
+    /// Supertraits declared with `attr Sub: Super1, Super2 { ... }`.  A supertrait
+    /// is *implied* by the subtrait: a type that satisfies `Sub` also satisfies
+    /// every `Super` (transitively).  Used for `attr Drop: Move` (SPEC 6.4c) - a
+    /// `has Drop` type is affine because `Drop` implies its `Move` supertrait.
+    pub supertraits: Vec<String>,
     /// Method signatures inside the attr block (may have default bodies in `funcs`).
     pub funcs: Vec<FuncDecl>,
     /// Associated-type declarations: `type Slot;` lines (§10.5).

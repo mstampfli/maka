@@ -334,6 +334,23 @@ pub fn underlying_struct_key(sym: &SymTab, ty: &HType) -> Option<String> {
 /// agrees with `where T has X` by construction.  Attr-arg / associated-type
 /// refinements (`Convert<int>`, `Slot = R`) are not part of the surface `T has X`
 /// predicate, so any impl of the named attr on the type counts.
+/// Does `sub` have `target` in its transitive supertrait closure?
+/// (`attr Drop: Move` -> `attr_has_supertrait(sym, "Drop", "Move") == true`.)
+pub(crate) fn attr_has_supertrait(sym: &SymTab, sub: &str, target: &str) -> bool {
+    let mut stack = vec![sub.to_string()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur.clone()) { continue; }
+        if let Some(a) = sym.attr_by_name(&cur) {
+            for s in &a.supertraits {
+                if s == target { return true; }
+                stack.push(s.clone());
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn type_impls_trait_visible(
     sym: &SymTab,
     trait_name: &str,
@@ -343,7 +360,12 @@ pub(crate) fn type_impls_trait_visible(
 ) -> bool {
     let key = underlying_struct_key(sym, recv);
     sym.has_impls.iter().any(|h| {
-        if h.attr_name != trait_name { return false; }
+        // `h` satisfies `trait_name` if it IS `trait_name` or a SUBTRAIT of it
+        // (a supertrait is implied by the subtrait: `Drop: Move` -> a `has Drop`
+        // impl satisfies `Move`).
+        if h.attr_name != trait_name && !attr_has_supertrait(sym, &h.attr_name, trait_name) {
+            return false;
+        }
         let name_ok = match &key {
             Some(k) => h.type_key == *k,
             None => false,
@@ -1232,6 +1254,7 @@ impl SymTab {
                         is_pub: a.is_pub,
                         module_path: item_module.clone(),
                         span: a.span,
+                        supertraits: a.supertraits.clone(),
                         methods,
                         assoc_type_decls,
                     });
@@ -1553,6 +1576,44 @@ impl SymTab {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Pass 3b: validate supertraits and build the transitive-satisfaction
+        // closure.  A supertrait must be a declared attr, and a type satisfying a
+        // subtrait also satisfies each (transitive) supertrait - so mirror
+        // `trait_impls[Sub]` into `trait_impls[Super]`.  `attr Drop: Move` (SPEC
+        // 6.4c) thus makes every `has Drop` type satisfy `Move` by NAME, which is
+        // what the data-decl bound check (Pass 4, below) and the affine-checker
+        // (`nominal_affine_marked`) both key on.
+        {
+            let edges: Vec<(String, Vec<String>)> = sym.attrs.iter()
+                .filter(|a| !a.supertraits.is_empty())
+                .map(|a| (a.name.clone(), a.supertraits.clone()))
+                .collect();
+            for a in &sym.attrs {
+                for sup in &a.supertraits {
+                    if sym.attr_by_name(sup).is_none() {
+                        errors.push(SemaError {
+                            msg: format!("attr `{}` lists unknown supertrait `{}`", a.name, sup),
+                            span: a.span,
+                        });
+                    }
+                }
+            }
+            loop {
+                let mut changed = false;
+                for (sub, supers) in &edges {
+                    let sub_types = sym.trait_impls.get(sub).cloned().unwrap_or_default();
+                    if sub_types.is_empty() { continue; }
+                    for sup in supers {
+                        let entry = sym.trait_impls.entry(sup.clone()).or_default();
+                        for t in &sub_types {
+                            if entry.insert(t.clone()) { changed = true; }
+                        }
+                    }
+                }
+                if !changed { break; }
             }
         }
 

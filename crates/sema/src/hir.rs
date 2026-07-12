@@ -843,6 +843,9 @@ pub struct AttrInfo {
     pub is_pub: bool,
     pub module_path: Vec<String>,
     pub span: Span,
+    /// Supertraits (`attr Sub: Super { ... }`): a type satisfying this attr also
+    /// satisfies each supertrait (transitively).  See `attr_has_supertrait`.
+    pub supertraits: Vec<String>,
     pub methods: Vec<AttrMethod>,
     /// Associated-type declarations: `type Slot;` (no default) or
     /// `type Slot = DefaultT;` (with default) lines (§10.5).  Tuples are

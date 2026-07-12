@@ -1,0 +1,12 @@
+// `attr Drop: Move` (SPEC 6.4c): Drop is a SUBTRAIT of Move, so a `has Drop` type
+// satisfies the `Move` predicate (compile-time `T has Move`) and is affine - the
+// implication now flows through a real supertrait, not a hardcoded rule.
+import std.{ Drop, Move };
+data Fd { int fd; }
+Fd has Drop { unit drop(&mut Fd self) { log(self.fd); } }
+data Plain { int x; }
+unit main() {
+  if (Fd has Move)    { log(1); } else { log(0); }   // 1: Drop implies Move
+  if (Plain has Move) { log(1); } else { log(0); }   // 0: a plain value is not affine
+  { Fd a = Fd { fd = 9 }; }                           // affine: stack destructor -> 9
+}

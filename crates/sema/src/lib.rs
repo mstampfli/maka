@@ -380,7 +380,13 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
                     let satisfied = match key.as_ref() {
                         None => false,
                         Some(k) => sym.has_impls.iter().any(|h| {
-                            if h.attr_name != *trait_name { return false; }
+                            // A bound `T: Move` is met by an impl of `Move` OR of a
+                            // SUBTRAIT of it (`has Drop` with `Drop: Move`); the
+                            // supertrait is implied.
+                            if h.attr_name != *trait_name
+                                && !resolve::attr_has_supertrait(&sym, &h.attr_name, trait_name) {
+                                return false;
+                            }
                             // Primary match: the impl's type_key string equals the
                             // receiver's underlying name (the proven non-generic
                             // path).  Fallback: for a generic-struct receiver the

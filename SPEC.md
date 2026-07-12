@@ -507,7 +507,7 @@ func_decl    := [pub]? [inline]? [gate]? [export]? RetType name [<TyParams>] (pa
 extern_decl  := extern [gate]? ["c_link_name"]? RetType name (params [, ...]?);
 data_decl    := [pub]? data Name [<TyParams>] [where ...] { field_decl* }
 enum_decl    := [pub]? enum Name [<TyParams>] { variant_decl* }
-attr_decl    := [pub]? attr Name { attr_method* }
+attr_decl    := [pub]? attr Name [<TyParams>] [: Super, ...] { attr_method* }
 has_decl     := [pub]? Name has Name { func_decl* }
 attr_method  := RetType name (params) [where ...]  ";" | block
 use_decl     := use ModPath . Type . Attr ;    // Type: concrete or primitive only;
@@ -1043,18 +1043,20 @@ copying), so it is sound by construction - it can never create a use-after-free,
 only reject a copy.  That is what makes it safe to expose to users, unlike a "this
 is a borrow" assertion (which would *redirect* the escape analysis and can be wrong).
 
-**`Drop` implies `Move`.**  A destructor is sound only on an affine carrier: a
-copyable value with a destructor double-runs it on every copy (the C++ "rule of
-three" double-free).  So a `has Drop` type is automatically affine - `has Drop`
-implies `has Move`, with no separate marker needed (Rust's rule that a `Copy` type
-may not implement `Drop`, made automatic).  A `Move`/`Drop` value type's `drop`
-runs at **scope exit** - the stack destructor - exactly once, at the *final*
-owner: a move consumes the source, so a moved-from value is never dropped.  This
-holds uniformly across every move site (`b = a`, a call argument, a return, a
-struct/array field, a `Vec` element, `own *T p = alloc a`, reassignment), and it
-*composes*: a struct or `Vec` that contains a `Move` value is itself affine and
-cascades the drop.  ("Drop implies Move" is a sema rule keyed on the marker attrs,
-not a supertrait declaration - Maka has no `attr X: Y` inheritance syntax.)
+**`Drop` implies `Move` (via `attr Drop: Move`).**  A destructor is sound only on
+an affine carrier: a copyable value with a destructor double-runs it on every copy
+(the C++ "rule of three" double-free).  So the prelude declares `Drop` as a
+**subtrait** of `Move` - `pub attr Drop: Move { ... }` (§10.1) - and a `has Drop`
+type is therefore automatically affine, with no separate `has Move` needed
+(Rust's rule that a `Copy` type may not implement `Drop`, made automatic).  Because
+it is a real supertrait, `T has Move` is *true* for a `has Drop` type - the
+implication flows through the trait system, not a special case.  A `Move`/`Drop`
+value type's `drop` runs at **scope exit** - the stack destructor - exactly once,
+at the *final* owner: a move consumes the source, so a moved-from value is never
+dropped.  This holds uniformly across every move site (`b = a`, a call argument, a
+return, a struct/array field, a `Vec` element, `own *T p = alloc a`, reassignment),
+and it *composes*: a struct or `Vec` that contains a `Move` value is itself affine
+and cascades the drop.
 
 `own *T` is then simply the built-in instance of `Move` + heap management: its
 affine-ness and auto-null-on-move ARE the `Move` semantics; its block-free is the
@@ -1551,6 +1553,23 @@ in the `attr`. Every attr method must either be implemented in the `has` block
 or have a default body in the attr. Signature mismatches (arity, param types,
 return type - compared after `_` is substituted with the implementing type) are
 rejected.
+
+**Supertraits (`attr Sub: Super`).** An attr may list one or more **supertraits**
+after a colon; a supertrait is **implied** by the subtrait:
+
+```maka
+attr Ordered: Eq { bool lt(&_ a, &_ b); }   // Ordered implies Eq
+```
+
+A type that satisfies `Ordered` also satisfies `Eq` (transitively), so `T has Eq`
+is true wherever `T has Ordered`, and a `<T: Eq>` bound is met by any `T: Ordered`.
+Each supertrait must be a declared attr; the relation may chain (`A: B`, `B: C` =>
+`A` implies `C`).  This is how the prelude ties destructors to
+affine-ness: `pub attr Drop: Move { ... }` makes every `has Drop` type satisfy
+`Move` and so be move-only with a scope-exit destructor (§6.4c).  (Maka's
+supertraits *imply* the supertrait rather than *require a separate impl* of it, so
+a marker supertrait like `Move` needs no extra `has` block - satisfying the
+subtrait is enough.)
 
 **Bound syntax.** Two surfaces are accepted and mean the same thing:
 

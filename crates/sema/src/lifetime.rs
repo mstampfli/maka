@@ -2975,13 +2975,14 @@ pub(crate) fn is_own_ptr_granular(sym: &SymTab, ty: &HType) -> bool {
     } else { false }
 }
 
-/// Is this nominal type marked affine (move-only) by an explicit `has Move` or by
-/// `has Drop` (which implies `Move`)?  SPEC 6.4c: such a value moves rather than
-/// copies and drops at scope exit, so the move-checker and drop pass must treat it
-/// as owning even when it holds no heap by value.
+/// Is this nominal type affine (move-only)?  A type is affine iff it satisfies the
+/// `Move` marker - directly (`has Move`) or via a subtrait (`has Drop`, since the
+/// prelude declares `attr Drop: Move`, so the resolver's supertrait closure has
+/// already recorded every `has Drop` type under `Move`).  SPEC 6.4c: such a value
+/// moves rather than copies and drops at scope exit, so the move-checker and drop
+/// pass must treat it as owning even when it holds no heap by value.
 pub(crate) fn nominal_affine_marked(sym: &SymTab, name: &str) -> bool {
-    sym.trait_impls.get("Drop").map_or(false, |s| s.contains(name))
-        || sym.trait_impls.get("Move").map_or(false, |s| s.contains(name))
+    sym.trait_impls.get("Move").map_or(false, |s| s.contains(name))
 }
 
 pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {

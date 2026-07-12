@@ -737,6 +737,17 @@ impl Parser {
         // Optional generic params: `attr Convert<U> { ... }`, with optional
         // per-parameter defaults: `attr Add<R = _> { ... }`.
         let (type_params, type_param_defaults, _bounds) = self.parse_type_params_with_bounds(true)?;
+        // Optional supertrait list: `attr Drop: Move { ... }` (or `: A, B`).  A
+        // supertrait is IMPLIED by the subtrait - a type satisfying `Drop` also
+        // satisfies `Move` (SPEC 6.4c).
+        let mut supertraits = Vec::new();
+        if self.eat(&TokKind::Colon) {
+            loop {
+                let (sup, _) = self.expect_ident("supertrait name")?;
+                supertraits.push(sup);
+                if !self.eat(&TokKind::Comma) { break; }
+            }
+        }
         self.expect(&TokKind::LBrace, "`{`")?;
         let mut funcs = Vec::new();
         let mut assoc_types: Vec<AssocTypeDecl> = Vec::new();
@@ -759,7 +770,7 @@ impl Parser {
             }
         }
         self.expect(&TokKind::RBrace, "`}`")?;
-        Ok(AttrDecl { name, type_params, type_param_defaults, funcs, assoc_types, is_pub: false, span: kw.span })
+        Ok(AttrDecl { name, type_params, type_param_defaults, supertraits, funcs, assoc_types, is_pub: false, span: kw.span })
     }
 
     /// Parse one method declaration inside an `attr` block.  Accepts either:
