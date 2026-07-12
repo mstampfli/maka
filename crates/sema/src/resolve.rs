@@ -1406,19 +1406,19 @@ impl SymTab {
                         }
                     }
                     if overlapped { continue; }
-                    // `Drop` may only be implemented on a nominal `data`/`enum`
-                    // type.  On a primitive/pointer/copyable receiver it would be
-                    // a silent no-op (such a type never joins the owning drop
-                    // path), so reject it - wrap the resource in a named type.
-                    if h.attr_name == "Drop"
+                    // `Drop`/`Move` may only be implemented on a nominal `data`/
+                    // `enum` type.  On a primitive/pointer/copyable receiver an
+                    // affine marker is meaningless (such a type never joins the
+                    // owning move/drop path), so reject it - wrap it in a named type.
+                    if (h.attr_name == "Drop" || h.attr_name == "Move")
                         && !matches!(receiver_pattern, HType::Struct(_) | HType::Enum(_))
                     {
                         errors.push(SemaError {
                             msg: format!(
-                                "`Drop` can only be implemented on a `data` or `enum` type, not `{}`; \
-                                 a destructor on a copyable/primitive type would never run - \
-                                 wrap the resource in a named type",
-                                h.type_name,
+                                "`{}` can only be implemented on a `data` or `enum` type, not `{}`; \
+                                 an affine marker / destructor on a copyable/primitive type would \
+                                 never take effect - wrap it in a named type",
+                                h.attr_name, h.type_name,
                             ),
                             span: h.span,
                         });

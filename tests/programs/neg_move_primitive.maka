@@ -1,0 +1,5 @@
+// `Move` (like `Drop`) is only meaningful on a nominal `data`/`enum` type; on a
+// copyable primitive it can't take effect, so it is rejected.
+import std.{ Move };
+int has Move {}
+unit main() { log(0); }

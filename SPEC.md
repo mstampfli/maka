@@ -959,11 +959,13 @@ compile error** (`poisoned`).
 
 ### 6.4b `Drop` - per-pointee destructor
 
-`Drop` (the prelude attr `unit drop(&mut _ self)`) is a **destructor hook on the
-`own *T` cleanup**, NOT a move mechanism.  It has **no effect on move semantics**
-- only `own *T`/`own &T` (or a struct containing one) move (§6.1).  A `has Drop`
-type is not made move-only or owning by having `Drop`; you put `Drop` on the
-**resource type** and hold it as `own *T`.
+`Drop` (the prelude attr `unit drop(&mut _ self)`) is a **destructor hook**: it
+runs a type's logical teardown when the value is released.  A `has Drop` type is
+**affine** (move-only) - `Drop` implies `Move` (§6.4c) - and its `drop` runs
+either at scope exit (a bare value: the stack destructor) or on the `own *T`
+cleanup (a heap resource).  This section covers the `own *T` regime, the idiom for
+a resource whose block is heap-allocated or C-owned; §6.4c covers the bare-value
+(stack) regime and the `Move` marker.
 
 When an `own *T` (whose pointee `T` has a `Drop`) is cleaned up - at scope exit,
 or when the owner is dropped/reassigned - the compiler calls `T`'s `drop` (which
@@ -1020,6 +1022,59 @@ hand it around as `own *T` (adopting the C pointer with the `unsafe`
 function's parameter as `own *T`.  Passing your `own *T` to it MOVES it (auto-nulls
 the source), so Maka never frees it - C owns it now.  This is the mirror of the
 `raw *T as own *T` adopt.
+
+### 6.4c `Move` and the affine axis (stack destructors)
+
+`Drop`'s restriction to `own *T` (6.4b) exposes a deeper fact about the model:
+"owning" is not the primary axis - *every* value owns its storage (a stack value's
+bytes are reclaimed for free when its frame pops; a heap block needs an explicit
+release).  The axis that actually matters is **affine-ness**: is a value *copied*,
+or *moved-and-consumed*?  Affine-ness used to be welded to heap ownership (`own *T`
+and heap-owning-by-value were the only move-only, use-after-move-checked types); a
+linear *stack* resource - a file-descriptor wrapper, a lock guard, a one-shot
+token - then could not be expressed without heap-allocating it.  `Move` unwelds it.
+
+**`Move` - the affine marker.**  A value type that `has Move` is *move-only*:
+`b = a` moves (consuming `a`; a later use of `a` is a compile error), never
+copies.  `Move` is orthogonal to cleanup - a `has Move` type with no `Drop` is a
+pure linear *token* (an fd handle, a lock guard, a one-shot capability): move-only,
+nothing to release.  Marking a type `Move` only *tightens* the rules (it removes
+copying), so it is sound by construction - it can never create a use-after-free,
+only reject a copy.  That is what makes it safe to expose to users, unlike a "this
+is a borrow" assertion (which would *redirect* the escape analysis and can be wrong).
+
+**`Drop` implies `Move`.**  A destructor is sound only on an affine carrier: a
+copyable value with a destructor double-runs it on every copy (the C++ "rule of
+three" double-free).  So a `has Drop` type is automatically affine - `has Drop`
+implies `has Move`, with no separate marker needed (Rust's rule that a `Copy` type
+may not implement `Drop`, made automatic).  A `Move`/`Drop` value type's `drop`
+runs at **scope exit** - the stack destructor - exactly once, at the *final*
+owner: a move consumes the source, so a moved-from value is never dropped.  This
+holds uniformly across every move site (`b = a`, a call argument, a return, a
+struct/array field, a `Vec` element, `own *T p = alloc a`, reassignment), and it
+*composes*: a struct or `Vec` that contains a `Move` value is itself affine and
+cascades the drop.  ("Drop implies Move" is a sema rule keyed on the marker attrs,
+not a supertrait declaration - Maka has no `attr X: Y` inheritance syntax.)
+
+`own *T` is then simply the built-in instance of `Move` + heap management: its
+affine-ness and auto-null-on-move ARE the `Move` semantics; its block-free is the
+heap half.  A bare `has Drop`/`has Move` value is drop-glued at scope exit but
+never `free`d (the heap-block free stays gated on `own *`/`heap` pointers).
+Splitting the two axes gives heap-free linear resources and stack destructors
+without importing a borrow checker - safety extends by *composing* visible
+sigil-typed parts plus this one sound, tightening marker, never by asserting
+compiler internals onto an arbitrary type.
+
+```maka
+data Fd { int fd; }
+Fd has Drop { unit drop(&mut Fd self) { /* release self.fd */ } }
+Fd a = Fd { fd = 3 };   // ok: affine stack value; `drop` runs at scope exit
+Fd b = a;               // moves a into b; `a` is consumed (use-after-move is an error)
+                        // scope exit: exactly ONE drop, for `b`
+
+data Token { int id; } // a pure linear token: move-only, no cleanup
+Token has Move {}
+```
 
 ### 6.5 `unsafe { }`
 
@@ -2508,5 +2563,4 @@ These are real limitations the implementation is honest about:
   dead code (an uncalled generic), and eager abstract checking is explicitly not
   wanted (it would reject valid uses like `v + 1` above whenever the slot resolves
   to a number).
-
 These are tractable to fix; they are not architectural blockers.

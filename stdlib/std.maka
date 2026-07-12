@@ -34,6 +34,16 @@ pub enum Result<T, E> {
 // e.g. Pool, can `has Drop`.)
 pub attr Drop { unit drop(&mut _ self); }
 
+// `Move` — the marker attr that makes a VALUE type affine (move-only): `b = a`
+// moves and consumes `a` (a later use is a compile error), never copies.  It is
+// the linear axis, orthogonal to cleanup: a `has Move` type with no `Drop` is a
+// pure linear token (fd handle, guard, one-shot capability), move-only with
+// nothing to release.  `has Drop` IMPLIES `Move` (a destructor is sound only on
+// an affine carrier - a copyable value with a `drop` would double-run it), and a
+// `Move`+`Drop` value type runs its `drop` at scope exit (the stack destructor).
+// SPEC 6.4c.
+pub attr Move {}
+
 // `Shareable` — the marker attr for a type that may cross a thread boundary
 // (`share x`, a by-value capture into a real thread).  Opt-in by impl, NOT by
 // magic name: the opaque sync handles below declare `has Shareable` because their

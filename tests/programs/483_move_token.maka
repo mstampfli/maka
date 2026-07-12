@@ -1,0 +1,10 @@
+// A `has Move` type with no `Drop` is a pure linear token: move-only, nothing to
+// release.  Moving it consumes the source; the value itself just copies bytes.
+import std.{ Move };
+data Token { int id; }
+Token has Move {}
+unit main() {
+  Token t = Token { id = 42 };
+  Token u = t;        // move t -> u (t consumed)
+  log(u.id);          // 42
+}

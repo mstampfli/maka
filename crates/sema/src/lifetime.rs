@@ -938,7 +938,17 @@ impl<'a> Analyzer<'a> {
 
                 // Move semantics: binding a bare owning Local (`own *T`/`heap T`
                 // or an owning VALUE like String/Vec/owning struct) moves it.
+                // `own *T p = alloc <place>` moves the affine value <place> INTO the
+                // heap, so peel the `HeapAlloc` to reach the source place - else a
+                // `Move` value with no zeroable owning field (e.g. `Fd { int fd }`)
+                // is bit-copied and double-drops (once via the heap, once at scope
+                // exit).  An owning value with a zeroable field was already covered
+                // by the field auto-null; the whole-value move subsumes it.
                 let _ = li_ty;
+                let init = match &init.kind {
+                    HExprKind::HeapAlloc(inner) => inner.as_ref(),
+                    _ => init,
+                };
                 if let HExprKind::Local(src) = init.kind {
                     if ty_owns_heap(self.sym, &init.ty) {
                         let sp = *span;
@@ -2965,6 +2975,15 @@ pub(crate) fn is_own_ptr_granular(sym: &SymTab, ty: &HType) -> bool {
     } else { false }
 }
 
+/// Is this nominal type marked affine (move-only) by an explicit `has Move` or by
+/// `has Drop` (which implies `Move`)?  SPEC 6.4c: such a value moves rather than
+/// copies and drops at scope exit, so the move-checker and drop pass must treat it
+/// as owning even when it holds no heap by value.
+pub(crate) fn nominal_affine_marked(sym: &SymTab, name: &str) -> bool {
+    sym.trait_impls.get("Drop").map_or(false, |s| s.contains(name))
+        || sym.trait_impls.get("Move").map_or(false, |s| s.contains(name))
+}
+
 pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
     fn go(sym: &SymTab, ty: &HType, seen: &mut Vec<u64>) -> bool {
         match ty {
@@ -2974,10 +2993,14 @@ pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
             // `Rust<T>` owns a boxed Rust value (dropped via a generated shim).
             HType::RustOpaque(_) => true,
             HType::Struct(id) => {
-                // NOTE: `has Drop` does NOT make a value type owning/move-only.
-                // Only `own *T`/`own &T` (or a struct containing one) move; a
-                // type's `Drop` runs via the `own *T` cleanup (pointee), so put
-                // Drop on the resource and hold it as `own *T`.
+                let si = sym.struct_info(*id);
+                // A `has Move`/`has Drop` type is affine (move-only) and drops at
+                // scope exit (SPEC 6.4c): `Move` is the linear marker, `Drop`
+                // implies it (a destructor is sound only on an affine carrier).
+                // Treat it as owning so the move-checker and drop pass engage - the
+                // heap-block free is separately gated on `own *`/`heap` pointers, so
+                // a bare stack value is drop-glued but never `free`d.
+                if nominal_affine_marked(sym, &si.name) { return true; }
                 let k = id.0 as u64;
                 if seen.contains(&k) { return false; }
                 seen.push(k);
@@ -2986,15 +3009,17 @@ pub(crate) fn ty_owns_heap(sym: &SymTab, ty: &HType) -> bool {
                 // drops.  (A bare `FnPtr` local is not owning here - those are
                 // handled by the dedicated closure-drop pass, so counting them
                 // would double-free.)
-                let r = sym.struct_info(*id).fields.iter().any(|fi| matches!(fi.ty, HType::FnPtr { .. }) || go(sym, &fi.ty, seen));
+                let r = si.fields.iter().any(|fi| matches!(fi.ty, HType::FnPtr { .. }) || go(sym, &fi.ty, seen));
                 seen.pop();
                 r
             }
             HType::Enum(id) => {
+                let ei = sym.enum_info(*id);
+                if nominal_affine_marked(sym, &ei.name) { return true; }
                 let k = (id.0 as u64) | (1u64 << 32);
                 if seen.contains(&k) { return false; }
                 seen.push(k);
-                let r = sym.enum_info(*id).variants.iter().any(|v| v.fields.iter().any(|fi| matches!(fi.ty, HType::FnPtr { .. }) || go(sym, &fi.ty, seen)));
+                let r = ei.variants.iter().any(|v| v.fields.iter().any(|fi| matches!(fi.ty, HType::FnPtr { .. }) || go(sym, &fi.ty, seen)));
                 seen.pop();
                 r
             }
@@ -3095,7 +3120,17 @@ fn fill_heap_drops(sym: &SymTab, f: &mut HFunc) {
             HExprKind::CheckedCast { expr, .. } | HExprKind::DropWrite(expr) => moved_locals_in_expr(sym, expr, out),
             HExprKind::ArrayToSlice { base, .. } => moved_locals_in_expr(sym, base, out),
             HExprKind::DerefRef(inner) => moved_locals_in_expr(sym, inner, out),
-            HExprKind::HeapAlloc(inner) => moved_locals_in_expr(sym, inner, out),
+            HExprKind::HeapAlloc(inner) => {
+                // `alloc <owning local>` moves the local INTO the heap block: a
+                // bit-copy of an affine value creates a second owner, so the source
+                // must not also drop at scope exit (double free).  Mirror the Call
+                // arm.  A `Move` value with no zeroable owning field has no field to
+                // auto-null, so this whole-value move is the only thing saving it.
+                if ty_owns_heap(sym, &inner.ty) {
+                    if let HExprKind::Local(id) = inner.kind { out.insert(id); }
+                }
+                moved_locals_in_expr(sym, inner, out);
+            }
             HExprKind::Free(inner, _) => moved_locals_in_expr(sym, inner, out),
             HExprKind::CallIndirect { callee, args } => {
                 moved_locals_in_expr(sym, callee, out);

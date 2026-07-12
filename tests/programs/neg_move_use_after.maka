@@ -1,0 +1,9 @@
+// A `has Move` value is affine: using it after a move is a use-after-move error.
+import std.{ Move };
+data Token { int id; }
+Token has Move {}
+unit main() {
+  Token t = Token { id = 1 };
+  Token u = t;        // move
+  log(t.id);          // rejected: use of moved value `t`
+}

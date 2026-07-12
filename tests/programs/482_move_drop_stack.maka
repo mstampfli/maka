@@ -1,0 +1,13 @@
+// SPEC 6.4c: a `has Drop` value type is affine (move-only) and its `drop` runs at
+// scope exit (the stack destructor) with NO heap.  A move consumes the source, so
+// the drop fires exactly once - at the final owner's scope exit.
+import std.{ Drop };
+data Fd { int fd; }
+Fd has Drop { unit drop(&mut Fd self) { log(self.fd); } }
+unit main() {
+  { Fd a = Fd { fd = 10 }; log(1); }   // a drops at block exit -> 10
+  Fd b = Fd { fd = 20 };
+  Fd c = b;                            // move b -> c (b consumed, no double drop)
+  log(c.fd);                           // 20
+  own *Fd p = alloc Fd { fd = 30 };    // heap Drop still fires via own* cleanup -> 30
+}                                      // c drops -> 20 ; p drops -> 30

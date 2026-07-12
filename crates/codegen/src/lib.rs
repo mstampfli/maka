@@ -5772,6 +5772,14 @@ void __maka_pool_free(maka_unit* poolv) {
         self.sym.trait_impls.get("Drop").is_some_and(|s| s.contains(name))
     }
 
+    /// A `has Move` type is affine (move-only) and drop-tracked at scope exit even
+    /// with no destructor (SPEC 6.4c).  It needs drop glue too - empty for a pure
+    /// token, or the field-free glue if it also owns heap - so the lifetime pass's
+    /// scope-exit drop resolves to a real (possibly no-op) function.
+    fn type_impls_move(&self, name: &str) -> bool {
+        self.sym.trait_impls.get("Move").is_some_and(|s| s.contains(name))
+    }
+
     /// The C name of `T`'s `Drop::drop` method, if `T has Drop`.  Looked up from
     /// the `has Drop` impl record keyed by the receiver type name.
     fn drop_method_cname(&self, type_name: &str) -> Option<String> {
@@ -5819,10 +5827,10 @@ void __maka_pool_free(maka_unit* poolv) {
         // type inherit ownership through the normal field propagation below.
         for s in &structs {
             if !s.type_params.is_empty() { continue; }
-            if self.type_impls_drop(&s.name) { self.drop_owns.insert(s.name.clone()); }
+            if self.type_impls_drop(&s.name) || self.type_impls_move(&s.name) { self.drop_owns.insert(s.name.clone()); }
         }
         for e in &enums {
-            if self.type_impls_drop(&e.name) { self.drop_owns.insert(e.name.clone()); }
+            if self.type_impls_drop(&e.name) || self.type_impls_move(&e.name) { self.drop_owns.insert(e.name.clone()); }
         }
         loop {
             let mut changed = false;
