@@ -1,0 +1,28 @@
+// The std `Vector<T>`: a growable collection written in PURE Maka - no compiler
+// intrinsic, no `raw`, no `unsafe`.  It owns a runtime-allocated `[*]T` buffer and
+// grows by allocating a bigger one and moving the elements over; the buffer
+// recursively drops OWNING elements, so `Vector<own *T>` is leak/double-free safe.
+// Its API is `has`-methods, so it never collides with names in user code.
+import std.{ Vector, vector, VecOps, Drop };
+data Node { int v; }
+Node has Drop { unit drop(&mut Node self) { log(self.v); } }
+
+unit main() {
+  mut Vector<int> p = vector();
+  mut int i = 0;
+  while (i < 10) { p.push(i * i); i = i + 1; }   // grows 4 -> 8 -> 16
+  log(p.count());     // 10
+  log(p.at(0));       // 0
+  log(p.at(9));       // 81
+  p.set(0, 100);
+  log(p.at(0));       // 100
+  log(p.pop());       // 81
+  log(p.count());     // 9
+  log(p.empty());     // false (0)
+
+  mut Vector<own *Node> v = vector();
+  v.push(alloc Node { v = 11 });
+  v.push(alloc Node { v = 22 });
+  v.push(alloc Node { v = 33 });   // forces a grow
+  log(v.count());     // 3
+}                     // owning elements recursively drop: 11 22 33

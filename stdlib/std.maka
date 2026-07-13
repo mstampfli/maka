@@ -1300,3 +1300,58 @@ pub string json_str_val(*JsonValue v) {
     }
     return "";
 }
+
+// =====================================================================
+// Vector<T> - the growable collection, in PURE Maka
+// =====================================================================
+// No compiler intrinsic, no `raw`, no `unsafe`.  It owns a `[*]T` buffer (allocated
+// at a runtime size via `[zeroed(); n]`) and grows by allocating a BIGGER buffer and
+// MOVING the elements over - each move auto-nulls the old slot, so freeing the old
+// buffer double-frees nothing.  The `[*]T` buffer recursively drops its OWNING
+// elements when the Vector dies, so `Vector<own *T>` is leak- and double-free-safe.
+// The API is `has`-methods (not free functions), so it never collides with names in
+// user code.
+pub data Vector<T> { mut [*]T buf; mut int len; }
+
+// An empty vector (capacity 4).
+pub Vector<T> vector<T>() { return Vector<T> { buf = [zeroed(); 4], len = 0 }; }
+
+pub attr VecOps<T> {
+    unit push (&mut _ self, T x);      // append, growing when full
+    T    pop  (&mut _ self);           // remove + return the last element
+    T    at   (&_ self, int i);        // element at `i`
+    unit set  (&mut _ self, int i, T x);
+    int  count(&_ self);               // number of elements
+    bool empty(&_ self);
+    int  cap  (&_ self);               // allocated slots
+}
+
+pub Vector<T> has VecOps<T> {
+    unit push(&mut Vector<T> self, T x) {
+        if (self.len == (self.buf.len as int)) {
+            int nc = (self.buf.len as int) * 2;
+            mut [*]T nb = [zeroed(); nc];
+            mut int i = 0;
+            while (i < self.len) { nb[i] = self.buf[i]; i = i + 1; }  // move elements
+            self.buf = nb;                                            // old buffer freed
+        }
+        self.buf[self.len] = x;
+        self.len = self.len + 1;
+    }
+    T pop(&mut Vector<T> self) {
+        if (self.len == 0) { panic("pop from an empty Vector"); }
+        self.len = self.len - 1;
+        return self.buf[self.len];
+    }
+    T at(&Vector<T> self, int i) {
+        if (i < 0 || i >= self.len) { panic("Vector index out of bounds"); }
+        return self.buf[i];
+    }
+    unit set(&mut Vector<T> self, int i, T x) {
+        if (i < 0 || i >= self.len) { panic("Vector index out of bounds"); }
+        self.buf[i] = x;
+    }
+    int  count(&Vector<T> self) { return self.len; }
+    bool empty(&Vector<T> self) { return self.len == 0; }
+    int  cap  (&Vector<T> self) { return self.buf.len as int; }
+}
