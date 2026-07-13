@@ -1,0 +1,13 @@
+// SPEC 6.4c: a GENERIC `data W<T> has Drop` fires its destructor at scope exit for
+// each concrete instance - once, respecting move (a moved-from value never drops),
+// and per-instantiation (W<int> and W<bool> each get their own drop).
+import std.{ Drop };
+data W<T> { int x; }
+W<T> has Drop { unit drop(&mut W<T> self) { log(self.x); } }
+unit main() {
+  { W<int> a = W<int> { x = 10 }; log(1); }   // a drops at block exit -> 10
+  W<int> b = W<int> { x = 20 };
+  W<int> c = b;                                // move b -> c (b consumed)
+  W<bool> d = W<bool> { x = 30 };
+  log(2);
+}                                              // c drops (20) and d drops (30); b moved

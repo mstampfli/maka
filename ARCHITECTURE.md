@@ -82,7 +82,10 @@ lexer  <- ast <- parser <- lint
   Affine-ness is decided by `sema/lifetime.rs::nominal_affine_marked` -> `ty_owns_heap`
   (so the existing move-checker and drop pass engage unchanged); the heap-block *free*
   stays gated on `own *`/`heap` pointers, so a bare stack value is drop-glued but never
-  freed.
+  freed.  A GENERIC `data W<T> has Drop` works per instantiation: the generic-destructor
+  pass (`sema/lib.rs`, after monomorphization) instantiates + registers each concrete
+  instance's `drop` (it has no explicit call site), which is what lets `Vec`/`String`
+  be written in pure Maka on the `raw_alloc(n)` buffer primitive.
 - **`sema` and `codegen` agree on "does T satisfy trait X" by construction** - both
   route through the `has`-impl registry helpers (`resolve::type_impls_trait_visible`,
   `underlying_struct_key`, `has_impl_visible`); `if (T has X)`, `where T has X`, and

@@ -530,6 +530,119 @@ pub fn analyze(m: &maka_ast::Module) -> Result<HirModule, Vec<SemaError>> {
         }
     }
 
+    // ===== Generic destructors (SPEC 6.4c) =====
+    // A concrete instance of a generic `data W<T> has Drop` (e.g. `W__int`) must
+    // have its `drop` monomorphized and registered as a concrete `has Drop` impl +
+    // affine type, so it fires at scope exit exactly like a non-generic `has Drop`.
+    // The loop above instantiates methods only from explicit call sites; `drop` is
+    // compiler-injected, so instantiate it here.  Recursive helper resolves nested
+    // generic calls in the drop body and rewrites its placeholder FuncIds.
+    fn inst_generic_fn(
+        sym: &mut SymTab, funcs: &mut Vec<HFunc>, errors: &mut Vec<SemaError>,
+        template_fid: FuncId, args: &[HType],
+    ) -> FuncId {
+        let arg_keys: Vec<String> = args.iter().map(|t| t.key()).collect();
+        let dedup = (template_fid.0, arg_keys.join(","));
+        if let Some(&e) = sym.instantiations.get(&dedup) { return FuncId(e); }
+        let template_sig = sym.func_sig(template_fid).clone();
+        let new_fid = FuncId(sym.sigs.len() as u32);
+        let mut env: std::collections::HashMap<String, HType> = std::collections::HashMap::new();
+        for (tp, t) in template_sig.type_params.iter().zip(args.iter()) { env.insert(tp.clone(), t.clone()); }
+        let new_param_tys: Vec<HType> = template_sig.param_tys.iter()
+            .map(|t| resolve::resolve_assoc_types_in(sym, &t.subst(&env))).collect();
+        let new_ret = resolve::resolve_assoc_types_in(sym, &template_sig.ret.subst(&env));
+        let c_name = format!("{}__{}", template_sig.c_name, arg_keys.join("_"));
+        sym.sigs.push(FuncSig {
+            name: template_sig.name.clone(), param_tys: new_param_tys, param_names: template_sig.param_names.clone(),
+            ret: new_ret, is_extern: false, c_name, trait_name: template_sig.trait_name.clone(),
+            type_params: Vec::new(), is_inline: template_sig.is_inline, is_gate: template_sig.is_gate,
+            is_variadic: template_sig.is_variadic, is_pub: template_sig.is_pub, is_export: false,
+            module_path: template_sig.module_path.clone(), imports: template_sig.imports.clone(),
+            has_imports: template_sig.has_imports.clone(), where_bounds: template_sig.where_bounds.clone(),
+        });
+        sym.instantiations.insert(dedup, new_fid.0);
+        if let Some(f_ast) = sym.ast_funcs.get(&template_fid.0).cloned() {
+            let tn = template_sig.trait_name.clone();
+            let res = { let tc = TypeChecker::new_with_trait(sym, tn.as_deref()).with_subst(env);
+                        tc.check_func_with_id(&f_ast, Some(new_fid)) };
+            match res {
+                Ok((mut hf, reqs2, synth)) => {
+                    for s in synth.structs { sym.structs.push(s); }
+                    for s in synth.sigs { sym.sigs.push(s); }
+                    for fnc in synth.funcs { funcs.push(fnc); }
+                    // Resolve nested generic calls in the drop body, then rewrite its
+                    // placeholder FuncIds (same contract as the main loop's mapping).
+                    let mapping: Vec<u32> = reqs2.iter()
+                        .map(|r| inst_generic_fn(sym, funcs, errors, r.template_fid, &r.args).0).collect();
+                    rewrite_placeholders(&mut hf, &mapping);
+                    funcs.push(hf);
+                }
+                Err(es) => errors.extend(es),
+            }
+        }
+        new_fid
+    }
+    loop {
+        // Concrete generic instances whose template `has Drop` but which have no
+        // concrete Drop impl registered yet.  (A struct materialized by a drop body
+        // is picked up on the next iteration - fixpoint.)
+        let targets: Vec<(usize, String, FuncId, Vec<HType>)> = (0..sym.structs.len()).filter_map(|si| {
+            let s = &sym.structs[si];
+            let template = s.template.clone()?;
+            // Already registered a concrete Drop for this instance?
+            if sym.has_impls.iter().any(|h| h.attr_name == "Drop" && h.type_key == s.name) { return None; }
+            // The generic `W<T> has Drop` impl is keyed by its receiver PATTERN
+            // (`GenericPattern { template_name: "W" }`), not the mangled name.
+            let dfid = sym.has_impls.iter()
+                .find(|h| h.attr_name == "Drop"
+                    && matches!(&h.receiver_pattern, HType::GenericPattern { template_name, .. } if *template_name == template))
+                .and_then(|h| h.func_ids.iter().copied().find(|fid| sym.func_sig(*fid).name == "drop"))?;
+            Some((si, s.name.clone(), dfid, s.template_args.clone()))
+        }).collect();
+        if targets.is_empty() { break; }
+        for (si, sname, dfid, args) in targets {
+            let cfid = inst_generic_fn(&mut sym, &mut funcs, &mut errors, dfid, &args);
+            sym.has_impls.push(HasImpl {
+                attr_name: "Drop".to_string(), type_key: sname.clone(), attr_args: Vec::new(),
+                is_pub: true, module_path: Vec::new(), func_ids: vec![cfid],
+                assoc_type_defs: Vec::new(), receiver_tyvars: Vec::new(),
+                receiver_pattern: HType::Struct(StructId(si as u32)),
+            });
+            sym.trait_impls.entry("Drop".to_string()).or_default().insert(sname);
+        }
+    }
+    // Generic `Move`-only tokens: register each concrete instance of a generic
+    // `has Move` (marker, no method to instantiate) as affine, keyed by the
+    // instance name so `nominal_affine_marked` sees it.
+    for si in 0..sym.structs.len() {
+        let (name, template) = {
+            let s = &sym.structs[si];
+            match &s.template { Some(t) => (s.name.clone(), t.clone()), None => continue }
+        };
+        let has_move = sym.has_impls.iter().any(|h| h.attr_name == "Move"
+            && matches!(&h.receiver_pattern, HType::GenericPattern { template_name, .. } if *template_name == template));
+        if has_move { sym.trait_impls.entry("Move".to_string()).or_default().insert(name); }
+    }
+    // `Drop` implies `Move`: mirror the new Drop instances up their supertrait chain
+    // (Pass-3b closure), so `nominal_affine_marked` (keyed on `trait_impls[Move]`)
+    // treats them as affine + move-only.
+    {
+        let edges: Vec<(String, Vec<String>)> = sym.attrs.iter()
+            .filter(|a| !a.supertraits.is_empty())
+            .map(|a| (a.name.clone(), a.supertraits.clone())).collect();
+        loop {
+            let mut changed = false;
+            for (sub, supers) in &edges {
+                let sub_types = sym.trait_impls.get(sub).cloned().unwrap_or_default();
+                for sup in supers {
+                    let entry = sym.trait_impls.entry(sup.clone()).or_default();
+                    for t in &sub_types { if entry.insert(t.clone()) { changed = true; } }
+                }
+            }
+            if !changed { break; }
+        }
+    }
+
     // Detect recursion in inline functions (forbidden per spec).
     detect_inline_recursion(&sym, &funcs, &mut errors);
     // Validate every `propagate X;` against the *caller's* return type at each InlineCall site.

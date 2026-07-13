@@ -1085,6 +1085,15 @@ data Token { int id; } // a pure linear token: move-only, no cleanup
 Token has Move {}
 ```
 
+**Generic `Drop`/`Move`.**  A GENERIC `data W<T> has Drop` (or `has Move`) works
+per instantiation: every concrete `W<int>` / `W<bool>` is affine and its `drop`
+runs at scope exit, exactly once, respecting move.  The compiler monomorphizes and
+registers each instance's destructor even though `drop` has no explicit call site
+(it is compiler-injected).  This is what lets a growable collection be written in
+pure Maka - a `data Vec<T> { raw *T buf; int len; int cap; }` with a `Drop` that
+frees the buffer, over the `raw_alloc(n)` buffer primitive - rather than being a
+compiler intrinsic.
+
 ### 6.5 `unsafe { }`
 
 `unsafe { ... }` permits exactly seven operations otherwise forbidden:

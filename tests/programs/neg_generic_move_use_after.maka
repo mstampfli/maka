@@ -1,0 +1,6 @@
+// A GENERIC `has Move` token is affine per instantiation: using it after a move
+// is a use-after-move error (SPEC 6.4c, generic-destructor pass).
+import std.{ Move };
+data Tok<T> { int id; }
+Tok<T> has Move {}
+unit main() { Tok<int> a = Tok<int> { id = 1 }; Tok<int> b = a; log(a.id); }

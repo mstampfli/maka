@@ -1430,15 +1430,14 @@ impl SymTab {
                     }
                     if overlapped { continue; }
                     // `Drop`/`Move` may only be implemented on a nominal `data`/
-                    // `enum` type.  On a primitive/pointer/copyable receiver an
-                    // affine marker is meaningless (such a type never joins the
-                    // owning move/drop path), so reject it - wrap it in a named type.
-                    // (A GENERIC `data W<T>` is still rejected today: its Drop would
-                    // not fire at monomorphization - the `W__int` instance is not
-                    // registered as affine.  Allowing it needs generic-Drop firing,
-                    // the gate for pure-Maka generic collections; tracked separately.)
+                    // `enum` type - concrete (`Struct`/`Enum`) or generic
+                    // (`GenericPattern`, e.g. `Vec<T>`).  Each concrete instance of a
+                    // generic Drop type has its `drop` monomorphized + registered by
+                    // the generic-destructor pass (lib.rs, SPEC 6.4c), so it fires at
+                    // scope exit.  On a primitive/pointer/copyable receiver an affine
+                    // marker is meaningless (never joins the owning move/drop path).
                     if (h.attr_name == "Drop" || h.attr_name == "Move")
-                        && !matches!(receiver_pattern, HType::Struct(_) | HType::Enum(_))
+                        && !matches!(receiver_pattern, HType::Struct(_) | HType::Enum(_) | HType::GenericPattern { .. })
                     {
                         errors.push(SemaError {
                             msg: format!(
