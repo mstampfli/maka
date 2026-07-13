@@ -1,0 +1,14 @@
+// `raw_alloc(n)` -> a `raw *T` to a runtime-sized uninitialized buffer
+// (`malloc(n*sizeof(T))`).  The primitive that lets a growable buffer be written
+// in pure Maka: allocate, index under `unsafe`, `free` when done.
+unit main() {
+  int n = 4;
+  unsafe {
+    raw *int p = raw_alloc(n);
+    mut int i = 0;
+    while (i < n) { p![i] = i * 10; i = i + 1; }
+    log(p![0]);   // 0
+    log(p![3]);   // 30
+    free p;
+  }
+}

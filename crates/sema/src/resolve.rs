@@ -1433,6 +1433,10 @@ impl SymTab {
                     // `enum` type.  On a primitive/pointer/copyable receiver an
                     // affine marker is meaningless (such a type never joins the
                     // owning move/drop path), so reject it - wrap it in a named type.
+                    // (A GENERIC `data W<T>` is still rejected today: its Drop would
+                    // not fire at monomorphization - the `W__int` instance is not
+                    // registered as affine.  Allowing it needs generic-Drop firing,
+                    // the gate for pure-Maka generic collections; tracked separately.)
                     if (h.attr_name == "Drop" || h.attr_name == "Move")
                         && !matches!(receiver_pattern, HType::Struct(_) | HType::Enum(_))
                     {

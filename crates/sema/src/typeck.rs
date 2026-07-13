@@ -2443,6 +2443,25 @@ impl<'a> TypeChecker<'a> {
                     }
                 };
             }
+            // Built-in `raw_alloc(n)` -> a `raw *T` to an UNINITIALIZED array of `n`
+            // elements (`malloc(n * sizeof(T))`).  T is inferred from the expected
+            // `raw *T` type (like `zeroed()`).  This is the primitive that lets a
+            // growable buffer (`Vec`) be written in pure Maka: allocate, index under
+            // `unsafe`, grow by allocating a bigger one + copying, `free` the old.
+            // Producing the pointer is safe; observing it (deref/index) needs `unsafe`.
+            if n == "raw_alloc" && args.len() == 1 {
+                let cap = self.check_expr_coerce(&args[0], &HType::Int);
+                return match ret_expected {
+                    Some(ty) if matches!(ty, HType::RawPtr { .. }) => HExpr {
+                        kind: HExprKind::Call { callee: FuncId(u32::MAX - 69), args: vec![cap] },
+                        ty, span: sp,
+                    },
+                    _ => {
+                        self.err("`raw_alloc(n)` needs an expected `raw *T` type (e.g. `raw *int p = raw_alloc(n);`)".to_string(), sp);
+                        HExpr { kind: HExprKind::LitUnit, ty: HType::Unit, span: sp }
+                    }
+                };
+            }
         }
         // Indirect call: `f(args)` where `f` is a local of FnPtr type, or a
         // pointer/heap to a FnPtr (a heap-allocated / escaped closure, whose type

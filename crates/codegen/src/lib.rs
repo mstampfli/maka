@@ -10822,6 +10822,17 @@ void __maka_pool_free(maka_unit* poolv) {
         if callee.0 == u32::MAX - 62 {
             return format!("(({}){{0}})", self.c_type(&e.ty));
         }
+        // `raw_alloc(n)` -> `malloc(n * sizeof(T))` as a `T*` (the return type is
+        // `raw *T`, i.e. `T*`).  Uninitialized; the caller writes elements under
+        // `unsafe`.  The buffer primitive `Vec` is built on in pure Maka.
+        if callee.0 == u32::MAX - 69 {
+            let elem_c = match &e.ty {
+                HType::RawPtr { inner, .. } => self.c_type(inner),
+                _ => "char".to_string(),
+            };
+            let n = self.emit_sub(f, &args[0]);
+            return format!("(({0}*)malloc((size_t)({1}) * sizeof({0})))", elem_c, n);
+        }
         // Built-in `spawn(closure)` — fiber tier.  Compound-stmt expr
         // wraps the closure once so its env malloc happens exactly once
         // (emitting `(s).code, (s).env` would expand and re-allocate).
