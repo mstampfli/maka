@@ -1,0 +1,15 @@
+// `[value; n]` with a RUNTIME `n` allocates a heap `[*]T` buffer of `n` elements.
+// A COMPILE-TIME `n` still gives a fixed `[N]T` array.  This is what makes `[*]T`
+// runtime-allocatable - the primitive a growable collection is built on.
+unit main() {
+  int n = 5;
+  mut [*]int b = [0; n];      // runtime-sized heap buffer
+  log(b.len as int);          // 5
+  b[0] = 10;
+  b[4] = 40;
+  log(b[0]);                  // 10
+  log(b[4]);                  // 40
+
+  [4]int a = [7; 4];          // constant length -> fixed array (unchanged)
+  log(a[3]);                  // 7
+}

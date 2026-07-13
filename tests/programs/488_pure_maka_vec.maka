@@ -1,0 +1,37 @@
+// A growable Vec written in PURE Maka - no `raw`, no `unsafe` - on a
+// runtime-allocatable `[*]T` buffer.  It grows by allocating a bigger buffer and
+// MOVING the elements over (each move auto-nulls the old slot, so freeing the old
+// buffer double-frees nothing), and the `[*]T` buffer recursively drops its OWNING
+// elements when the Vec dies.  Proves a collection needs no compiler intrinsic.
+import std.{ Drop };
+data Node { int v; }
+Node has Drop { unit drop(&mut Node self) { log(self.v); } }
+
+data Vec2<T> { mut [*]T buf; mut int len; }
+Vec2<T> vec2<T>() { return Vec2<T> { buf = [zeroed(); 2], len = 0 }; }
+unit push2<T>(&mut Vec2<T> v, T x) {
+  if (v.len == (v.buf.len as int)) {
+    int nc = (v.buf.len as int) * 2;
+    mut [*]T nb = [zeroed(); nc];
+    mut int i = 0;
+    while (i < v.len) { nb[i] = v.buf[i]; i = i + 1; }   // move elements over
+    v.buf = nb;                                          // repoint; old buffer freed
+  }
+  v.buf[v.len] = x;
+  v.len = v.len + 1;
+}
+T at2<T>(&Vec2<T> v, int i) { return v.buf[i]; }
+
+unit main() {
+  mut Vec2<int> p = vec2();
+  mut int i = 0;
+  while (i < 10) { p.push2(i * i); i = i + 1; }   // grows 2 -> 4 -> 8 -> 16
+  log(p.len);         // 10
+  log(p.at2(9));      // 81
+
+  mut Vec2<own *Node> v = vec2();
+  v.push2(alloc Node { v = 11 });
+  v.push2(alloc Node { v = 22 });
+  v.push2(alloc Node { v = 33 });   // forces a grow
+  log(0);
+}                                    // owning elements recursively drop: 11 22 33

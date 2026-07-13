@@ -10833,6 +10833,20 @@ void __maka_pool_free(maka_unit* poolv) {
             let n = self.emit_sub(f, &args[0]);
             return format!("(({0}*)malloc((size_t)({1}) * sizeof({0})))", elem_c, n);
         }
+        // `[value; n]` with a runtime `n` -> a heap `[*]T` buffer of `n` elements.
+        // Allocate the buffer, then fill each slot with a fresh evaluation of `value`
+        // (sema guarantees it is copyable, so re-evaluating cannot duplicate an owner).
+        if callee.0 == u32::MAX - 71 {
+            let (vec_c, elem_c) = match &e.ty {
+                HType::Vec { elem } => (self.c_type(&e.ty), self.c_type(elem)),
+                _ => ("Vec_int".to_string(), "maka_int".to_string()),
+            };
+            let val = self.emit_sub(f, &args[0]);
+            let n = self.emit_sub(f, &args[1]);
+            return format!(
+                "(__extension__ ({{ maka_int __fn = ({1}); {0} __fv = ({0}){{ .data = ({2}*)malloc((size_t)(__fn < 0 ? 0 : __fn) * sizeof({2})), .len = (__fn < 0 ? 0 : __fn), .cap = (__fn < 0 ? 0 : __fn) }}; for (maka_int __fi = 0; __fi < __fv.len; __fi++) {{ __fv.data[__fi] = ({3}); }} __fv; }}))",
+                vec_c, n, elem_c, val);
+        }
         // Built-in `spawn(closure)` — fiber tier.  Compound-stmt expr
         // wraps the closure once so its env malloc happens exactly once
         // (emitting `(s).code, (s).env` would expand and re-allocate).

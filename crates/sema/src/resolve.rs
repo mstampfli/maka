@@ -2074,6 +2074,7 @@ fn substitute_expr_placeholders_ty(e: &mut ast::Expr, recv: &ast::Type) {
             for (_, fe) in fields.iter_mut() { substitute_expr_placeholders_ty(fe, recv); }
         }
         ArrayLit { elems, .. } => for el in elems { substitute_expr_placeholders_ty(el, recv); },
+        VecFill { value, len, .. } => { substitute_expr_placeholders_ty(value, recv); substitute_expr_placeholders_ty(len, recv); }
         Match { scrutinee, arms, .. } => {
             substitute_expr_placeholders_ty(scrutinee, recv);
             for a in arms {
@@ -2195,6 +2196,7 @@ fn substitute_expr_placeholders(e: &mut ast::Expr, impl_ty: &str) {
             for (_, fe) in fields.iter_mut() { substitute_expr_placeholders(fe, impl_ty); }
         }
         ArrayLit { elems, .. } => for el in elems { substitute_expr_placeholders(el, impl_ty); }
+        VecFill { value, len, .. } => { substitute_expr_placeholders(value, impl_ty); substitute_expr_placeholders(len, impl_ty); }
         Match { scrutinee, arms, .. } => {
             substitute_expr_placeholders(scrutinee, impl_ty);
             for a in arms {

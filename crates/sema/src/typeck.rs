@@ -1036,6 +1036,40 @@ impl<'a> TypeChecker<'a> {
             ast::Expr::CheckedCast { expr, ty, span } => self.check_cast(expr, ty, true, *span),
             ast::Expr::Struct { ty, fields, span } => self.check_struct_lit(ty.as_deref(), fields, expected, *span),
             ast::Expr::ArrayLit { elems, span } => self.check_array_lit(elems, expected, *span),
+            // `[value; n]` with a RUNTIME `n` -> a heap `[*]T` buffer of `n` elements.
+            // Lowered to a builtin call so no new HIR node is needed.  The value is
+            // re-evaluated per element, so it must be COPYABLE: an owning value would
+            // be duplicated `n` times (n owners of one allocation -> double free).
+            ast::Expr::VecFill { value, len, span } => {
+                let elem_expected = match expected {
+                    Some(HType::Vec { elem }) => Some((**elem).clone()),
+                    _ => None,
+                };
+                let v = match &elem_expected {
+                    Some(t) => self.check_expr_coerce(value, t),
+                    None => self.check_expr(value, None),
+                };
+                let n = self.check_expr_coerce(len, &HType::Int);
+                // The value is re-evaluated per element, so a REAL owner would be
+                // duplicated into `n` owners of one allocation (double free).  A ZERO
+                // value is exempt: `zeroed()` / `null` for an owning slot is just
+                // `null`, and `n` nulls own nothing (each drops as `free(NULL)`).
+                // That is what lets a buffer of OWNING elements be allocated empty.
+                let is_zero_fill = matches!(&v.kind,
+                    HExprKind::Call { callee, .. } if callee.0 == u32::MAX - 62)
+                    || matches!(&v.kind, HExprKind::LitNull);
+                if crate::lifetime::ty_owns_heap(self.sym, &v.ty) && !is_zero_fill {
+                    self.err(
+                        "a runtime fill-literal `[value; n]` re-evaluates `value` for each element, \
+                         so an OWNING value would be duplicated into `n` owners of one allocation. \
+                         Fill with `zeroed()` (or `null`) and assign the elements afterwards.".to_string(), *span);
+                }
+                let ty = HType::Vec { elem: Box::new(v.ty.clone()) };
+                HExpr {
+                    kind: HExprKind::Call { callee: FuncId(u32::MAX - 71), args: vec![v, n] },
+                    ty, span: *span,
+                }
+            }
             ast::Expr::VariantCtor { enum_name, variant, fields, span } => {
                 self.check_variant_ctor(enum_name, variant, fields, expected, *span)
             }
@@ -6781,6 +6815,7 @@ fn rw_expr(e: &mut ast::Expr, c: &FieldCtx) {
         CheckedCast { expr, .. } => rw_expr(expr, c),
         Struct { fields, .. } => { for (_, fe) in fields { rw_expr(fe, c); } }
         ArrayLit { elems, .. } => { for el in elems { rw_expr(el, c); } }
+        VecFill { value, len, .. } => { rw_expr(value, c); rw_expr(len, c); }
         HeapAlloc { value, .. } => rw_expr(value, c),
         Free { value, .. } => rw_expr(value, c),
         VariantCtor { fields, .. } => { for (_, fe) in fields { rw_expr(fe, c); } }

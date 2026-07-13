@@ -257,6 +257,11 @@ pub enum Expr {
     Struct { ty: Option<String>, fields: Vec<(String, Expr)>, span: Span },
     /// array literal `[e, e, ...]`
     ArrayLit { elems: Vec<Expr>, span: Span },
+    /// `[value; n]` with a RUNTIME length -> a heap `[*]T` buffer of `n` elements,
+    /// each an independent evaluation of `value` (a constant length instead gives a
+    /// fixed `[N]T` array, lowered to `ArrayLit`).  This is how a `[*]T` is
+    /// allocated at a runtime size - the primitive a growable collection needs.
+    VecFill { value: Box<Expr>, len: Box<Expr>, span: Span },
     /// `heap value` — allocate `value` on the heap and produce a `*T` pointer.
     HeapAlloc { value: Box<Expr>, span: Span },
     /// `free value` — deallocate a `raw *T`.  Sema requires the arg to be
@@ -337,6 +342,7 @@ impl Expr {
             | Expr::CheckedCast { span: s, .. }
             | Expr::Struct { span: s, .. }
             | Expr::ArrayLit { span: s, .. }
+            | Expr::VecFill { span: s, .. }
             | Expr::HeapAlloc { span: s, .. }
             | Expr::Free { span: s, .. }
             | Expr::VariantCtor { span: s, .. }

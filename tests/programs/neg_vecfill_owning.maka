@@ -1,0 +1,9 @@
+// A runtime fill-literal re-evaluates its value per element, so an OWNING value
+// would become `n` owners of one allocation (double free).  Rejected.
+data Node { int v; }
+unit main() {
+  int n = 3;
+  own *Node p = alloc Node { v = 1 };
+  mut [*]own *Node b = [p; n];   // rejected: owning fill value
+  log(0);
+}

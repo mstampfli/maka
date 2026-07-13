@@ -2219,22 +2219,30 @@ impl Parser {
                 let mut elems = Vec::new();
                 if !self.at(&TokKind::RBracket) {
                     let first = self.parse_expr()?;
-                    // `[expr; N]` fill-literal: parse the count and replicate
-                    // the first element N times.  Count must be a compile-time
-                    // integer (literal or constexpr).
+                    // `[expr; N]` fill-literal.  A COMPILE-TIME constant length
+                    // replicates the element N times into a fixed `[N]T` array.  A
+                    // RUNTIME length instead allocates a heap `[*]T` buffer of that
+                    // many elements (each an independent evaluation of `expr`) - this
+                    // is how a `[*]T` is allocated at a runtime size.
                     if self.eat(&TokKind::Semicolon) {
                         let count_span = self.peek_span();
-                        let count = self.try_fold_int().ok_or_else(|| ParseError {
-                            msg: "expected a constant integer length after `;` in fill-literal".into(),
-                            span: count_span,
-                        })?;
-                        self.expect(&TokKind::RBracket, "`]`")?;
-                        if count < 0 {
-                            return Err(ParseError { msg: "array fill-length must be non-negative".into(), span: count_span });
+                        let save = self.pos;
+                        if let Some(count) = self.try_fold_int() {
+                            if self.at(&TokKind::RBracket) {
+                                self.bump(); // `]`
+                                if count < 0 {
+                                    return Err(ParseError { msg: "array fill-length must be non-negative".into(), span: count_span });
+                                }
+                                let mut filled = Vec::with_capacity(count as usize);
+                                for _ in 0..count { filled.push(first.clone()); }
+                                return Ok(Expr::ArrayLit { elems: filled, span });
+                            }
                         }
-                        let mut filled = Vec::with_capacity(count as usize);
-                        for _ in 0..count { filled.push(first.clone()); }
-                        return Ok(Expr::ArrayLit { elems: filled, span });
+                        // Not a compile-time constant: a runtime-sized `[*]T` buffer.
+                        self.pos = save;
+                        let len = self.parse_expr()?;
+                        self.expect(&TokKind::RBracket, "`]`")?;
+                        return Ok(Expr::VecFill { value: Box::new(first), len: Box::new(len), span });
                     }
                     elems.push(first);
                     while self.eat(&TokKind::Comma) {
