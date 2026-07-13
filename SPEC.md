@@ -862,6 +862,13 @@ directly named the field, so you own what you left behind" rule.
 Returning an owning value moves it to the caller.  Passing it as a `own *T` /
 `own &T` argument moves it into the callee.
 
+**Affine value types (`has Move` / `has Drop`).**  Beyond the owning-heap types
+above, a plain VALUE type marked `has Move` - or `has Drop`, which implies it via
+the prelude supertrait `attr Drop: Move` - is also affine: it *moves* rather than
+copies and **poisons** the source on any move, even though it owns no heap.  This
+is the linear stack-value case (an fd handle, a lock guard, a one-shot token) and
+the source of the stack destructor.  See §6.4c for the full treatment.
+
 **Implicit reborrow.** Inside a function with `&mut T` (or `&T`) parameter
 `g`, writing `&mut g` (or `&g`) at a call site that wants `&mut T` would
 yield `&mut &mut T` - one borrow layer too many.  The compiler peels the

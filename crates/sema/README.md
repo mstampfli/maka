@@ -13,11 +13,14 @@ AST -> typed HIR. The semantic core: every correctness rule lives here.
     recording generic `InstantiationReq`s.
   - `lib.rs` - the monomorphization fixpoint: drain instantiation requests, re-check
     each concrete instantiation, rewrite placeholder `FuncId`s.
-  - `lifetime.rs` - move/auto-null/poison, `*T` non-null proof, borrow-escape, drop
-    elaboration.
+  - `lifetime.rs` - move/auto-null/poison (including affine `has Move`/`has Drop`
+    VALUE types + their scope-exit stack destructors, via `nominal_affine_marked` ->
+    `ty_owns_heap`), `*T` non-null proof, borrow-escape, drop elaboration.
 - **DAG:** depends on `lexer`, `ast`. Depended on by `codegen`, `driver`, `lsp`.
 - **Never:** emit C, or let a generic escape - the HIR handed downstream is fully
   concrete (no `HType::TyVar`/`GenericPattern` in a real instantiation). Generic
   bodies are checked ONLY per concrete instantiation, never on the abstract template.
 - **Invariant home:** the "no implicit heap", "deref needs proof", "own\* auto-nulls /
-  own& poisons", and "T-satisfies-X" rules are all enforced here (see ARCHITECTURE.md).
+  own& poisons / `Move`-`Drop` value types are affine", and "T-satisfies-X (incl.
+  `attr Sub: Super` supertraits, via `attr_has_supertrait`)" rules are all enforced
+  here (see ARCHITECTURE.md).

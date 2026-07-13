@@ -73,13 +73,22 @@ lexer  <- ast <- parser <- lint
   check exists. Enforced by the lifetime pass (`sema/lifetime.rs`); the deref is
   simply not emitted without proof.
 - **Ownership is move-based; `own *T` auto-nulls on move, `own &T` and owning values
-  poison.** Enforced at the single choke point `sema/lifetime.rs::mark_moved`
-  (SPEC 6.1). The runtime `= NULL` for an auto-null is emitted at the move site by
+  poison.** Moves funnel through the single choke point `sema/lifetime.rs::mark_moved`
+  (SPEC 6.1); the runtime `= NULL` for an auto-null is emitted at the move site by
   `codegen`.
+- **A `has Move` / `has Drop` VALUE type is affine too** (move-only, use-after-move
+  is an error), and its `drop` runs at scope exit - the stack destructor, no heap
+  (SPEC 6.4c). `has Drop` implies `Move` via the prelude supertrait `attr Drop: Move`.
+  Affine-ness is decided by `sema/lifetime.rs::nominal_affine_marked` -> `ty_owns_heap`
+  (so the existing move-checker and drop pass engage unchanged); the heap-block *free*
+  stays gated on `own *`/`heap` pointers, so a bare stack value is drop-glued but never
+  freed.
 - **`sema` and `codegen` agree on "does T satisfy trait X" by construction** - both
   route through the `has`-impl registry helpers (`resolve::type_impls_trait_visible`,
-  `underlying_struct_key`, `has_impl_visible`); `if (T has X)` and `where T has X`
-  use the same predicate.
+  `underlying_struct_key`, `has_impl_visible`); `if (T has X)`, `where T has X`, and
+  generic bounds use the same predicate. Supertraits (`attr Sub: Super`) are honored by
+  all of them via `resolve::attr_has_supertrait` (transitive), plus a Pass-3b closure
+  that mirrors `trait_impls[Sub]` into `trait_impls[Super]`.
 - **Builtins live in a reserved `FuncId` range** (`u32::MAX - N`, ~1024 slots) and
   generic-instantiation placeholders below `PLACEHOLDER_FID_BASE` (both in
   `sema/lib.rs`); codegen dispatches builtins via `is_builtin_sentinel`. Never mint a
