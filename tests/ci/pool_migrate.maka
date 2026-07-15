@@ -2,8 +2,8 @@
 // records its OS thread (pthread_self) before and after a sleep-park; under a
 // shared scheduler it resumes on a DIFFERENT worker, so at least one fiber
 // sees before != after -> "MIGRATED".  Also exercises the shared reactor +
-// clean shutdown.  int64_t (not long) so the return type matches maka `int`
-// on LLP64 Windows too.
+// clean shutdown.  int64_t (not long) so the width is the same on LLP64
+// Windows too, and the extern declares i64 to match it exactly.
 import std.{ Pool, pool, pool_shutdown, Atomic, atomic_new, atomic_get, atomic_add, atomic_destroy, WaitGroup, wg_new, wg_add, wg_done, wg_wait, wg_destroy };
 import std.sleep_ms;
 cblock "
@@ -12,7 +12,7 @@ cblock "
     #include <stdint.h>
     int64_t __mk_tid(void) { pthread_t s = pthread_self(); int64_t r = 0; memcpy(&r, &s, sizeof(s) < sizeof(r) ? sizeof(s) : sizeof(r)); return r; }
 ";
-extern "__mk_tid" int mk_tid();
+extern "__mk_tid" i64 mk_tid();
 unit main() {
     own *Pool p = pool(4);
     WaitGroup wg = wg_new();
