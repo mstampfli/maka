@@ -1,5 +1,11 @@
 # Maka
 
+> [!WARNING]
+> ## Maka is not fully functional.
+>
+> It has numerous known bugs. Programs that should compile may not, and generated code may be
+> wrong. Use it to explore the language design, not for anything that has to work.
+
 A systems language with explicit ownership, structural traits via `attr`/`has`,
 and inline functions that can propagate errors through the caller's frame.
 Compiles to portable C.
